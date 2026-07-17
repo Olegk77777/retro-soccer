@@ -1,0 +1,60 @@
+{
+  "presets": [
+    {
+      "id": "efir98",
+      "name": "Эфир-98",
+      "comment": "Обычная антенна, тёплый ламповый эфир",
+      "curvature": 0.11,
+      "scanline": 0.32,
+      "noise": 0.055,
+      "rgbShift": 0.0016,
+      "saturation": 1.0,
+      "brightness": 1.05,
+      "vignette": 0.4,
+      "jitter": 0.0,
+      "tint": [1.04, 1.0, 0.93]
+    },
+    {
+      "id": "vhs",
+      "name": "VHS-запись",
+      "comment": "Кассета, записанная с эфира: шум, срывы строк, блёклый цвет",
+      "curvature": 0.13,
+      "scanline": 0.22,
+      "noise": 0.16,
+      "rgbShift": 0.0032,
+      "saturation": 0.82,
+      "brightness": 1.0,
+      "vignette": 0.45,
+      "jitter": 0.9,
+      "tint": [1.02, 0.99, 0.96]
+    },
+    {
+      "id": "sputnik",
+      "name": "Спутник",
+      "comment": "Спутниковый канал: картинка чище, цвета сочнее, холоднее",
+      "curvature": 0.07,
+      "scanline": 0.42,
+      "noise": 0.025,
+      "rgbShift": 0.001,
+      "saturation": 1.18,
+      "brightness": 1.08,
+      "vignette": 0.3,
+      "jitter": 0.0,
+      "tint": [0.96, 1.0, 1.07]
+    },
+    {
+      "id": "rgb",
+      "name": "Чистый RGB",
+      "comment": "Подключение по RGB: почти без артефактов, только лёгкие полосы",
+      "curvature": 0.0,
+      "scanline": 0.1,
+      "noise": 0.012,
+      "rgbShift": 0.0,
+      "saturation": 1.05,
+      "brightness": 1.05,
+      "vignette": 0.15,
+      "jitter": 0.0,
+      "tint": [1.0, 1.0, 1.0]
+    }
+  ]
+}
