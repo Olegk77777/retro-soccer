@@ -1,44 +1,72 @@
 // Единый слой ввода: клавиатура + геймпад + тач (виртуальный стик и кнопки).
 // Классическая раскладка (решение Олега, 17.07.2026), у кнопок два смысла —
 // в атаке и в обороне (оборонительные придут с AI в Фазе 2–3):
-//   стрелки — движение
+//   стрелки — движение (и прицел по створу во время удара)
 //   S — пас            / в защите: сопровождение владеющего мячом
 //   D — удар (держать) / в защите: отбор
 //   A — навес          / в защите: подкат
 //   W — пас на ход
 //   Пробел — зарезервирован: игра в стеночку (будущее)
+// ВСЕ действия — с замахом: держишь кнопку — сила растёт, отпустил — исполнение.
 
 import { CONFIG } from './config.js';
+
+// Кнопка с замахом: копит силу, пока держится; на отпускании отдаёт силу 0..1
+class ChargeAction {
+  constructor(chargeTime) {
+    this.chargeTime = chargeTime;
+    this.held = false;
+    this.t = 0;
+    this._edge = null;
+  }
+
+  feed(dt, heldNow) {
+    if (heldNow) {
+      this.held = true;
+      this.t = Math.min(this.t + dt, this.chargeTime);
+    } else if (this.held) {
+      this._edge = Math.max(0.15, this.t / this.chargeTime); // короткий тап = слабое, но не нулевое
+      this.held = false;
+      this.t = 0;
+    }
+  }
+
+  consume() {
+    const v = this._edge;
+    this._edge = null;
+    return v; // null, если не было; иначе сила 0..1
+  }
+
+  consumePeek() {
+    return this._edge; // посмотреть, не забирая
+  }
+
+  get charge01() {
+    return this.t / this.chargeTime;
+  }
+}
 
 export class Input {
   constructor() {
     this.keys = new Set();
     this.move = { x: 0, z: 0 };
-    this.charge = 0;         // сколько секунд держится кнопка удара
-    this.charging = false;
-    this._passEdge = false;    // S
-    this._throughEdge = false; // W
-    this._crossEdge = false;   // A
-    this._shotEdge = null;     // D: сила удара 0..1 в момент отпускания
-    this._kbShoot = false;
-    this._padShoot = false;
-    this._touchShoot = false;
+
+    this.pass = new ChargeAction(CONFIG.player.chargeTime);     // S / геймпад A
+    this.through = new ChargeAction(CONFIG.player.chargeTime);  // W / геймпад Y
+    this.cross = new ChargeAction(CONFIG.player.chargeTime);    // A / геймпад B
+    this.shot = new ChargeAction(CONFIG.shot.chargeTime);       // D / геймпад X
+
     this._padMove = { x: 0, z: 0 };
-    this._padPassPrev = false;
+    this._pad = { pass: false, shot: false, cross: false, through: false };
+    this._touch = { pass: false, shot: false };
 
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);
-      if (e.code === 'KeyS') this._passEdge = true;
-      if (e.code === 'KeyW') this._throughEdge = true;
-      if (e.code === 'KeyA') this._crossEdge = true;
-      if (e.code === 'KeyD') this._kbShoot = true;
-      // Space — стеночка, появится вместе с партнёрами
     });
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
-      if (e.code === 'KeyD') this._kbShoot = false;
     });
 
     this._initTouch();
@@ -83,13 +111,17 @@ export class Input {
     window.addEventListener('pointerup', endStick);
     window.addEventListener('pointercancel', endStick);
 
-    const pass = document.getElementById('btn-pass');
-    const shoot = document.getElementById('btn-shoot');
-    pass.addEventListener('pointerdown', (e) => { e.stopPropagation(); this._passEdge = true; });
-    const shootUp = (e) => { e.stopPropagation(); this._touchShoot = false; };
-    shoot.addEventListener('pointerdown', (e) => { e.stopPropagation(); this._touchShoot = true; });
-    shoot.addEventListener('pointerup', shootUp);
-    shoot.addEventListener('pointercancel', shootUp);
+    // Тач-кнопки теперь тоже с замахом: держишь — копится сила
+    const bindHold = (id, flag) => {
+      const el = document.getElementById(id);
+      el.addEventListener('pointerdown', (e) => { e.stopPropagation(); this._touch[flag] = true; });
+      const up = (e) => { e.stopPropagation(); this._touch[flag] = false; };
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+      el.addEventListener('pointerleave', up);
+    };
+    bindHold('btn-pass', 'pass');
+    bindHold('btn-shoot', 'shot');
   }
 
   _pollGamepad() {
@@ -97,22 +129,22 @@ export class Input {
     const p = Array.from(pads).find((g) => g && g.connected);
     this._padMove.x = 0;
     this._padMove.z = 0;
-    this._padShoot = false;
+    this._pad.pass = this._pad.shot = this._pad.cross = this._pad.through = false;
     if (!p) return;
     const ax = p.axes[0] || 0;
     const ay = p.axes[1] || 0;
     if (Math.hypot(ax, ay) > 0.22) { this._padMove.x = ax; this._padMove.z = ay; }
-    const passBtn = !!(p.buttons[0] && p.buttons[0].pressed);  // A / крест — пас
-    this._padShoot = !!(p.buttons[2] && p.buttons[2].pressed); // X / квадрат — удар
-    if (passBtn && !this._padPassPrev) this._passEdge = true;
-    this._padPassPrev = passBtn;
+    const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
+    this._pad.pass = btn(0);    // A / крест — пас
+    this._pad.cross = btn(1);   // B / круг — навес
+    this._pad.shot = btn(2);    // X / квадрат — удар
+    this._pad.through = btn(3); // Y / треугольник — пас на ход
   }
 
   update(dt) {
     this._pollGamepad();
 
-    // Складываем все источники движения (экран: вверх = от камеры, то есть -Z).
-    // Клавиатура — только стрелки: WASD заняты действиями.
+    // Движение: стрелки + геймпад + стик (вверх экрана = -Z)
     let x = 0;
     let z = 0;
     if (this.keys.has('ArrowLeft')) x -= 1;
@@ -126,39 +158,31 @@ export class Input {
     this.move.x = x;
     this.move.z = z;
 
-    // Замах удара: держим — копится сила, отпустили — событие с силой 0..1
-    const held = this._kbShoot || this._padShoot || this._touchShoot;
-    if (held) {
-      this.charging = true;
-      this.charge = Math.min(this.charge + dt, CONFIG.player.chargeTime);
-    } else if (this.charging) {
-      this._shotEdge = this.charge / CONFIG.player.chargeTime;
-      this.charging = false;
-      this.charge = 0;
+    // Замахи всех четырёх действий
+    this.pass.feed(dt, this.keys.has('KeyS') || this._pad.pass || this._touch.pass);
+    this.through.feed(dt, this.keys.has('KeyW') || this._pad.through);
+    this.cross.feed(dt, this.keys.has('KeyA') || this._pad.cross);
+    this.shot.feed(dt, this.keys.has('KeyD') || this._pad.shot || this._touch.shot);
+
+    // Прицел удара: пока держится замах, запоминаем последнее направление
+    // стрелок — сработает, даже если стрелку отпустили чуть раньше кнопки
+    if (this.shot.held) {
+      if (Math.hypot(x, z) > 0.3) this.shotAim = { x, z };
+    } else if (this.shot.consumePeek() === null) {
+      this.shotAim = null; // замаха нет и удар не ждёт исполнения — прицел сброшен
     }
   }
 
-  consumePass() {
-    const v = this._passEdge;
-    this._passEdge = false;
-    return v;
+  // Для шкалы силы в UI
+  get charging() {
+    return this.pass.held || this.through.held || this.cross.held || this.shot.held;
   }
 
-  consumeThrough() {
-    const v = this._throughEdge;
-    this._throughEdge = false;
-    return v;
-  }
-
-  consumeCross() {
-    const v = this._crossEdge;
-    this._crossEdge = false;
-    return v;
-  }
-
-  consumeShot() {
-    const v = this._shotEdge;
-    this._shotEdge = null;
-    return v; // null, если удара не было; иначе сила 0..1
+  get chargeLevel() {
+    let m = 0;
+    for (const a of [this.pass, this.through, this.cross, this.shot]) {
+      if (a.held) m = Math.max(m, a.charge01);
+    }
+    return m;
   }
 }

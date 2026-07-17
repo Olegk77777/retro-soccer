@@ -95,10 +95,10 @@ function frame() {
   const event = ball.update(dt);
   if (event === 'goal' && goalTimer <= 0) onGoal();
 
-  // Шкала замаха видна, пока держится кнопка удара
+  // Шкала замаха видна, пока держится любая кнопка действия
   if (input.charging) {
     powerEl.style.display = 'block';
-    powerFill.style.width = `${(input.charge / CONFIG.player.chargeTime) * 100}%`;
+    powerFill.style.width = `${input.chargeLevel * 100}%`;
   } else {
     powerEl.style.display = 'none';
   }
