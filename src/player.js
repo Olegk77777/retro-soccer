@@ -387,11 +387,11 @@ export class Player {
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20);
       } else if (s.type === 'cross') {
-        this.doCross(s.v, ball);
+        this.doCross(s.v, input, ball);
       } else if (s.type === 'shot') {
         this.shoot(s.v, input, ball);
       } else if (s.type === 'swipe') {
-        this.swipeShot(s.v, ball);
+        this.swipeShot(s.v, input, ball);
       }
     }
 
@@ -411,15 +411,101 @@ export class Player {
     }
   }
 
+  // Решатель навеса по-PES (17.07.2026): из флангового коридора чужой половины
+  // навес наводится В ШТРАФНУЮ САМ — бежать по бровке можно не разворачиваясь.
+  // Полоска (charge) выбирает адрес: ближняя штанга → центр → дальняя,
+  // передержка утаскивает за дальнюю. Стрелки в момент исполнения уточняют
+  // точку. Скорость мяча подбирается баллистикой под адрес, подкрутка — от
+  // бьющей ноги (инсвингер/аутсвингер), прицел заранее скомпенсирован под дугу.
+  // Вне коридора вернёт null — там навес остаётся направленным «по взгляду».
+  crossSolution(type, charge, input, ball, extraSpin = 0) {
+    const C = CONFIG.cross;
+    const F = CONFIG.field;
+    const B = CONFIG.ball;
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+
+    // Куда атакуем: по взгляду; смотрим ровно поперёк поля — по своей половине
+    const f = this.facing;
+    const atk = Math.abs(f.x) > 0.12 ? Math.sign(f.x) : Math.sign(pos.x || 1);
+    const goalX = atk * (F.length / 2);
+
+    // Фланговый коридор чужой половины — иначе навод не работает
+    const inZone = Math.abs(pos.z) > (F.width / 2) * C.zone.wideZ &&
+      atk * pos.x > (F.length / 2) * C.zone.depthX;
+    if (!inZone) return null;
+
+    // Адрес по полоске: 0.15 — ближняя штанга, ~0.6 — центр, 1.0 — дальняя.
+    // Передержка (>1) продолжает тащить точку за дальнюю — мяч уйдёт от всех.
+    const A = C.aim;
+    const side = Math.sign(pos.z || 1); // с какого фланга подаём
+    const zoneT = (Math.min(charge, 1) - 0.15) / 0.85;
+    let targetZ = side * A.nearZ - side * (A.nearZ + A.farZ) * Math.max(0, zoneT);
+    if (charge > 1) targetZ -= side * A.overZ * (charge - 1) / 0.3;
+
+    // Стрелки уточняют адрес прямо в мировых осях («куда тяну — туда сдвиг»):
+    // вдоль поля — глубина (к вратарской / оттянуть на 11 м), поперёк — штанги
+    let depth = A.depth - atk * input.move.x * A.aimDepth;
+    depth = Math.max(A.depthMin, Math.min(A.depthMax, depth));
+    targetZ += input.move.z * A.aimSide;
+    const targetX = goalX - atk * depth;
+
+    const dx = targetX - bp.x;
+    const dz = targetZ - bp.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < A.minDist) return null; // сам уже в точке адреса — навод не нужен
+
+    // Баллистика под адрес: угол дуги задан типом, скорость — чтобы долететь.
+    // powerMin/powerMax держат характер типа (прострел не станет свечой);
+    // недолёт низового прострела честен — он доскачет отскоками.
+    const theta = (type.angle * Math.PI) / 180;
+    const g = -B.gravity;
+    let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * C.dragFudge;
+    power = Math.max(type.powerMin, Math.min(type.powerMax, power));
+    // Передержка бьёт СИЛЬНЕЕ баллистики — мяч перелетает всех и уходит
+    // за дальнюю бровку, как в PES (кламп выше не даст честного перелёта)
+    if (charge > 1) power *= 1 + (charge - 1) * C.overPower;
+    const lift = power * Math.tan(theta);
+    const flight = (2 * lift) / g; // время до приземления
+
+    // Дуга от ноги: внутренняя сторона правой режет влево (spin < 0), левой —
+    // вправо. С правого фланга правая нога даёт аутсвингер, с левого — инсвингер.
+    const foot = this.kickFoot(ball);
+    let spin = (foot === 'R' ? -1 : 1) * type.curl + extraSpin;
+
+    // Компенсация прицела: Магнус вертит вектор скорости со скоростью
+    // spin·magnus рад/с — целимся против сноса (curlComp > 0.5, потому что
+    // на излёте скорость падает, а крутка жива — дуга доворачивает сильнее)
+    const comp = -C.curlComp * spin * B.magnus * flight;
+    const ca = Math.cos(comp);
+    const sa = Math.sin(comp);
+    const nx = dx / dist;
+    const nz = dz / dist;
+    const dir = new THREE.Vector3(nx * ca - nz * sa, 0, nx * sa + nz * ca);
+
+    return { dir, power, lift, spin, foot };
+  }
+
   // Навес (A) — три типа по числу тапов, как в PES (ресёрч 08):
   // ×1 — высокая свеча, ×2 — настильный под удар, ×3 — низовой прострел.
-  // Дуга задаётся углом вылета, подкрутка заворачивает мяч к воротам.
-  doCross(ev, ball) {
+  // Во фланговом коридоре — самонаведение в штрафную (crossSolution),
+  // вне его — заброс по взгляду с подкруткой к воротам (лонгбол).
+  doCross(ev, input, ball) {
     const C = CONFIG.cross;
     const F = CONFIG.field;
     const types = [C.high, C.mid, C.low];
     const t = types[Math.min(ev.taps, 3) - 1];
 
+    const sol = this.crossSolution(t, ev.charge, input, ball);
+    if (sol) {
+      ball.strike(sol.dir, sol.power, sol.lift, sol.spin);
+      this.lastKick = { foot: sol.foot, contact: 'inside' };
+      this.kickCooldown = CONFIG.player.kickCooldown;
+      this.playOneShot('kick', 1.2, 0.16); // навес — чуть больше проводки
+      return;
+    }
+
+    // Вне коридора: длинный заброс по направлению взгляда
     const power = t.powerMin + (t.powerMax - t.powerMin) * ev.charge; // >1 = передержка
     const lift = power * Math.tan((t.angle * Math.PI) / 180);
 
@@ -428,37 +514,50 @@ export class Player {
     const goalX = (pos.x >= 0 ? 1 : -1) * (F.length / 2);
     const f = this.facing;
     const side = (-f.z) * (goalX - pos.x) + f.x * (0 - pos.z); // перпендикуляр · направление на ворота
-    const curl = t.curl * Math.sign(side || 1);
+    const curl = t.curl * 0.5 * Math.sign(side || 1);
 
-    // Нога — по корпусу; если инсвинг требует крутку «наружу» от неё — шведка
+    // Нога — по корпусу; если крутка к воротам «наружу» от неё — шведка
     const fw = this.applyFootwork(curl, ball);
     ball.strike(f, power * fw.powerF, lift, curl * fw.curlF);
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.2, 0.16); // навес — чуть больше проводки
+    this.playOneShot('kick', 1.2, 0.16);
   }
 
   // Жест-свайп с тача — «как нарисовал, так и полетело»:
   // направление пальца — куда (независимо от бега), длина — сила,
   // скорость жеста — характер (медленно — свеча, резко — прострел),
   // изгиб траектории пальца — подкрутка. Короткий росчерк — пас на ход.
-  swipeShot(sw, ball) {
+  // Во фланговом коридоре навес-жест НАВОДИТСЯ в штрафную (как с клавиатуры):
+  // рисуешь в сторону ворот — длина выбирает адрес, изгиб докручивает дугу.
+  swipeShot(sw, input, ball) {
     const S = CONFIG.shot;
     const C = CONFIG.cross;
     const P = CONFIG.player;
     const dir = new THREE.Vector3(sw.dir.x, 0, sw.dir.z).normalize();
     const charge = Math.min(sw.power, 1.3);
     const curl = -sw.curl * S.swipeCurl; // палец гнёт вправо — мяч крутится вправо
-    // Изгиб пальца «наружу» от бьющей ноги исполняется шведкой (мощнее/шумнее)
-    const fw = this.applyFootwork(curl, ball);
 
     if (charge < 0.45) {
       // Короткий росчерк — острый пас на ход низом
+      const fw = this.applyFootwork(curl, ball);
       const power = P.through.powerMin + (P.through.powerMax - P.through.powerMin) * (charge / 0.45);
       ball.strike(dir, power * fw.powerF, P.through.lift, curl * 0.5 * fw.curlF);
     } else {
       // Тип дуги по скорости жеста (экранов/сек): медленный — свеча,
       // средний — настильный, резкий — низовой прострел
       const type = sw.speed < 1.2 ? C.high : (sw.speed < 2.6 ? C.mid : C.low);
+      // Самонаведение: жест нарисован в сторону штрафной — берём PES-решение,
+      // изгиб пальца добавляется к природной крутке ноги
+      const sol = this.crossSolution(type, charge, input, ball, curl * 0.5);
+      if (sol && sol.dir.dot(dir) > 0.25) {
+        ball.strike(sol.dir, sol.power, sol.lift, sol.spin);
+        this.lastKick = { foot: sol.foot, contact: 'inside' };
+        this.rot = Math.atan2(sol.dir.x, sol.dir.z);
+        this.kickCooldown = P.kickCooldown;
+        this.playOneShot('kick', 1.3, 0.17);
+        return;
+      }
+      const fw = this.applyFootwork(curl, ball);
       const power = (type.powerMin + (type.powerMax - type.powerMin) * charge) * fw.powerF;
       const lift = power * Math.tan((type.angle * Math.PI) / 180);
       ball.strike(dir, power, lift, curl * fw.curlF);
@@ -471,27 +570,30 @@ export class Player {
 
   // Какой ногой бьём: мяч слева от корпуса — левой, справа — правой,
   // почти по центру — доминантной. Корпусом рулит игрок, ногу выбирает игра.
-  // (Знаки: curl > 0 = мяч заворачивает влево; правая нога внутренней
-  // стороной крутит влево, внешней — вправо; левая — зеркально.)
+  // (Знаки: side > 0 — мяч справа от корпуса. Раньше тут был зеркальный баг:
+  // нога и знак подкрутки были перепутаны ОБА — и компенсировали друг друга.
+  // Починено 17.07.2026 ради честной дуги навеса «от ноги».)
   kickFoot(ball) {
     const P = CONFIG.player;
     const bp = ball.mesh.position;
     const pos = this.group.position;
     const side = this.facing.x * (bp.z - pos.z) - this.facing.z * (bp.x - pos.x);
     if (Math.abs(side) < P.footDeadZone) return P.dominantFoot;
-    return side > 0 ? 'L' : 'R';
+    return side > 0 ? 'R' : 'L';
   }
 
   // Часть стопы под нужную крутку: «внутрь» бьющей ноги — щечка/внутренний
   // подъём (естественно, без штрафов); «наружу» — внешняя сторона стопы
-  // («шведка», стиль Роберто Карлоса): мощнее, но крутка и точность капризнее
+  // («шведка», стиль Роберто Карлоса): мощнее, но крутка и точность капризнее.
+  // Знаки подкрутки: curl > 0 — мяч в полёте уходит ВПРАВО от направления
+  // (см. Магнус в ball.js), правая нога внутренней стороной режет ВЛЕВО.
   applyFootwork(curl, ball) {
     const P = CONFIG.player;
     const foot = this.kickFoot(ball);
     let contact = 'inside';
     let powerF = 1, curlF = 1, noiseF = 1;
     if (Math.abs(curl) > 0.15) {
-      const inside = (foot === 'R') === (curl > 0);
+      const inside = (foot === 'R') === (curl < 0);
       if (!inside) {
         contact = 'outside';
         powerF = P.trivela.power;
@@ -542,7 +644,7 @@ export class Player {
     let curl = 0;
     if (styleName === 'side') {
       const foot = this.kickFoot(ball);
-      curl = (foot === 'R' ? 1 : -1) * st.curl;
+      curl = (foot === 'R' ? -1 : 1) * st.curl; // внутренняя сторона: правая режет влево
       this.lastKick = { foot, contact: 'inside' };
     }
 

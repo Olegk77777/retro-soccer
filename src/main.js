@@ -165,6 +165,6 @@ function frame() {
 
 // Отладка: ?nocrt в адресе — рендер без CRT-прохода
 const NO_CRT = location.search.includes('nocrt');
-window.DBG = { scene, camera, camLook, ball, player, input, crt, renderer, goals };
+window.DBG = { scene, camera, camLook, ball, player, input, crt, renderer, goals, CONFIG };
 
 frame();
