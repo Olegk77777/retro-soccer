@@ -80,6 +80,7 @@ export class Player {
     this.pendingStrike = null; // буфер «удара с хода»: событие ждёт входа мяча в зону ноги
     this.chargeRun = false;  // замах начат на бегу — бег продолжается (удар подъёмом)
     this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
+    this.lastKick = null;    // { foot: 'L'|'R', contact: 'inside'|'outside' } — нога и часть стопы
     this.dribbleTouchCd = 0; // пауза между толчками мяча на спринте
     this.sprintBoost = 0;    // инерция спринта: 1 = полный темп, спадает плавно
     this.kickCooldown = 0;
@@ -291,8 +292,10 @@ export class Player {
           ball.vel.z = this.facing.z * push;
           this.dribbleTouchCd = P.sprintTouchInterval;
         }
-      } else {
-        // Медленное ведение / стойка: мяч липнет у ноги — близкий контроль
+      } else if (!brake) {
+        // Медленное ведение: мяч липнет у ноги — близкий контроль.
+        // В прицельной стойке (brake) НЕ подтягиваем: мяч остаётся там, куда
+        // игрок подставил корпус — от этого зависит бьющая нога
         const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
         ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
         ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
@@ -380,7 +383,9 @@ export class Player {
     const side = (-f.z) * (goalX - pos.x) + f.x * (0 - pos.z); // перпендикуляр · направление на ворота
     const curl = t.curl * Math.sign(side || 1);
 
-    ball.strike(f, power, lift, curl);
+    // Нога — по корпусу; если инсвинг требует крутку «наружу» от неё — шведка
+    const fw = this.applyFootwork(curl, ball);
+    ball.strike(f, power * fw.powerF, lift, curl * fw.curlF);
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.playOneShot('kick', 1.2, 0.16); // навес — чуть больше проводки
   }
@@ -396,23 +401,59 @@ export class Player {
     const dir = new THREE.Vector3(sw.dir.x, 0, sw.dir.z).normalize();
     const charge = Math.min(sw.power, 1.3);
     const curl = -sw.curl * S.swipeCurl; // палец гнёт вправо — мяч крутится вправо
+    // Изгиб пальца «наружу» от бьющей ноги исполняется шведкой (мощнее/шумнее)
+    const fw = this.applyFootwork(curl, ball);
 
     if (charge < 0.45) {
       // Короткий росчерк — острый пас на ход низом
       const power = P.through.powerMin + (P.through.powerMax - P.through.powerMin) * (charge / 0.45);
-      ball.strike(dir, power, P.through.lift, curl * 0.5);
+      ball.strike(dir, power * fw.powerF, P.through.lift, curl * 0.5 * fw.curlF);
     } else {
       // Тип дуги по скорости жеста (экранов/сек): медленный — свеча,
       // средний — настильный, резкий — низовой прострел
       const type = sw.speed < 1.2 ? C.high : (sw.speed < 2.6 ? C.mid : C.low);
-      const power = type.powerMin + (type.powerMax - type.powerMin) * charge;
+      const power = (type.powerMin + (type.powerMax - type.powerMin) * charge) * fw.powerF;
       const lift = power * Math.tan((type.angle * Math.PI) / 180);
-      ball.strike(dir, power, lift, curl);
+      ball.strike(dir, power, lift, curl * fw.curlF);
     }
     // Развернуться в сторону мяча — читаемость
     this.rot = Math.atan2(dir.x, dir.z);
     this.kickCooldown = P.kickCooldown;
     this.playOneShot('kick', 1.3, 0.17);
+  }
+
+  // Какой ногой бьём: мяч слева от корпуса — левой, справа — правой,
+  // почти по центру — доминантной. Корпусом рулит игрок, ногу выбирает игра.
+  // (Знаки: curl > 0 = мяч заворачивает влево; правая нога внутренней
+  // стороной крутит влево, внешней — вправо; левая — зеркально.)
+  kickFoot(ball) {
+    const P = CONFIG.player;
+    const bp = ball.mesh.position;
+    const pos = this.group.position;
+    const side = this.facing.x * (bp.z - pos.z) - this.facing.z * (bp.x - pos.x);
+    if (Math.abs(side) < P.footDeadZone) return P.dominantFoot;
+    return side > 0 ? 'L' : 'R';
+  }
+
+  // Часть стопы под нужную крутку: «внутрь» бьющей ноги — щечка/внутренний
+  // подъём (естественно, без штрафов); «наружу» — внешняя сторона стопы
+  // («шведка», стиль Роберто Карлоса): мощнее, но крутка и точность капризнее
+  applyFootwork(curl, ball) {
+    const P = CONFIG.player;
+    const foot = this.kickFoot(ball);
+    let contact = 'inside';
+    let powerF = 1, curlF = 1, noiseF = 1;
+    if (Math.abs(curl) > 0.15) {
+      const inside = (foot === 'R') === (curl > 0);
+      if (!inside) {
+        contact = 'outside';
+        powerF = P.trivela.power;
+        curlF = P.trivela.curl;
+        noiseF = P.trivela.noise;
+      }
+    }
+    this.lastKick = { foot, contact }; // отладка/баланс; позже — левши и зеркальные анимации
+    return { foot, contact, powerF, curlF, noiseF };
   }
 
   // Выбор типа удара (сам, по контексту — решение Олега, 17.07.2026):
@@ -448,6 +489,16 @@ export class Player {
     const nz = S.noiseZ * st.noiseFactor;
     const ny = S.noiseY * st.noiseFactor;
 
+    // Щечка «вырезает» мяч внутрь бьющей ноги: корпус выбирает ногу,
+    // нога — сторону завитка (правая — влево, левая — вправо).
+    // Подъём и носок бьют без вращения (driven/тычок).
+    let curl = 0;
+    if (styleName === 'side') {
+      const foot = this.kickFoot(ball);
+      curl = (foot === 'R' ? 1 : -1) * st.curl;
+      this.lastKick = { foot, contact: 'inside' };
+    }
+
     const f = this.facing;
     const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
@@ -477,12 +528,12 @@ export class Player {
       let vy = (targetY - bp.y) / t - 0.5 * B.gravity * t;
       vy = Math.max(0, Math.min(S.maxLift, vy));
       ball.vel.set(dir.x * power, vy, dir.z * power);
-      ball.spin = 0;
+      ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
       ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
     } else {
       // Обычный удар по направлению взгляда, высота растёт с замахом
       const lift = (S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * effCharge) * st.liftFactor;
-      ball.strike(this.facing, power, lift);
+      ball.strike(this.facing, power, lift, curl);
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.playOneShot('kick', st.animTs, st.animAt); // анимация в темпе типа удара
