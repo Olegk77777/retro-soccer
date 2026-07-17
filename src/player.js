@@ -82,6 +82,7 @@ export class Player {
     this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
     this.lastKick = null;    // { foot: 'L'|'R', contact: 'inside'|'outside' } — нога и часть стопы
     this.dribbleTouchCd = 0; // пауза между толчками мяча на спринте
+    this.dribbleDir = null;  // курс ведения (обновляется в момент касания)
     this.sprintBoost = 0;    // инерция спринта: 1 = полный темп, спадает плавно
     this.kickCooldown = 0;
     this.bobT = 0;
@@ -208,8 +209,29 @@ export class Player {
     let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     const k = Math.min(1, dt * P.accel);
-    const mvx = brake ? 0 : input.move.x;
-    const mvz = brake ? 0 : input.move.z;
+    let mvx = brake ? 0 : input.move.x;
+    let mvz = brake ? 0 : input.move.z;
+
+    // Смена направления на ведении — «через касание», как в PES (фидбек Олега):
+    // пока мяч впереди дальше dribbleChaseDist, бег примагничивается К МЯЧУ —
+    // игрок сначала догоняет его, а руль применится в момент сближения.
+    // Раньше поворот на толчке бросал мяч катиться дальше, а игрок убегал вбок.
+    const il = Math.hypot(mvx, mvz);
+    if (this.controlling && il > 0.01) {
+      const bp0 = ball.mesh.position;
+      const tbx = bp0.x - pos.x;
+      const tbz = bp0.z - pos.z;
+      const bd = Math.hypot(tbx, tbz);
+      if (bd > P.dribbleChaseDist) {
+        const w = Math.min(1, (bd - P.dribbleChaseDist) / 0.8); // дальше мяч — сильнее тяга
+        const cx = (mvx / il) * (1 - w) + (tbx / bd) * w;
+        const cz = (mvz / il) * (1 - w) + (tbz / bd) * w;
+        const cl = Math.hypot(cx, cz) || 1;
+        mvx = (cx / cl) * il;
+        mvz = (cz / cl) * il;
+      }
+    }
+
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -273,23 +295,33 @@ export class Player {
       bp.y < P.kickMaxBallY;
 
     if (this.dribbleTouchCd > 0) this.dribbleTouchCd -= dt;
+    if (!this.hasBall) this.dribbleDir = null; // мяч потерян — курс ведения сброшен
     if (this.hasBall) {
       if ((sprinting || this.sprintBoost > 0.35) && speed > P.sprintTouchMinSpeed) {
         // Дриблинг на спринте — ТОЛЧКАМИ (фидбек Олега, 17.07.2026):
         // игрок пинает мяч вперёд, тот катится и тормозит (трение в ball.update),
         // игрок догоняет и пинает снова — мяч ритмично то у ног, то на отдалении.
+        // Курс ведения (dribbleDir) обновляется В МОМЕНТ КАСАНИЯ — смена
+        // направления применяется «через касание», как в PES.
+        const dd = this.dribbleDir || { x: this.facing.x, z: this.facing.z };
         const relX = bp.x - pos.x, relZ = bp.z - pos.z;
-        const ahead = relX * this.facing.x + relZ * this.facing.z; // проекция на курс
-        // Боковое удержание: мяч не убегает вбок на поворотах, продольно — свободно
-        const latX = relX - ahead * this.facing.x;
-        const latZ = relZ - ahead * this.facing.z;
+        const ahead = relX * dd.x + relZ * dd.z; // проекция на курс ведения
+        // Боковое удержание: мяч не сползает с линии ведения, продольно — свободно
+        const latX = relX - ahead * dd.x;
+        const latZ = relZ - ahead * dd.z;
         ball.vel.x -= latX * P.sprintTouchLateral;
         ball.vel.z -= latZ * P.sprintTouchLateral;
         // Мяч подкатился к ноге и пауза выдержана — новый толчок
         if (ahead < P.sprintTouchTrigger && this.dribbleTouchCd <= 0) {
+          // Толчок — в сторону ввода (руль применяется у мяча), без ввода — по корпусу
+          let pdx = this.facing.x;
+          let pdz = this.facing.z;
+          const rl = Math.hypot(input.move.x, input.move.z);
+          if (rl > 0.3) { pdx = input.move.x / rl; pdz = input.move.z / rl; }
           const push = speed * P.sprintTouchPush;
-          ball.vel.x = this.facing.x * push;
-          ball.vel.z = this.facing.z * push;
+          ball.vel.x = pdx * push;
+          ball.vel.z = pdz * push;
+          this.dribbleDir = { x: pdx, z: pdz };
           this.dribbleTouchCd = P.sprintTouchInterval;
         }
       } else if (!brake) {
