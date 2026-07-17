@@ -36,7 +36,7 @@
     #goal-flash.show { opacity: 1; }
 
     #preset-btn {
-      position: fixed; bottom: 14px; right: 16px;
+      position: fixed; top: 12px; left: 16px;
       background: rgba(0,0,0,0.55); color: #eee;
       border: 1px solid rgba(255,255,255,0.4);
       font-family: inherit; font-size: 14px; letter-spacing: 1px;
@@ -50,6 +50,38 @@
       pointer-events: none;
       text-shadow: 1px 1px 0 #000;
     }
+
+    /* Виртуальный стик (появляется под пальцем на левой половине экрана) */
+    #stick-base {
+      position: fixed; width: 120px; height: 120px; display: none;
+      border: 2px solid rgba(255,255,255,0.35); border-radius: 50%;
+      background: rgba(0,0,0,0.2); pointer-events: none; z-index: 5;
+    }
+    #stick-knob {
+      position: absolute; left: 34px; top: 34px; width: 48px; height: 48px;
+      border-radius: 50%; background: rgba(255,255,255,0.45);
+    }
+
+    /* Тач-кнопки: видны только на устройствах с пальцем */
+    .tbtn {
+      position: fixed; width: 86px; height: 86px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.45); background: rgba(0,0,0,0.35);
+      color: #fff; font-family: inherit; font-size: 15px; letter-spacing: 1px;
+      display: none; align-items: center; justify-content: center;
+      user-select: none; -webkit-user-select: none; z-index: 5;
+    }
+    .tbtn:active { background: rgba(255,255,255,0.25); }
+    #btn-shoot { right: 22px; bottom: 118px; }
+    #btn-pass  { right: 124px; bottom: 26px; }
+    @media (pointer: coarse) { .tbtn { display: flex; } }
+
+    /* Шкала замаха удара */
+    #power {
+      position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+      width: 180px; height: 10px; display: none;
+      border: 1px solid rgba(255,255,255,0.5); background: rgba(0,0,0,0.5);
+    }
+    #power-fill { height: 100%; width: 0%; background: #e8d44d; }
   </style>
 </head>
 <body>
@@ -57,7 +89,11 @@
   <div id="bug">Ф·98</div>
   <div id="goal-flash">ГОЛ!</div>
   <button id="preset-btn">ТВ: Эфир-98</button>
-  <div id="hint">Тапни по полю — удар по мячу</div>
+  <div id="hint">Бег — WASD/стрелки/стик · пас — X · удар — держи Пробел</div>
+  <div id="stick-base"><div id="stick-knob"></div></div>
+  <div id="btn-pass" class="tbtn">ПАС</div>
+  <div id="btn-shoot" class="tbtn">УДАР</div>
+  <div id="power"><div id="power-fill"></div></div>
 
   <script>
     // Ловушка ошибок: модульные скрипты падают молча, выводим сбой на экран

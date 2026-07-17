@@ -33,9 +33,10 @@ function createPitchTexture() {
   }
 
   // Разметка (белые линии). Размеры — стандарт ФИФА, в метрах × scale.
+  // Линии толще реальных (0.3 м): при сжатии кадра тонкие бьются в пунктир.
   ctx.strokeStyle = '#e8e8e8';
   ctx.fillStyle = '#e8e8e8';
-  ctx.lineWidth = 0.13 * scale;
+  ctx.lineWidth = 0.3 * scale;
 
   const m = (v) => v * scale;
   const cx = w / 2;
@@ -69,8 +70,12 @@ function createPitchTexture() {
   }
 
   const tex = new THREE.CanvasTexture(c);
-  tex.magFilter = THREE.NearestFilter;  // ступенчатые пиксели = PS1
-  tex.minFilter = THREE.NearestFilter;
+  // Вблизи — жёсткие пиксели (PS1), вдали — мипмапы: без них линии
+  // разметки бьются в пунктир и мигают при движении камеры (муар).
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 4;
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
@@ -90,7 +95,8 @@ function createCrowdTexture() {
   }
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; // толпа тоже не должна «кипеть»
+  tex.generateMipmaps = true;
   tex.wrapS = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;

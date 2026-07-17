@@ -52,17 +52,11 @@ export class Ball {
     this.vel.set(0, 0, 0);
   }
 
-  // Удар в сторону точки target (Vector3 на газоне)
-  kick(target) {
-    const B = CONFIG.ball;
-    const dir = target.clone().sub(this.mesh.position);
-    dir.y = 0;
-    const dist = Math.min(dir.length(), 40);
-    dir.normalize();
-    const power = B.kickPower * (0.45 + 0.55 * (dist / 40));
+  // Удар: направление (единичный вектор), сила (м/с) и подъём
+  strike(dir, power, lift) {
     this.vel.x = dir.x * power;
     this.vel.z = dir.z * power;
-    this.vel.y = B.kickLift * (0.3 + 0.7 * (dist / 40));
+    this.vel.y = lift;
   }
 
   update(dt) {
@@ -70,15 +64,20 @@ export class Ball {
     const F = CONFIG.field;
     const p = this.mesh.position;
 
+    // Трение задано «за кадр при 60 fps» — приводим к реальному dt,
+    // иначе на 120-герцовом iPad мяч катился бы вдвое дольше
+    const roll = Math.pow(B.rollFriction, dt * 60);
+    const air = Math.pow(B.airFriction, dt * 60);
+
     // Гравитация в полёте
     if (p.y > B.radius || this.vel.y > 0) {
       this.vel.y += B.gravity * dt;
-      this.vel.x *= B.airFriction;
-      this.vel.z *= B.airFriction;
+      this.vel.x *= air;
+      this.vel.z *= air;
     } else {
       // Качение по газону
-      this.vel.x *= B.rollFriction;
-      this.vel.z *= B.rollFriction;
+      this.vel.x *= roll;
+      this.vel.z *= roll;
     }
 
     p.addScaledVector(this.vel, dt);
