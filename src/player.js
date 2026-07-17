@@ -81,6 +81,7 @@ export class Player {
     this.chargeRun = false;  // замах начат на бегу — бег продолжается (удар подъёмом)
     this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
     this.dribbleTouchCd = 0; // пауза между толчками мяча на спринте
+    this.sprintBoost = 0;    // инерция спринта: 1 = полный темп, спадает плавно
     this.kickCooldown = 0;
     this.bobT = 0;
 
@@ -171,6 +172,7 @@ export class Player {
     this.pendingStrike = null;
     this.chargeRun = false;
     this.dribbleTouchCd = 0;
+    this.sprintBoost = 0;
   }
 
   get facing() {
@@ -197,8 +199,13 @@ export class Player {
 
     // --- Бег: плавный разгон к желаемой скорости (спринт — быстрее) ---
     const sprinting = input.sprint && !brake;
+    // Инерция спринта (фидбек Олега): включается быстро, спадает плавно.
+    // Отпустил ⚡/E — темп ещё живёт ~секунду: можно отпустить спринт
+    // и тут же пробить с лёта на скорости
+    const boostK = sprinting ? Math.min(1, dt * 12) : Math.min(1, dt / P.sprintInertia);
+    this.sprintBoost += ((sprinting ? 1 : 0) - this.sprintBoost) * boostK;
     let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
-    if (sprinting) maxSpeed *= P.sprintFactor;
+    maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     const k = Math.min(1, dt * P.accel);
     const mvx = brake ? 0 : input.move.x;
     const mvz = brake ? 0 : input.move.z;
@@ -221,7 +228,8 @@ export class Player {
       let d = want - this.rot;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
-      const turn = P.turnRate * (sprinting ? P.sprintTurnFactor : 1);
+      // Тяжесть разворотов растёт с инерцией темпа (на выбеге — тоже тяжёлые)
+      const turn = P.turnRate * (1 - (1 - P.sprintTurnFactor) * this.sprintBoost);
       this.rot += d * Math.min(1, turn * dt);
     }
     this.group.rotation.y = this.rot;
@@ -265,7 +273,7 @@ export class Player {
 
     if (this.dribbleTouchCd > 0) this.dribbleTouchCd -= dt;
     if (this.hasBall) {
-      if (sprinting && speed > P.sprintTouchMinSpeed) {
+      if ((sprinting || this.sprintBoost > 0.35) && speed > P.sprintTouchMinSpeed) {
         // Дриблинг на спринте — ТОЛЧКАМИ (фидбек Олега, 17.07.2026):
         // игрок пинает мяч вперёд, тот катится и тормозит (трение в ball.update),
         // игрок догоняет и пинает снова — мяч ритмично то у ног, то на отдалении.

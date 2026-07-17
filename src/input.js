@@ -140,8 +140,50 @@ export class Input {
 
   // Свайп-удар в правой зоне экрана (как в FIFA Mobile / Score! Hero):
   // направление пальца — куда, длина — сила, ИЗГИБ траектории — подкрутка.
+  // Пока палец рисует — на #gesture-viz след и кольцо силы (ненавязчиво).
   _initSwipe() {
     this._swipe = { id: null, pts: [] };
+
+    const viz = document.getElementById('gesture-viz');
+    const vctx = viz ? viz.getContext('2d') : null;
+    const fitViz = () => {
+      if (viz) { viz.width = window.innerWidth; viz.height = window.innerHeight; }
+    };
+    fitViz();
+    window.addEventListener('resize', fitViz);
+    const clearViz = () => { if (vctx) vctx.clearRect(0, 0, viz.width, viz.height); };
+    const drawViz = () => {
+      if (!vctx) return;
+      const pts = this._swipe.pts;
+      clearViz();
+      if (pts.length < 2) return;
+      const a = pts[0];
+      const b = pts[pts.length - 1];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const power = Math.min(1.3, len / (window.innerHeight * 0.35));
+      // цвета шкалы замаха: жёлтый, в передержке — красный
+      const col = power > 1 ? 'rgba(224,74,48,0.85)' : 'rgba(232,212,77,0.7)';
+      // след пальца — сама траектория (изгиб = подкрутка виден глазами)
+      vctx.beginPath();
+      vctx.moveTo(pts[0].x, pts[0].y);
+      for (const p of pts) vctx.lineTo(p.x, p.y);
+      vctx.strokeStyle = col;
+      vctx.lineWidth = 5;
+      vctx.lineCap = 'round';
+      vctx.lineJoin = 'round';
+      vctx.stroke();
+      // кольцо силы вокруг начальной точки: заполняется с длиной свайпа
+      vctx.beginPath();
+      vctx.arc(a.x, a.y, 26, -Math.PI / 2, -Math.PI / 2 + (power / 1.3) * Math.PI * 2);
+      vctx.strokeStyle = col;
+      vctx.lineWidth = 3;
+      vctx.stroke();
+      // точка-кончик
+      vctx.beginPath();
+      vctx.arc(b.x, b.y, 6, 0, Math.PI * 2);
+      vctx.fillStyle = col;
+      vctx.fill();
+    };
 
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
@@ -154,11 +196,13 @@ export class Input {
     window.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this._swipe.id) return;
       this._swipe.pts.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+      drawViz();
     });
     const endSwipe = (e) => {
       if (e.pointerId !== this._swipe.id) return;
       const pts = this._swipe.pts;
       this._swipe.id = null;
+      clearViz(); // жест закончен — след убираем сразу
       if (pts.length < 3) return;
       const a = pts[0];
       const b = pts[pts.length - 1];

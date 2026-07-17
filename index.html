@@ -76,6 +76,28 @@
     #btn-sprint { right: 22px;  bottom: 214px; width: 72px; height: 72px; font-size: 22px; }
     @media (pointer: coarse) { .tbtn { display: flex; } }
 
+    /* Зона жеста навеса (планшет): большой пунктирный круг-подсказка.
+       Жест работает во всей правой зоне, круг показывает «рисуй здесь» */
+    #cross-zone {
+      position: fixed; right: 112px; bottom: 128px;
+      width: 232px; height: 232px; border-radius: 50%;
+      border: 2px dashed rgba(255,255,255,0.28);
+      background: rgba(255,255,255,0.045);
+      color: rgba(255,255,255,0.45);
+      font-family: inherit; font-size: 19px; letter-spacing: 5px;
+      display: none; align-items: center; justify-content: center;
+      pointer-events: none; z-index: 4;
+      text-shadow: 1px 1px 0 #000;
+    }
+    /* Слой визуализации жеста: след пальца + кольцо силы (рисует input.js) */
+    #gesture-viz {
+      position: fixed; inset: 0; pointer-events: none; z-index: 4; display: none;
+    }
+    @media (pointer: coarse) {
+      #cross-zone { display: flex; }
+      #gesture-viz { display: block; }
+    }
+
     /* Шкала замаха удара */
     #power {
       position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
@@ -93,6 +115,8 @@
   <button id="preset-btn">ТВ: Эфир-98</button>
   <div id="hint">Стрелки — бег · E спринт · S пас · W на ход · A навес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</div>
   <div id="stick-base"><div id="stick-knob"></div></div>
+  <div id="cross-zone">НАВЕС</div>
+  <canvas id="gesture-viz"></canvas>
   <div id="btn-pass" class="tbtn">ПАС</div>
   <div id="btn-shoot" class="tbtn">УДАР</div>
   <div id="btn-sprint" class="tbtn">⚡</div>
