@@ -76,6 +76,8 @@ export class Player {
     this.vel = new THREE.Vector3();
     this.rot = 0;            // угол поворота (0 = смотрит в +Z)
     this.hasBall = false;
+    this.controlling = false; // гистерезис дриблинга: подобрал вплотную — ведёт до keepRadius
+    this.pendingStrike = null; // буфер «удара с хода»: событие ждёт входа мяча в зону ноги
     this.kickCooldown = 0;
     this.bobT = 0;
 
@@ -162,6 +164,8 @@ export class Player {
     this.rot = Math.PI / 2;  // лицом к правым воротам
     this.kickCooldown = 0;
     this.hasBall = false;
+    this.controlling = false;
+    this.pendingStrike = null;
   }
 
   get facing() {
@@ -231,26 +235,21 @@ export class Player {
     this.shadow.position.x = pos.x;
     this.shadow.position.z = pos.z;
 
-    // --- Контроль мяча: две зоны (фидбек Олега, 17.07.2026) ---
-    // Зона дриблинга (controlRadius): мяч «липнет» и ведётся у ноги.
-    // Зона удара (kickRadius) — ШИРЕ: мяч, отпущенный на спринте/развороте
-    // или катящийся под удар с хода, всё ещё достаётся ногой. Раньше зона
-    // была одна — и на спринте (мяч в 1.7 м) любые удары «сгорали».
+    // --- Контроль мяча: гистерезис (фидбек Олега, 17.07.2026, вторая итерация) ---
+    // ПОДОБРАТЬ мяч можно только вплотную (controlRadius), но раз подобрал —
+    // «поводок» дриблинга тянется до controlKeepRadius: на спринте (мяч в 1.7 м)
+    // и в поворотах контроль не рвётся, мяч доворачивает за дугой игрока.
+    // Раньше зона была одна: спринт выталкивал мяч за неё, и контроль умирал.
     const bp = ball.mesh.position;
     const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    const reach = this.controlling ? P.controlKeepRadius : P.controlRadius;
     this.hasBall = this.kickCooldown <= 0 &&
-      dist < P.controlRadius &&
+      dist < reach &&
       bp.y < CONFIG.ball.radius * 2.2;
+    this.controlling = this.hasBall;
     const canKick = this.kickCooldown <= 0 &&
       dist < P.kickRadius &&
       bp.y < P.kickMaxBallY;
-
-    // События замахов снимаем каждый кадр: вне зоны удара они просто сгорают
-    const pass = input.pass.consume();
-    const through = input.through.consume();
-    const cross = input.consumeCross();
-    const shot = input.shot.consume();
-    const swipe = input.consumeSwipe();
 
     if (this.hasBall) {
       // Дриблинг: мяч тянется к точке перед ногой.
@@ -262,24 +261,49 @@ export class Player {
       ball.vel.z = this.vel.z + (target.z - bp.z) * grip;
     }
 
-    if (canKick) {
+    // --- Замахи: событие этого кадра или недавнее из буфера «удара с хода».
+    // Нажал чуть раньше, чем добежал до мяча — удар исполнится в момент,
+    // когда мяч войдёт в зону ноги (kickRadius). Так бьют с хода и с паса на ход.
+    const pass = input.pass.consume();
+    const through = input.through.consume();
+    const cross = input.consumeCross();
+    const shot = input.shot.consume();
+    const swipe = input.consumeSwipe();
+
+    let strike = null;
+    if (pass !== null) strike = { type: 'pass', v: pass };
+    else if (through !== null) strike = { type: 'through', v: through };
+    else if (cross !== null) strike = { type: 'cross', v: cross };
+    else if (shot !== null) strike = { type: 'shot', v: shot };
+    else if (swipe !== null) strike = { type: 'swipe', v: swipe };
+
+    if (strike) {
+      this.pendingStrike = { ...strike, ttl: P.strikeBufferTime };
+    } else if (this.pendingStrike) {
+      this.pendingStrike.ttl -= dt;
+      if (this.pendingStrike.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+    }
+
+    if (canKick && this.pendingStrike) {
+      const s = this.pendingStrike;
+      this.pendingStrike = null;
       const lerp = (a, b, t) => a + (b - a) * t;
-      if (pass !== null) {
+      if (s.type === 'pass') {
         // S — пас низом, сила от замаха
-        ball.strike(this.facing, lerp(P.pass.powerMin, P.pass.powerMax, pass), P.pass.lift);
+        ball.strike(this.facing, lerp(P.pass.powerMin, P.pass.powerMax, s.v), P.pass.lift);
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
-      } else if (through !== null) {
+      } else if (s.type === 'through') {
         // W — пас на ход: быстрый, настильный
-        ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, through), P.through.lift);
+        ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, s.v), P.through.lift);
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20);
-      } else if (cross !== null) {
-        this.doCross(cross, ball);
-      } else if (shot !== null) {
-        this.shoot(shot, input, ball);
-      } else if (swipe !== null) {
-        this.swipeShot(swipe, ball);
+      } else if (s.type === 'cross') {
+        this.doCross(s.v, ball);
+      } else if (s.type === 'shot') {
+        this.shoot(s.v, input, ball);
+      } else if (s.type === 'swipe') {
+        this.swipeShot(s.v, ball);
       }
     }
 
