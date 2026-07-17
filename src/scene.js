@@ -182,8 +182,8 @@ function buildStands(scene) {
   const standMat = new THREE.MeshLambertMaterial({ map: crowd });
   const sideMat = new THREE.MeshLambertMaterial({ color: 0x232838 });
 
-  const standH = 14;
-  const standD = 16;
+  const standH = 17;
+  const standD = 18;
   const tilt = -0.42; // наклон трибуны к полю
 
   const make = (len) => {
@@ -192,10 +192,12 @@ function buildStands(scene) {
     return new THREE.Mesh(geo, [sideMat, sideMat, sideMat, sideMat, standMat, standMat]);
   };
 
-  const long = F.length + 30;
-  const short = F.width + 30;
-  const dz = F.width / 2 + F.apron + standD / 2 - 4;
-  const dx = F.length / 2 + F.apron + standD / 2 - 4;
+  const long = F.length + 46;
+  const short = F.width + 46;
+  // Трибуны вынесены наружу так, чтобы ТВ-камера (z≈58) была ВНУТРИ ближней
+  // трибуны, как настоящая телекамера, а не за ней (иначе видно её тёмную изнанку)
+  const dz = F.width / 2 + F.apron + 20;
+  const dx = F.length / 2 + F.apron + 20;
 
   const north = make(long);
   north.position.set(0, standH / 2 + 1, -dz);
@@ -326,10 +328,12 @@ export function buildStadium() {
   pitch.rotation.x = -Math.PI / 2;
   scene.add(pitch);
 
-  // Зелёная зона вокруг разметки
+  // Газон-отбивка вокруг разметки: большой, чтобы низ кадра при наклоне камеры
+  // к ближней бровке всегда был травой, а не чёрной пустотой. Дальний край
+  // растворяется в тумане (fog) — жёсткой границы не видно.
   const apron = new THREE.Mesh(
-    new THREE.PlaneGeometry(F.length + F.apron * 2, F.width + F.apron * 2),
-    new THREE.MeshBasicMaterial({ color: 0x3a7229 }),
+    new THREE.PlaneGeometry(F.length + 150, F.width + 130),
+    new THREE.MeshBasicMaterial({ color: 0x336324 }),
   );
   apron.rotation.x = -Math.PI / 2;
   apron.position.y = -0.02;
