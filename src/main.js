@@ -13,7 +13,8 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ст�
 renderer.setPixelRatio(1); // рендерим в маленькую текстуру, ретина не нужна
 
 const scene = buildStadium();
-const ball = new Ball(scene);
+const goals = scene.userData.goals;
+const ball = new Ball(scene, goals);
 const player = new Player(scene);
 const input = new Input();
 const crt = new CRTPipeline(renderer);
@@ -72,12 +73,12 @@ farSlider.addEventListener('input', () => {
 // --- «ГОЛ!» ---
 const goalFlash = document.getElementById('goal-flash');
 let goalTimer = 0;
+let goalResetTimer = 0;
 
 function onGoal() {
   goalFlash.classList.add('show');
   goalTimer = 2.0;
-  ball.reset();
-  player.reset();
+  goalResetTimer = CONFIG.goal.resetDelay;
 }
 
 // --- Шкала замаха ---
@@ -114,6 +115,7 @@ function frame() {
   input.update(dt);
   player.update(dt, input, ball);
   const event = ball.update(dt);
+  goals.update(dt);
   if (event === 'goal' && goalTimer <= 0) onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.
@@ -129,6 +131,14 @@ function frame() {
   if (goalTimer > 0) {
     goalTimer -= dt;
     if (goalTimer <= 0) goalFlash.classList.remove('show');
+  }
+  if (goalResetTimer > 0) {
+    goalResetTimer -= dt;
+    if (goalResetTimer <= 0) {
+      ball.reset();
+      player.reset();
+      goals.reset();
+    }
   }
 
   // ТВ-камера: стоит на боковой линии, плавно провожает мяч по X и по глубине.
@@ -155,6 +165,6 @@ function frame() {
 
 // Отладка: ?nocrt в адресе — рендер без CRT-прохода
 const NO_CRT = location.search.includes('nocrt');
-window.DBG = { scene, camera, camLook, ball, player, input, crt, renderer };
+window.DBG = { scene, camera, camLook, ball, player, input, crt, renderer, goals };
 
 frame();

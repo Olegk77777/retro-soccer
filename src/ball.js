@@ -26,7 +26,7 @@ function createBallTexture() {
 }
 
 export class Ball {
-  constructor(scene) {
+  constructor(scene, goals = null) {
     const B = CONFIG.ball;
     // MeshBasic = мяч не зависит от света и всегда ярко читается (стиль PS1)
     this.mesh = new THREE.Mesh(
@@ -44,6 +44,7 @@ export class Ball {
     this.spin = 0; // подкрутка (эффект Магнуса): уводит летящий мяч вбок
     this.afterTouch = 0; // остаток окна докрутки после удара
     this.spinAxis = new THREE.Vector3(1, 0, 0);
+    this.goals = goals;
     this.reset();
     scene.add(this.mesh);
     scene.add(this.shadow);
@@ -54,6 +55,7 @@ export class Ball {
     this.vel.set(0, 0, 0);
     this.spin = 0;
     this.afterTouch = 0;
+    this.goalScored = false;
   }
 
   // Удар: направление (единичный вектор), сила (м/с), подъём и подкрутка.
@@ -102,7 +104,11 @@ export class Ball {
     }
     if (this.afterTouch > 0) this.afterTouch -= dt;
 
-    p.addScaledVector(this.vel, dt);
+    // Ворота сами двигают мяч по непрерывной траектории и ловят столкновение
+    // внутри кадра. Без них остаётся простой ход — удобно для изолированных тестов.
+    const goalEvent = this.goals
+      ? this.goals.moveBall(this, dt)
+      : (p.addScaledVector(this.vel, dt), null);
 
     // Отскок от газона
     if (p.y < B.radius) {
@@ -114,13 +120,6 @@ export class Ball {
     // Полная остановка на малой скорости
     if (p.y <= B.radius + 0.001 && this.vel.lengthSq() < B.stopSpeed * B.stopSpeed) {
       this.vel.set(0, 0, 0);
-    }
-
-    // Гол? (пересёк линию ворот в створе)
-    const G = CONFIG.goal;
-    if (Math.abs(p.x) > F.length / 2 + B.radius &&
-        Math.abs(p.z) < G.width / 2 && p.y < G.height) {
-      return 'goal';
     }
 
     // Отскок от рекламных бортиков (позиция совпадает с их визуалом в scene.js)
@@ -145,6 +144,6 @@ export class Ball {
       this.mesh.rotateOnWorldAxis(this.spinAxis, (speed * dt) / B.radius);
     }
 
-    return null;
+    return goalEvent;
   }
 }
