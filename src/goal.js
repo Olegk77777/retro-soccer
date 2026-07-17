@@ -67,6 +67,11 @@ class NetPanel {
   excite(point, outwardSpeed) {
     const N = CONFIG.goal.net;
     const r2 = N.impactRadius * N.impactRadius;
+    const impactSpeed = Math.min(Math.abs(outwardSpeed), N.impactMaxSpeed);
+    // Нелинейная кривая: слабый мяч лишь качает сетку, а мощный удар создаёт
+    // глубокий мешок и гораздо более сильную волну по соседним ячейкам.
+    const impulse = Math.sign(outwardSpeed) * N.impactTransfer * N.impactReferenceSpeed *
+      Math.pow(impactSpeed / N.impactReferenceSpeed, N.impactExponent);
     let nearest = -1;
     let nearestD2 = Infinity;
 
@@ -81,13 +86,13 @@ class NetPanel {
         if (d2 < nearestD2) { nearestD2 = d2; nearest = i; }
         if (d2 > r2) continue;
         const weight = Math.exp(-d2 / (r2 * 0.42));
-        this.velocity[i] += outwardSpeed * N.impactTransfer * weight;
+        this.velocity[i] += impulse * weight;
       }
     }
 
     // Попадание рядом с закреплённым краем всё равно должно дёрнуть ближайшую ячейку.
     if (nearest >= 0 && nearestD2 > r2) {
-      this.velocity[nearest] += outwardSpeed * N.impactTransfer * 0.35;
+      this.velocity[nearest] += impulse * 0.35;
     }
   }
 
