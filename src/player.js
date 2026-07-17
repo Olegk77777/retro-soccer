@@ -1,8 +1,49 @@
-// Игрок-заглушка (капсула): бег, развороты, дриблинг, пас, удар с замахом.
-// Настоящая модель придёт из Blender позже — геймплей графику не ждёт.
+// Игрок: модель из Blender (models/player.glb, риг Mixamo, 22 анимации).
+// Пока glb грузится (или если не загрузился) — капсула-заглушка, геймплей тот же.
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
+
+// Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом
+let modelPromise = null;
+function loadPlayerModel() {
+  if (!modelPromise) {
+    modelPromise = new GLTFLoader().loadAsync('./models/player.glb').then((gltf) => {
+      gltf.scene.traverse((o) => {
+        if (o.isMesh) {
+          // Скелет двигает вершины мимо исходной рамки объекта — отсечение по ней врёт
+          o.frustumCulled = false;
+          // Lambert вместо Standard: быстрее на планшете, а с плоскими гранями
+          // и пиксельной текстурой выглядит ровно так же (стиль PS1).
+          // Emissive ~45% — как у капсулы: без него фигура на вечернем поле чёрная
+          const src = o.material;
+          o.material = src.map
+            ? new THREE.MeshLambertMaterial({
+                map: src.map,
+                emissive: 0x737373,
+                emissiveMap: src.map,
+              })
+            : new THREE.MeshLambertMaterial({
+                color: src.color.clone(),
+                emissive: src.color.clone().multiplyScalar(0.45),
+              });
+          o.material.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
+        }
+      });
+      return gltf;
+    });
+  }
+  return modelPromise;
+}
+
+// Какие клипы играются один раз (удары, падения), остальные — циклы
+const ONE_SHOT = new Set([
+  'kick', 'kick_run', 'penalty', 'header', 'tackle', 'trip', 'getup',
+  'throwin', 'receive', 'gk_catch', 'gk_dive', 'gk_dropkick', 'gk_throw',
+  'gk_scoop', 'gk_pass',
+]);
 
 export class Player {
   constructor(scene) {
@@ -18,12 +59,12 @@ export class Player {
     this.group.add(this.body);
 
     // «Носок бутсы» — тёмная метка, чтобы читалось, куда игрок смотрит
-    const nose = new THREE.Mesh(
+    this.nose = new THREE.Mesh(
       new THREE.BoxGeometry(0.2, 0.12, 0.34),
       new THREE.MeshLambertMaterial({ color: 0x6e1c15 }),
     );
-    nose.position.set(0, 0.1, P.radius + 0.12);
-    this.group.add(nose);
+    this.nose.position.set(0, 0.1, P.radius + 0.12);
+    this.group.add(this.nose);
 
     this.shadow = new THREE.Mesh(
       new THREE.CircleGeometry(P.radius * 1.25, 12),
@@ -38,9 +79,68 @@ export class Player {
     this.kickCooldown = 0;
     this.bobT = 0;
 
+    // --- Анимации (заполнится после загрузки glb) ---
+    this.model = null;
+    this.mixer = null;
+    this.actions = {};
+    this.currentAction = null;
+    this.currentName = null;
+    this.oneShot = null;     // играющий сейчас одноразовый клип
+
+    loadPlayerModel()
+      .then((gltf) => this.attachModel(gltf))
+      .catch((e) => console.error('Модель игрока не загрузилась, остаёмся на капсуле:', e));
+
     scene.add(this.group);
     scene.add(this.shadow);
     this.reset();
+  }
+
+  attachModel(gltf) {
+    this.model = cloneSkeleton(gltf.scene);
+    this.group.add(this.model);
+    this.body.visible = false;   // капсула была фолбэком — прячем
+    this.nose.visible = false;
+
+    this.mixer = new THREE.AnimationMixer(this.model);
+    for (const clip of gltf.animations) {
+      const action = this.mixer.clipAction(clip);
+      if (ONE_SHOT.has(clip.name)) {
+        action.setLoop(THREE.LoopOnce);
+        action.clampWhenFinished = true;
+      }
+      this.actions[clip.name] = action;
+    }
+    this.mixer.addEventListener('finished', (e) => {
+      if (e.action === this.oneShot) {
+        this.oneShot = null;
+        this.currentName = null; // следующий кадр сам выберет idle/run
+      }
+    });
+    this.playAction('idle', 0);
+  }
+
+  // Плавное переключение клипа (crossfade), повторный вызов того же клипа — no-op
+  playAction(name, fade = 0.12) {
+    const next = this.actions[name];
+    if (!next || this.currentName === name) return;
+    next.enabled = true;
+    next.reset();
+    if (this.currentAction && this.currentAction !== next) {
+      next.crossFadeFrom(this.currentAction, fade, false);
+    }
+    next.play();
+    this.currentAction = next;
+    this.currentName = name;
+  }
+
+  // Одноразовый клип поверх движения (удар, подкат…)
+  playOneShot(name, timeScale = 1) {
+    const a = this.actions[name];
+    if (!a) return;
+    a.timeScale = timeScale;
+    this.playAction(name, 0.06);
+    this.oneShot = a;
   }
 
   reset() {
@@ -97,9 +197,23 @@ export class Player {
     }
     this.group.rotation.y = this.rot;
 
-    // Лёгкое покачивание на бегу — дешёвая «жизнь» до настоящих анимаций
-    this.bobT += dt * speed * 1.8;
-    this.body.position.y = P.height / 2 + Math.abs(Math.sin(this.bobT)) * 0.06 * (speed / P.speed);
+    if (this.mixer) {
+      // Выбор клипа по движению; пока играет одноразовый (удар) — не дёргаем
+      if (!this.oneShot) {
+        if (speed < 0.6) {
+          this.playAction('idle', 0.18);
+        } else {
+          this.playAction('run', 0.1);
+          // Темп ног растёт со скоростью (сам клип снят под лёгкую трусцу)
+          this.actions.run.timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
+        }
+      }
+      this.mixer.update(dt);
+    } else {
+      // Капсула-фолбэк: лёгкое покачивание вместо анимаций
+      this.bobT += dt * speed * 1.8;
+      this.body.position.y = P.height / 2 + Math.abs(Math.sin(this.bobT)) * 0.06 * (speed / P.speed);
+    }
 
     this.shadow.position.x = pos.x;
     this.shadow.position.z = pos.z;
@@ -132,10 +246,12 @@ export class Player {
         // S — пас низом, сила от замаха
         ball.strike(this.facing, lerp(P.pass.powerMin, P.pass.powerMax, pass), P.pass.lift);
         this.kickCooldown = P.kickCooldown;
+        this.playOneShot('kick', 1.6); // короткий тычок
       } else if (through !== null) {
         // W — пас на ход: быстрый, настильный
         ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, through), P.through.lift);
         this.kickCooldown = P.kickCooldown;
+        this.playOneShot('kick', 1.6);
       } else if (cross !== null) {
         this.doCross(cross, ball);
       } else if (shot !== null) {
@@ -182,6 +298,7 @@ export class Player {
 
     ball.strike(f, power, lift, curl);
     this.kickCooldown = CONFIG.player.kickCooldown;
+    this.playOneShot('kick', 1.2); // полный замах под навес
   }
 
   // Жест-свайп с тача — «как нарисовал, так и полетело»:
@@ -211,6 +328,7 @@ export class Player {
     // Развернуться в сторону мяча — читаемость
     this.rot = Math.atan2(dir.x, dir.z);
     this.kickCooldown = P.kickCooldown;
+    this.playOneShot('kick', 1.3);
   }
 
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
@@ -260,5 +378,6 @@ export class Player {
       ball.strike(this.facing, power, lift);
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
+    this.playOneShot('kick', 1.2); // удар с полным замахом
   }
 }

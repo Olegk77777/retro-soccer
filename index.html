@@ -109,7 +109,10 @@
     });
   </script>
   <script type="importmap">
-    { "imports": { "three": "./vendor/three.module.js" } }
+    { "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/": "./vendor/jsm/"
+    } }
   </script>
   <script type="module" src="./src/main.js"></script>
 </body>
