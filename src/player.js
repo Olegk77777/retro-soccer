@@ -80,6 +80,7 @@ export class Player {
     this.pendingStrike = null; // буфер «удара с хода»: событие ждёт входа мяча в зону ноги
     this.chargeRun = false;  // замах начат на бегу — бег продолжается (удар подъёмом)
     this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
+    this.dribbleTouchCd = 0; // пауза между толчками мяча на спринте
     this.kickCooldown = 0;
     this.bobT = 0;
 
@@ -169,6 +170,7 @@ export class Player {
     this.controlling = false;
     this.pendingStrike = null;
     this.chargeRun = false;
+    this.dribbleTouchCd = 0;
   }
 
   get facing() {
@@ -261,14 +263,32 @@ export class Player {
       dist < P.kickRadius &&
       bp.y < P.kickMaxBallY;
 
+    if (this.dribbleTouchCd > 0) this.dribbleTouchCd -= dt;
     if (this.hasBall) {
-      // Дриблинг: мяч тянется к точке перед ногой.
-      // На спринте мяч отпускается дальше и липнет хуже — легче потерять
-      const ahead = sprinting ? P.sprintDribbleAhead : P.dribbleAhead;
-      const grip = sprinting ? P.sprintDribbleStrength : P.dribbleStrength;
-      const target = pos.clone().addScaledVector(this.facing, ahead);
-      ball.vel.x = this.vel.x + (target.x - bp.x) * grip;
-      ball.vel.z = this.vel.z + (target.z - bp.z) * grip;
+      if (sprinting && speed > P.sprintTouchMinSpeed) {
+        // Дриблинг на спринте — ТОЛЧКАМИ (фидбек Олега, 17.07.2026):
+        // игрок пинает мяч вперёд, тот катится и тормозит (трение в ball.update),
+        // игрок догоняет и пинает снова — мяч ритмично то у ног, то на отдалении.
+        const relX = bp.x - pos.x, relZ = bp.z - pos.z;
+        const ahead = relX * this.facing.x + relZ * this.facing.z; // проекция на курс
+        // Боковое удержание: мяч не убегает вбок на поворотах, продольно — свободно
+        const latX = relX - ahead * this.facing.x;
+        const latZ = relZ - ahead * this.facing.z;
+        ball.vel.x -= latX * P.sprintTouchLateral;
+        ball.vel.z -= latZ * P.sprintTouchLateral;
+        // Мяч подкатился к ноге и пауза выдержана — новый толчок
+        if (ahead < P.sprintTouchTrigger && this.dribbleTouchCd <= 0) {
+          const push = speed * P.sprintTouchPush;
+          ball.vel.x = this.facing.x * push;
+          ball.vel.z = this.facing.z * push;
+          this.dribbleTouchCd = P.sprintTouchInterval;
+        }
+      } else {
+        // Медленное ведение / стойка: мяч липнет у ноги — близкий контроль
+        const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
+        ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
+        ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
+      }
     }
 
     // --- Замахи: событие этого кадра или недавнее из буфера «удара с хода».
