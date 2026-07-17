@@ -78,6 +78,8 @@ export class Player {
     this.hasBall = false;
     this.controlling = false; // гистерезис дриблинга: подобрал вплотную — ведёт до keepRadius
     this.pendingStrike = null; // буфер «удара с хода»: событие ждёт входа мяча в зону ноги
+    this.chargeRun = false;  // замах начат на бегу — бег продолжается (удар подъёмом)
+    this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
     this.kickCooldown = 0;
     this.bobT = 0;
 
@@ -166,6 +168,7 @@ export class Player {
     this.hasBall = false;
     this.controlling = false;
     this.pendingStrike = null;
+    this.chargeRun = false;
   }
 
   get facing() {
@@ -179,17 +182,24 @@ export class Player {
 
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
 
-    // Во время замаха удара стрелки — это ПРИЦЕЛ, а не бег (как в PES):
-    // игрок плавно тормозит и держит направление взгляда
+    // Замах удара, два режима (решение Олега, 17.07.2026):
+    // - начал замах НА БЕГУ (быстрее runKeepSpeed) — бег продолжается, будет
+    //   удар с хода подъёмом; стрелки продолжают рулить бегом;
+    // - начал С МЕСТА / на шаге — прицельная стойка: игрок тормозит, взгляд
+    //   заморожен, стрелки двигают прицел по створу (щечка, как раньше)
     const aiming = input.shot.held;
+    const speedNow = Math.hypot(this.vel.x, this.vel.z);
+    if (aiming && !this.chargeRun && speedNow > CONFIG.shot.runKeepSpeed) this.chargeRun = true;
+    if (!aiming) this.chargeRun = false;
+    const brake = aiming && !this.chargeRun;
 
     // --- Бег: плавный разгон к желаемой скорости (спринт — быстрее) ---
-    const sprinting = input.sprint && !aiming;
+    const sprinting = input.sprint && !brake;
     let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
     if (sprinting) maxSpeed *= P.sprintFactor;
     const k = Math.min(1, dt * P.accel);
-    const mvx = aiming ? 0 : input.move.x;
-    const mvz = aiming ? 0 : input.move.z;
+    const mvx = brake ? 0 : input.move.x;
+    const mvz = brake ? 0 : input.move.z;
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -201,10 +211,10 @@ export class Player {
     pos.x = Math.max(-maxX, Math.min(maxX, pos.x));
     pos.z = Math.max(-maxZ, Math.min(maxZ, pos.z));
 
-    // --- Разворот в сторону бега (кратчайшей дугой); при замахе взгляд заморожен,
-    // на спринте развороты тяжелее ---
+    // --- Разворот в сторону бега (кратчайшей дугой); в прицельной стойке взгляд
+    // заморожен (на бегу с замахом — рулим как обычно), на спринте развороты тяжелее ---
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    if (!aiming && speed > 0.5) {
+    if (!brake && speed > 0.5) {
       const want = Math.atan2(this.vel.x, this.vel.z);
       let d = want - this.rot;
       while (d > Math.PI) d -= Math.PI * 2;
@@ -377,9 +387,23 @@ export class Player {
     this.playOneShot('kick', 1.3, 0.17);
   }
 
+  // Выбор типа удара (сам, по контексту — решение Олега, 17.07.2026):
+  // короткий тап -> НОСОК (тычок в касание); на скорости или по приходящему
+  // мячу (пас на ход) -> ПОДЪЁМ (с лёта, driven); иначе -> ЩЕЧКА (плассированный)
+  strikeStyle(charge, ball) {
+    const ST = CONFIG.shot.styles;
+    if (charge <= ST.toe.maxCharge) return 'toe';
+    const speed = Math.hypot(this.vel.x, this.vel.z);
+    const rel = Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z);
+    if (speed >= ST.instep.minRunSpeed || rel >= ST.instep.minBallRel) return 'instep';
+    return 'side';
+  }
+
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
   // (вверх экрана = дальняя штанга), замах — высоту; траектория решается
   // баллистикой, так что мяч реально прилетает в выбранную точку.
+  // Поверх — модификаторы типа удара: подъём мощнее и настильнее,
+  // носок слабее/ниже/шумнее, щечка точнее всех.
   shoot(charge, input, ball) {
     const S = CONFIG.shot;
     const F = CONFIG.field;
@@ -387,12 +411,20 @@ export class Player {
     const B = CONFIG.ball;
     const bp = ball.mesh.position;
 
+    const styleName = this.strikeStyle(charge, ball);
+    const st = S.styles[styleName];
+    this.lastStrikeStyle = styleName;
+    // У тычка сила почти не зависит от замаха — он всегда «средний, но мгновенный»
+    const effCharge = styleName === 'toe' ? st.effCharge : charge;
+    const power = (S.powerMin + (S.powerMax - S.powerMin) * effCharge) * st.powerFactor;
+    const nz = S.noiseZ * st.noiseFactor;
+    const ny = S.noiseY * st.noiseFactor;
+
     const f = this.facing;
     const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
     const dist = toGoal.length();
     const angle = f.angleTo(toGoal.normalize()) * (180 / Math.PI);
-    const power = S.powerMin + (S.powerMax - S.powerMin) * charge;
 
     if (angle < S.assistAngle && dist < S.assistDist && dist > 3 && Math.abs(f.x) > 0.1) {
       // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
@@ -401,10 +433,11 @@ export class Player {
       const aimZ = input.shotAim ? input.shotAim.z : 0;
       const maxZ = G.width / 2 + S.aimSlack;
       let targetZ = Math.max(-maxZ, Math.min(maxZ, baseZ)) + aimZ * S.aimRange;
-      let targetY = S.heightMin + (S.heightMax - S.heightMin) * Math.min(charge / S.overchargeFrom, 1);
-      if (charge > S.overchargeFrom) targetY += Math.random() * S.overchargeRise; // перезаряд — риск выше ворот
-      targetZ += (Math.random() - 0.5) * 2 * S.noiseZ;
-      targetY += (Math.random() - 0.5) * 2 * S.noiseY;
+      let targetY = (S.heightMin + (S.heightMax - S.heightMin) *
+        Math.min(effCharge / S.overchargeFrom, 1)) * (st.heightFactor || 1);
+      if (effCharge > S.overchargeFrom) targetY += Math.random() * S.overchargeRise; // перезаряд — риск выше ворот
+      targetZ += (Math.random() - 0.5) * 2 * nz;
+      targetY += (Math.random() - 0.5) * 2 * ny;
 
       const dir = new THREE.Vector3(goalX - bp.x, 0, targetZ - bp.z);
       const flightDist = dir.length();
@@ -420,10 +453,10 @@ export class Player {
       ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
     } else {
       // Обычный удар по направлению взгляда, высота растёт с замахом
-      const lift = S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * charge;
+      const lift = (S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * effCharge) * st.liftFactor;
       ball.strike(this.facing, power, lift);
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.2, 0.16); // удар — стартуем у мяча, без пустого замаха
+    this.playOneShot('kick', st.animTs, st.animAt); // анимация в темпе типа удара
   }
 }
