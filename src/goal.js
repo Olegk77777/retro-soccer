@@ -102,7 +102,13 @@ class NetPanel {
     const N = CONFIG.goal.net;
     const r2 = N.impactRadius * N.impactRadius;
     const follow = 1 - Math.exp(-N.followRate * dt);
-    const limitedDepth = THREE.MathUtils.clamp(depth, -N.maxStretch, N.maxStretch);
+    // Физический ход мяча меньше экранного хода узлов: с высоты ТВ-камеры
+    // честные 30–70 см превращаются в один пиксель и выглядят как статика.
+    const limitedDepth = THREE.MathUtils.clamp(
+      depth * N.visualStretch,
+      -N.visualMaxStretch,
+      N.visualMaxStretch,
+    );
 
     for (let row = 1; row < this.rows - 1; row++) {
       for (let col = 1; col < this.cols - 1; col++) {
@@ -152,8 +158,8 @@ class NetPanel {
         this.velocity[i] = nextVelocity[i];
         this.offset[i] = THREE.MathUtils.clamp(
           this.offset[i] + this.velocity[i] * dt,
-          -N.maxStretch,
-          N.maxStretch,
+          -N.visualMaxStretch,
+          N.visualMaxStretch,
         );
       }
     }
@@ -417,7 +423,7 @@ export class GoalSystem {
       }
 
       const stretch = Math.max(0, penetration);
-      const extra = Math.max(0, stretch - N.maxStretch);
+      const extra = Math.max(0, stretch - N.physicalMaxStretch);
       const accel = -N.ballSpring * stretch - N.hardStopSpring * extra - N.ballDamping * normalSpeed;
       ball.vel.addScaledVector(contact.pushDir, accel * step);
 
@@ -488,7 +494,7 @@ export class GoalSystem {
           age: 0,
         };
         // Отладочный или испорченный импульс не должен протащить мяч дальше,
-        // чем способна визуально растянуться сетка. Игровые удары (до 30 м/с)
+        // чем способен физически выдержать контакт. Игровые удары (до 30 м/с)
         // этот предохранитель не затрагивает.
         const intoNet = ball.vel.dot(ball.netContact.pushDir);
         if (intoNet > G.net.impactMaxSpeed) {
