@@ -73,6 +73,7 @@
     .tbtn:active { background: rgba(255,255,255,0.25); }
     #btn-shoot { right: 22px; bottom: 118px; }
     #btn-pass  { right: 124px; bottom: 26px; }
+    #btn-sprint { right: 22px; bottom: 214px; width: 72px; height: 72px; font-size: 22px; }
     @media (pointer: coarse) { .tbtn { display: flex; } }
 
     /* Шкала замаха удара */
@@ -90,10 +91,11 @@
   <div id="bug">Ф·98</div>
   <div id="goal-flash">ГОЛ!</div>
   <button id="preset-btn">ТВ: Эфир-98</button>
-  <div id="hint">Стрелки — бег · S пас · W на ход · A навес (тапни ×2 — настил, ×3 — прострел) · D удар · красная шкала = передержал</div>
+  <div id="hint">Стрелки — бег · E спринт · S пас · W на ход · A навес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</div>
   <div id="stick-base"><div id="stick-knob"></div></div>
   <div id="btn-pass" class="tbtn">ПАС</div>
   <div id="btn-shoot" class="tbtn">УДАР</div>
+  <div id="btn-sprint" class="tbtn">⚡</div>
   <div id="power"><div id="power-fill"></div></div>
 
   <script>

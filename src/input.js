@@ -63,9 +63,11 @@ export class Input {
     this._cross = { state: 'idle', charge: 0, taps: 0, timer: 0, prevHeld: false };
     this._crossEvent = null;
 
+    this.sprint = false; // E / ⚡ на таче / RB на геймпаде — мяч хуже контролируется
+
     this._padMove = { x: 0, z: 0 };
-    this._pad = { pass: false, shot: false, cross: false, through: false };
-    this._touch = { pass: false, shot: false };
+    this._pad = { pass: false, shot: false, cross: false, through: false, sprint: false };
+    this._touch = { pass: false, shot: false, sprint: false };
 
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -129,6 +131,7 @@ export class Input {
     };
     bindHold('btn-pass', 'pass');
     bindHold('btn-shoot', 'shot');
+    bindHold('btn-sprint', 'sprint');
   }
 
   _pollGamepad() {
@@ -146,6 +149,7 @@ export class Input {
     this._pad.cross = btn(1);   // B / круг — навес
     this._pad.shot = btn(2);    // X / квадрат — удар
     this._pad.through = btn(3); // Y / треугольник — пас на ход
+    this._pad.sprint = btn(5);  // RB / R1 — спринт, как в PES
   }
 
   update(dt) {
@@ -172,6 +176,9 @@ export class Input {
 
     // Навес: полоска → окно тапов → событие {charge, taps}
     this._feedCross(dt, this.keys.has('KeyA') || this._pad.cross);
+
+    // Спринт — простое удержание
+    this.sprint = this.keys.has('KeyE') || this._pad.sprint || this._touch.sprint;
 
     // Прицел удара: пока держится замах, запоминаем последнее направление
     // стрелок — сработает, даже если стрелку отпустили чуть раньше кнопки

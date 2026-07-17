@@ -42,6 +42,7 @@ export class Ball {
     this.shadow.position.y = 0.02;
     this.vel = new THREE.Vector3();
     this.spin = 0; // подкрутка (эффект Магнуса): уводит летящий мяч вбок
+    this.afterTouch = 0; // остаток окна докрутки после удара
     this.spinAxis = new THREE.Vector3(1, 0, 0);
     this.reset();
     scene.add(this.mesh);
@@ -52,6 +53,7 @@ export class Ball {
     this.mesh.position.set(0, CONFIG.ball.radius, 0);
     this.vel.set(0, 0, 0);
     this.spin = 0;
+    this.afterTouch = 0;
   }
 
   // Удар: направление (единичный вектор), сила (м/с), подъём и подкрутка.
@@ -61,6 +63,7 @@ export class Ball {
     this.vel.z = dir.z * power;
     this.vel.y = lift;
     this.spin = curl;
+    this.afterTouch = CONFIG.ball.afterTouchTime; // окно докрутки направлением
   }
 
   update(dt) {
@@ -91,11 +94,13 @@ export class Ball {
         this.spin *= Math.pow(B.spinDecay, dt * 60);
       }
     } else {
-      // Качение по газону: закрутка быстро гаснет о траву
+      // Качение по газону: закрутка быстро гаснет о траву, докрутка кончается
       this.vel.x *= roll;
       this.vel.z *= roll;
       this.spin *= Math.pow(0.9, dt * 60);
+      this.afterTouch = 0;
     }
+    if (this.afterTouch > 0) this.afterTouch -= dt;
 
     p.addScaledVector(this.vel, dt);
 

@@ -66,8 +66,10 @@ export class Player {
     // игрок плавно тормозит и держит направление взгляда
     const aiming = input.shot.held;
 
-    // --- Бег: плавный разгон к желаемой скорости ---
-    const maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
+    // --- Бег: плавный разгон к желаемой скорости (спринт — быстрее) ---
+    const sprinting = input.sprint && !aiming;
+    let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
+    if (sprinting) maxSpeed *= P.sprintFactor;
     const k = Math.min(1, dt * P.accel);
     const mvx = aiming ? 0 : input.move.x;
     const mvz = aiming ? 0 : input.move.z;
@@ -82,14 +84,16 @@ export class Player {
     pos.x = Math.max(-maxX, Math.min(maxX, pos.x));
     pos.z = Math.max(-maxZ, Math.min(maxZ, pos.z));
 
-    // --- Разворот в сторону бега (кратчайшей дугой); при замахе взгляд заморожен ---
+    // --- Разворот в сторону бега (кратчайшей дугой); при замахе взгляд заморожен,
+    // на спринте развороты тяжелее ---
     const speed = Math.hypot(this.vel.x, this.vel.z);
     if (!aiming && speed > 0.5) {
       const want = Math.atan2(this.vel.x, this.vel.z);
       let d = want - this.rot;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
-      this.rot += d * Math.min(1, P.turnRate * dt);
+      const turn = P.turnRate * (sprinting ? P.sprintTurnFactor : 1);
+      this.rot += d * Math.min(1, turn * dt);
     }
     this.group.rotation.y = this.rot;
 
@@ -114,10 +118,13 @@ export class Player {
     const shot = input.shot.consume();
 
     if (this.hasBall) {
-      // Дриблинг: мяч тянется к точке перед ногой
-      const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
-      ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
-      ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
+      // Дриблинг: мяч тянется к точке перед ногой.
+      // На спринте мяч отпускается дальше и липнет хуже — легче потерять
+      const ahead = sprinting ? P.sprintDribbleAhead : P.dribbleAhead;
+      const grip = sprinting ? P.sprintDribbleStrength : P.dribbleStrength;
+      const target = pos.clone().addScaledVector(this.facing, ahead);
+      ball.vel.x = this.vel.x + (target.x - bp.x) * grip;
+      ball.vel.z = this.vel.z + (target.z - bp.z) * grip;
 
       const lerp = (a, b, t) => a + (b - a) * t;
       if (pass !== null) {
@@ -132,6 +139,21 @@ export class Player {
         this.doCross(cross, ball);
       } else if (shot !== null) {
         this.shoot(shot, input, ball);
+      }
+    }
+
+    // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
+    // (на iPad это тот же виртуальный стик — жест одинаковый на всех платформах)
+    const B = CONFIG.ball;
+    if (ball.afterTouch > 0 && bp.y > B.radius * 1.5) {
+      const vx = ball.vel.x;
+      const vz = ball.vel.z;
+      const sp = Math.hypot(vx, vz);
+      if (sp > 1) {
+        // Боковая составляющая ввода относительно направления полёта → закрутка
+        const lat = (input.move.x * -vz + input.move.z * vx) / sp;
+        ball.spin += lat * B.afterTouchRate * dt;
+        ball.spin = Math.max(-B.afterTouchMax, Math.min(B.afterTouchMax, ball.spin));
       }
     }
   }
@@ -194,6 +216,8 @@ export class Player {
       let vy = (targetY - bp.y) / t - 0.5 * B.gravity * t;
       vy = Math.max(0, Math.min(S.maxLift, vy));
       ball.vel.set(dir.x * power, vy, dir.z * power);
+      ball.spin = 0;
+      ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
     } else {
       // Обычный удар по направлению взгляда, высота растёт с замахом
       const lift = S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * charge;
