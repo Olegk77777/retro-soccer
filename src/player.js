@@ -231,14 +231,21 @@ export class Player {
     this.shadow.position.x = pos.x;
     this.shadow.position.z = pos.z;
 
-    // --- Контроль мяча ---
+    // --- Контроль мяча: две зоны (фидбек Олега, 17.07.2026) ---
+    // Зона дриблинга (controlRadius): мяч «липнет» и ведётся у ноги.
+    // Зона удара (kickRadius) — ШИРЕ: мяч, отпущенный на спринте/развороте
+    // или катящийся под удар с хода, всё ещё достаётся ногой. Раньше зона
+    // была одна — и на спринте (мяч в 1.7 м) любые удары «сгорали».
     const bp = ball.mesh.position;
     const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
     this.hasBall = this.kickCooldown <= 0 &&
       dist < P.controlRadius &&
       bp.y < CONFIG.ball.radius * 2.2;
+    const canKick = this.kickCooldown <= 0 &&
+      dist < P.kickRadius &&
+      bp.y < P.kickMaxBallY;
 
-    // События замахов снимаем каждый кадр: без мяча они просто сгорают
+    // События замахов снимаем каждый кадр: вне зоны удара они просто сгорают
     const pass = input.pass.consume();
     const through = input.through.consume();
     const cross = input.consumeCross();
@@ -253,7 +260,9 @@ export class Player {
       const target = pos.clone().addScaledVector(this.facing, ahead);
       ball.vel.x = this.vel.x + (target.x - bp.x) * grip;
       ball.vel.z = this.vel.z + (target.z - bp.z) * grip;
+    }
 
+    if (canKick) {
       const lerp = (a, b, t) => a + (b - a) * t;
       if (pass !== null) {
         // S — пас низом, сила от замаха
