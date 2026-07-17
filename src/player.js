@@ -98,6 +98,7 @@ export class Player {
 
   attachModel(gltf) {
     this.model = cloneSkeleton(gltf.scene);
+    this.model.scale.setScalar(CONFIG.player.modelScale); // ноги в origin — растём вверх, не в землю
     this.group.add(this.model);
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
@@ -134,12 +135,24 @@ export class Player {
     this.currentName = name;
   }
 
-  // Одноразовый клип поверх движения (удар, подкат…)
-  playOneShot(name, timeScale = 1) {
+  // Одноразовый клип поверх движения (удар, подкат…).
+  // startAt (сек клипа) стартует не с нуля, а ближе к контакту с мячом:
+  // удар мгновенный, а полный замах отставал бы от уже улетевшего мяча.
+  playOneShot(name, timeScale = 1, startAt = 0) {
     const a = this.actions[name];
     if (!a) return;
+    if (this.currentAction && this.currentAction !== a) {
+      this.currentAction.fadeOut(0.05);
+    }
+    a.reset();
+    a.time = startAt;
     a.timeScale = timeScale;
-    this.playAction(name, 0.06);
+    a.enabled = true;
+    a.setEffectiveWeight(1);
+    a.fadeIn(0.05);
+    a.play();
+    this.currentAction = a;
+    this.currentName = name;
     this.oneShot = a;
   }
 
@@ -246,12 +259,12 @@ export class Player {
         // S — пас низом, сила от замаха
         ball.strike(this.facing, lerp(P.pass.powerMin, P.pass.powerMax, pass), P.pass.lift);
         this.kickCooldown = P.kickCooldown;
-        this.playOneShot('kick', 1.6); // короткий тычок
+        this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
       } else if (through !== null) {
         // W — пас на ход: быстрый, настильный
         ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, through), P.through.lift);
         this.kickCooldown = P.kickCooldown;
-        this.playOneShot('kick', 1.6);
+        this.playOneShot('kick', 1.6, 0.20);
       } else if (cross !== null) {
         this.doCross(cross, ball);
       } else if (shot !== null) {
@@ -298,7 +311,7 @@ export class Player {
 
     ball.strike(f, power, lift, curl);
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.2); // полный замах под навес
+    this.playOneShot('kick', 1.2, 0.16); // навес — чуть больше проводки
   }
 
   // Жест-свайп с тача — «как нарисовал, так и полетело»:
@@ -328,7 +341,7 @@ export class Player {
     // Развернуться в сторону мяча — читаемость
     this.rot = Math.atan2(dir.x, dir.z);
     this.kickCooldown = P.kickCooldown;
-    this.playOneShot('kick', 1.3);
+    this.playOneShot('kick', 1.3, 0.17);
   }
 
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
@@ -378,6 +391,6 @@ export class Player {
       ball.strike(this.facing, power, lift);
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.2); // удар с полным замахом
+    this.playOneShot('kick', 1.2, 0.16); // удар — стартуем у мяча, без пустого замаха
   }
 }
