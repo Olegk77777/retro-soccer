@@ -35,12 +35,47 @@
     }
     #goal-flash.show { opacity: 1; }
 
-    #preset-btn {
+    #settings-btn {
       position: fixed; top: 12px; left: 16px;
       background: rgba(0,0,0,0.55); color: #eee;
       border: 1px solid rgba(255,255,255,0.4);
       font-family: inherit; font-size: 14px; letter-spacing: 1px;
       padding: 8px 14px; cursor: pointer;
+      touch-action: manipulation; z-index: 11;
+    }
+    #settings-btn:active { background: rgba(255,255,255,0.2); }
+
+    /* Панель настроек: ретро-оверлей в духе ТВ-меню */
+    #settings {
+      position: fixed; top: 6%; left: 50%; transform: translateX(-50%);
+      width: min(600px, 94vw); max-height: 86vh; overflow-y: auto;
+      background: rgba(0, 0, 10, 0.92); color: #ddd;
+      border: 1px solid rgba(255,255,255,0.45);
+      padding: 18px 22px; z-index: 12; display: none;
+      font-size: 13px; line-height: 1.55;
+      touch-action: pan-y;
+    }
+    #settings.show { display: block; }
+    #settings h2 {
+      margin: 0 0 12px; font-size: 16px; letter-spacing: 4px; color: #fff;
+    }
+    #settings h3 {
+      margin: 16px 0 6px; font-size: 13px; letter-spacing: 2px; color: #e8d44d;
+      border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 4px;
+    }
+    #settings .row { margin: 3px 0; }
+    #settings .key { color: #fff; font-weight: bold; }
+    #settings-close {
+      position: absolute; top: 10px; right: 14px;
+      background: none; border: none; color: #eee; font-size: 20px;
+      font-family: inherit; cursor: pointer; padding: 4px 8px;
+      touch-action: manipulation;
+    }
+    #preset-btn {
+      background: rgba(0,0,0,0.55); color: #eee;
+      border: 1px solid rgba(255,255,255,0.4);
+      font-family: inherit; font-size: 14px; letter-spacing: 1px;
+      padding: 8px 14px; cursor: pointer; touch-action: manipulation;
     }
     #preset-btn:active { background: rgba(255,255,255,0.2); }
 
@@ -71,6 +106,7 @@
       user-select: none; -webkit-user-select: none; z-index: 5;
     }
     .tbtn:active { background: rgba(255,255,255,0.25); }
+    .tbtn { touch-action: manipulation; } /* убирает double-tap-зум по кнопке */
     #btn-pass   { right: 124px; bottom: 26px; }
     #btn-shoot  { right: 22px;  bottom: 118px; }
     #btn-sprint { right: 22px;  bottom: 214px; width: 72px; height: 72px; font-size: 22px; }
@@ -112,7 +148,48 @@
   <canvas id="game"></canvas>
   <div id="bug">Ф·98</div>
   <div id="goal-flash">ГОЛ!</div>
-  <button id="preset-btn">ТВ: Эфир-98</button>
+  <button id="settings-btn">⚙ НАСТРОЙКИ</button>
+
+  <div id="settings">
+    <button id="settings-close" aria-label="Закрыть">✕</button>
+    <h2>НАСТРОЙКИ</h2>
+
+    <h3>ИЗОБРАЖЕНИЕ</h3>
+    <div class="row">Картинка «телеканала»:
+      <button id="preset-btn">ТВ: Эфир-98</button>
+    </div>
+
+    <h3>КАМЕРА</h3>
+    <div class="row">
+      Подлёт к дальней бровке:
+      <input id="set-far" type="range" min="0" max="30" step="1" style="vertical-align:middle;width:180px">
+      <span id="set-far-val"></span>
+    </div>
+    <div class="row" style="color:rgba(255,255,255,0.5)">Камера приближается, когда мяч уходит на дальнюю сторону — дальний игрок не мельчает.</div>
+
+    <h3>УПРАВЛЕНИЕ — КЛАВИАТУРА</h3>
+    <div class="row"><span class="key">Стрелки</span> — движение; во время замаха удара — прицел по створу</div>
+    <div class="row"><span class="key">E</span> — спринт (мяч ведётся толчками, хуже контроль)</div>
+    <div class="row"><span class="key">S</span> — пас низом</div>
+    <div class="row"><span class="key">W</span> — пас на ход (настильный)</div>
+    <div class="row"><span class="key">D</span> — удар (держать = замах; короткий тап = носок в касание)</div>
+    <div class="row"><span class="key">A</span> — навес: тап ×1 свеча · ×2 настильный · ×3 низовой прострел</div>
+    <div class="row"><span class="key">После удара держать направление</span> — докрутка мяча в полёте</div>
+
+    <h3>УПРАВЛЕНИЕ — ГЕЙМПАД</h3>
+    <div class="row"><span class="key">Левый стик</span> — движение · <span class="key">RB/R1</span> — спринт</div>
+    <div class="row"><span class="key">A</span> пас · <span class="key">Y</span> пас на ход · <span class="key">X</span> удар · <span class="key">B</span> навес</div>
+
+    <h3>УПРАВЛЕНИЕ — ПЛАНШЕТ</h3>
+    <div class="row"><span class="key">Левая половина</span> — виртуальный стик (движение; после удара — докрутка)</div>
+    <div class="row"><span class="key">Кнопки</span> ПАС · УДАР · ⚡спринт</div>
+    <div class="row"><span class="key">Правая зона (круг НАВЕС)</span> — жест: направление = куда, длина = сила, скорость = характер дуги, изгиб пальца = подкрутка, короткий росчерк = пас на ход</div>
+
+    <h3>МЕХАНИКИ УДАРА (авто)</h3>
+    <div class="row">Тип выбирается сам: <span class="key">с места</span> — щёчка (точно) · <span class="key">на скорости/с хода</span> — подъём (мощно, ныряет) · <span class="key">тап</span> — носок (добивание)</div>
+    <div class="row">Бьющая нога — от положения корпуса к мячу: мяч слева → левая, справа → правая; крутка «наружу» = внешняя сторона стопы (шведка)</div>
+  </div>
+
   <div id="hint">Стрелки — бег · E спринт · S пас · W на ход · A навес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</div>
   <div id="stick-base"><div id="stick-knob"></div></div>
   <div id="cross-zone">НАВЕС</div>
@@ -131,6 +208,12 @@
     window.addEventListener('unhandledrejection', (e) => {
       document.getElementById('hint').textContent = 'ОШИБКА (promise): ' + e.reason;
     });
+
+    // iOS Safari игнорирует user-scalable=no: двойной тап по кнопке зумил экран
+    // (и обратно не вернуть). Глушим double-tap и pinch-жесты явно.
+    document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+    ['gesturestart', 'gesturechange', 'gestureend'].forEach((g) =>
+      document.addEventListener(g, (e) => e.preventDefault(), { passive: false }));
   </script>
   <script type="importmap">
     { "imports": {
