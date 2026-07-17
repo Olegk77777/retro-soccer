@@ -102,12 +102,48 @@ function createCrowdTexture() {
   return tex;
 }
 
+// Текстура одной ячейки сетки (белые кромки, прозрачная середина)
+function createNetTexture() {
+  const c = document.createElement('canvas');
+  c.width = 16;
+  c.height = 16;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 16, 16);
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillRect(0, 0, 16, 2);
+  ctx.fillRect(0, 0, 2, 16);
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
 function buildGoals(scene) {
   const G = CONFIG.goal;
   const F = CONFIG.field;
-  const mat = new THREE.MeshLambertMaterial({ color: 0xf2f2f2 });
+  const mat = new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0x555555 });
   const postGeo = new THREE.CylinderGeometry(G.postRadius, G.postRadius, G.height, 6);
   const barGeo = new THREE.CylinderGeometry(G.postRadius, G.postRadius, G.width + G.postRadius * 2, 6);
+
+  const netBase = createNetTexture();
+  const depth = 1.5; // глубина ворот (насколько сетка уходит назад)
+  const cell = 0.3;  // размер ячейки сетки в метрах
+
+  // Панель сетки заданного размера с правильным повтором ячеек
+  const netPanel = (w, h) => {
+    const tex = netBase.clone();
+    tex.needsUpdate = true;
+    tex.repeat.set(w / cell, h / cell);
+    return new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, opacity: 0.45,
+        side: THREE.DoubleSide, depthWrite: false,
+      }),
+    );
+  };
 
   for (const dir of [-1, 1]) {
     const x = dir * (F.length / 2);
@@ -120,6 +156,23 @@ function buildGoals(scene) {
     bar.rotation.x = Math.PI / 2;
     bar.position.set(x, G.height, 0);
     scene.add(bar);
+
+    // Сетка: задняя панель, «крыша» и две боковины
+    const back = netPanel(G.width, G.height);
+    back.rotation.y = Math.PI / 2;
+    back.position.set(x + dir * depth, G.height / 2, 0);
+    scene.add(back);
+
+    const roof = netPanel(depth, G.width);
+    roof.rotation.x = -Math.PI / 2; // кладём плашмя: глубина по X, ширина по Z
+    roof.position.set(x + dir * (depth / 2), G.height, 0);
+    scene.add(roof);
+
+    for (const z of [-G.width / 2, G.width / 2]) {
+      const side = netPanel(depth, G.height);
+      side.position.set(x + dir * (depth / 2), G.height / 2, z);
+      scene.add(side);
+    }
   }
 }
 

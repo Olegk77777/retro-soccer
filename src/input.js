@@ -1,5 +1,12 @@
 // Единый слой ввода: клавиатура + геймпад + тач (виртуальный стик и кнопки).
-// Наружу отдаёт вектор движения move (-1..1) и события: пас, удар (с силой замаха).
+// Классическая раскладка (решение Олега, 17.07.2026), у кнопок два смысла —
+// в атаке и в обороне (оборонительные придут с AI в Фазе 2–3):
+//   стрелки — движение
+//   S — пас            / в защите: сопровождение владеющего мячом
+//   D — удар (держать) / в защите: отбор
+//   A — навес          / в защите: подкат
+//   W — пас на ход
+//   Пробел — зарезервирован: игра в стеночку (будущее)
 
 import { CONFIG } from './config.js';
 
@@ -9,8 +16,10 @@ export class Input {
     this.move = { x: 0, z: 0 };
     this.charge = 0;         // сколько секунд держится кнопка удара
     this.charging = false;
-    this._passEdge = false;  // «пас нажат» (одноразовое событие)
-    this._shotEdge = null;   // сила удара 0..1 в момент отпускания
+    this._passEdge = false;    // S
+    this._throughEdge = false; // W
+    this._crossEdge = false;   // A
+    this._shotEdge = null;     // D: сила удара 0..1 в момент отпускания
     this._kbShoot = false;
     this._padShoot = false;
     this._touchShoot = false;
@@ -21,12 +30,15 @@ export class Input {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);
-      if (e.code === 'KeyX' || e.code === 'KeyK') this._passEdge = true;
-      if (e.code === 'Space' || e.code === 'KeyL') this._kbShoot = true;
+      if (e.code === 'KeyS') this._passEdge = true;
+      if (e.code === 'KeyW') this._throughEdge = true;
+      if (e.code === 'KeyA') this._crossEdge = true;
+      if (e.code === 'KeyD') this._kbShoot = true;
+      // Space — стеночка, появится вместе с партнёрами
     });
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
-      if (e.code === 'Space' || e.code === 'KeyL') this._kbShoot = false;
+      if (e.code === 'KeyD') this._kbShoot = false;
     });
 
     this._initTouch();
@@ -99,13 +111,14 @@ export class Input {
   update(dt) {
     this._pollGamepad();
 
-    // Складываем все источники движения (экран: вверх = от камеры, то есть -Z)
+    // Складываем все источники движения (экран: вверх = от камеры, то есть -Z).
+    // Клавиатура — только стрелки: WASD заняты действиями.
     let x = 0;
     let z = 0;
-    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) x -= 1;
-    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) x += 1;
-    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) z -= 1;
-    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) z += 1;
+    if (this.keys.has('ArrowLeft')) x -= 1;
+    if (this.keys.has('ArrowRight')) x += 1;
+    if (this.keys.has('ArrowUp')) z -= 1;
+    if (this.keys.has('ArrowDown')) z += 1;
     x += this._padMove.x + this._stick.x;
     z += this._padMove.z + this._stick.y;
     const len = Math.hypot(x, z);
@@ -128,6 +141,18 @@ export class Input {
   consumePass() {
     const v = this._passEdge;
     this._passEdge = false;
+    return v;
+  }
+
+  consumeThrough() {
+    const v = this._throughEdge;
+    this._throughEdge = false;
+    return v;
+  }
+
+  consumeCross() {
+    const v = this._crossEdge;
+    this._crossEdge = false;
     return v;
   }
 

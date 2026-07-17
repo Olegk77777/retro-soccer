@@ -108,11 +108,21 @@ export class Player {
       ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
 
       if (input.consumePass()) {
+        // S — обычный пас низом
         ball.strike(this.facing, P.passPower, P.passLift);
+        this.kickCooldown = P.kickCooldown;
+      } else if (input.consumeThrough()) {
+        // W — пас на ход: быстрее и почти без подъёма
+        ball.strike(this.facing, P.throughPower, P.throughLift);
+        this.kickCooldown = P.kickCooldown;
+      } else if (input.consumeCross()) {
+        // A — навес: высокая подача
+        ball.strike(this.facing, P.crossPower, P.crossLift);
         this.kickCooldown = P.kickCooldown;
       } else {
         const shot = input.consumeShot();
         if (shot !== null) {
+          // D — удар, сила зависит от замаха
           const power = P.shotPowerMin + (P.shotPowerMax - P.shotPowerMin) * shot;
           const lift = P.shotLift * (0.4 + 0.6 * shot);
           ball.strike(this.facing, power, lift);
@@ -122,6 +132,8 @@ export class Player {
     } else {
       // Без мяча события сгорают, чтобы не «выстрелить» при первом касании
       input.consumePass();
+      input.consumeThrough();
+      input.consumeCross();
       input.consumeShot();
     }
   }
