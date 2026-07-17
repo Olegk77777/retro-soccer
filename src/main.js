@@ -110,13 +110,14 @@ function frame() {
     if (goalTimer <= 0) goalFlash.classList.remove('show');
   }
 
-  // ТВ-камера: стоит на боковой линии, плавно провожает мяч
+  // ТВ-камера: стоит на боковой линии, плавно провожает мяч по X и по глубине.
+  // followZ важен: без слежения по Z игрок у ближней бровки выпадал за нижний край.
   const C = CONFIG.camera;
   const bx = ball.mesh.position.x;
   const bz = ball.mesh.position.z;
   camPos.set(bx * C.followFactor, C.height, C.distance);
   camera.position.lerp(camPos, C.lerp * 60 * dt);
-  camLook.lerp(new THREE.Vector3(bx * 0.8, 1, bz * 0.45), C.lerp * 60 * dt);
+  camLook.lerp(new THREE.Vector3(bx * 0.8, C.lookHeight, bz * C.followZ), C.lerp * 60 * dt);
   camera.lookAt(camLook);
 
   if (NO_CRT) renderer.render(scene, camera);
