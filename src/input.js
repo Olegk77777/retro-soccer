@@ -11,10 +11,12 @@
 
 import { CONFIG } from './config.js';
 
-// Кнопка с замахом: копит силу, пока держится; на отпускании отдаёт силу 0..1
+// Кнопка с замахом: копит силу, пока держится; на отпускании отдаёт силу 0..overCap.
+// Значение выше 1.0 = ПЕРЕДЕРЖКА: исполнение сильнее задуманного (мяч за поле).
 class ChargeAction {
-  constructor(chargeTime) {
+  constructor(chargeTime, overCap = 1.3) {
     this.chargeTime = chargeTime;
+    this.overCap = overCap;
     this.held = false;
     this.t = 0;
     this._edge = null;
@@ -23,7 +25,7 @@ class ChargeAction {
   feed(dt, heldNow) {
     if (heldNow) {
       this.held = true;
-      this.t = Math.min(this.t + dt, this.chargeTime);
+      this.t = Math.min(this.t + dt, this.chargeTime * this.overCap);
     } else if (this.held) {
       this._edge = Math.max(0.15, this.t / this.chargeTime); // короткий тап = слабое, но не нулевое
       this.held = false;
@@ -51,10 +53,15 @@ export class Input {
     this.keys = new Set();
     this.move = { x: 0, z: 0 };
 
-    this.pass = new ChargeAction(CONFIG.player.chargeTime);     // S / геймпад A
-    this.through = new ChargeAction(CONFIG.player.chargeTime);  // W / геймпад Y
-    this.cross = new ChargeAction(CONFIG.player.chargeTime);    // A / геймпад B
-    this.shot = new ChargeAction(CONFIG.shot.chargeTime);       // D / геймпад X
+    const cap = CONFIG.player.chargeOverCap;
+    this.pass = new ChargeAction(CONFIG.player.chargeTime, cap);     // S / геймпад A
+    this.through = new ChargeAction(CONFIG.player.chargeTime, cap);  // W / геймпад Y
+    this.shot = new ChargeAction(CONFIG.shot.chargeTime, cap);       // D / геймпад X
+
+    // Навес (A / геймпад B) — своя стейт-машина, как в PES: полоска, затем
+    // окно «замаха ноги», где доп. тапы меняют тип навеса (×1 / ×2 / ×3)
+    this._cross = { state: 'idle', charge: 0, taps: 0, timer: 0, prevHeld: false };
+    this._crossEvent = null;
 
     this._padMove = { x: 0, z: 0 };
     this._pad = { pass: false, shot: false, cross: false, through: false };
@@ -158,11 +165,13 @@ export class Input {
     this.move.x = x;
     this.move.z = z;
 
-    // Замахи всех четырёх действий
+    // Замахи паса, паса на ход и удара
     this.pass.feed(dt, this.keys.has('KeyS') || this._pad.pass || this._touch.pass);
     this.through.feed(dt, this.keys.has('KeyW') || this._pad.through);
-    this.cross.feed(dt, this.keys.has('KeyA') || this._pad.cross);
     this.shot.feed(dt, this.keys.has('KeyD') || this._pad.shot || this._touch.shot);
+
+    // Навес: полоска → окно тапов → событие {charge, taps}
+    this._feedCross(dt, this.keys.has('KeyA') || this._pad.cross);
 
     // Прицел удара: пока держится замах, запоминаем последнее направление
     // стрелок — сработает, даже если стрелку отпустили чуть раньше кнопки
@@ -173,16 +182,64 @@ export class Input {
     }
   }
 
+  // Стейт-машина навеса (PES): удержание A копит полоску; после отпускания —
+  // окно tapWindow («замах ноги»), каждый новый тап A повышает тип: ×1 высокий,
+  // ×2 настильный, ×3 низовой прострел. По истечении окна — событие.
+  _feedCross(dt, heldNow) {
+    const c = this._cross;
+    const justPressed = heldNow && !c.prevHeld;
+    c.prevHeld = heldNow;
+
+    const CT = CONFIG.player.chargeTime;
+    const cap = CONFIG.player.chargeOverCap;
+
+    switch (c.state) {
+      case 'idle':
+        if (justPressed) {
+          c.state = 'charging';
+          c.charge = 0;
+          c.taps = 1;
+        }
+        break;
+      case 'charging':
+        if (heldNow) {
+          c.charge = Math.min(c.charge + dt / CT, cap);
+        } else {
+          c.state = 'window';
+          c.timer = CONFIG.cross.tapWindow;
+        }
+        break;
+      case 'window':
+        if (justPressed) c.taps = Math.min(c.taps + 1, 3);
+        c.timer -= dt;
+        if (c.timer <= 0) {
+          this._crossEvent = { charge: Math.max(0.15, c.charge), taps: c.taps };
+          c.state = heldNow ? 'blocked' : 'idle'; // дожатую A не считаем новой полоской
+        }
+        break;
+      case 'blocked':
+        if (!heldNow) c.state = 'idle';
+        break;
+    }
+  }
+
+  consumeCross() {
+    const v = this._crossEvent;
+    this._crossEvent = null;
+    return v; // null или {charge: 0.15..1.3, taps: 1..3}
+  }
+
   // Для шкалы силы в UI
   get charging() {
-    return this.pass.held || this.through.held || this.cross.held || this.shot.held;
+    return this.pass.held || this.through.held || this.shot.held || this._cross.state === 'charging';
   }
 
   get chargeLevel() {
     let m = 0;
-    for (const a of [this.pass, this.through, this.cross, this.shot]) {
+    for (const a of [this.pass, this.through, this.shot]) {
       if (a.held) m = Math.max(m, a.charge01);
     }
+    if (this._cross.state === 'charging') m = Math.max(m, this._cross.charge);
     return m;
   }
 }

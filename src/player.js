@@ -110,7 +110,7 @@ export class Player {
     // События замахов снимаем каждый кадр: без мяча они просто сгорают
     const pass = input.pass.consume();
     const through = input.through.consume();
-    const cross = input.cross.consume();
+    const cross = input.consumeCross();
     const shot = input.shot.consume();
 
     if (this.hasBall) {
@@ -129,15 +129,34 @@ export class Player {
         ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, through), P.through.lift);
         this.kickCooldown = P.kickCooldown;
       } else if (cross !== null) {
-        // A — навес: чем сильнее замах, тем дальше и выше
-        ball.strike(this.facing,
-          lerp(P.cross.powerMin, P.cross.powerMax, cross),
-          lerp(P.cross.liftMin, P.cross.liftMax, cross));
-        this.kickCooldown = P.kickCooldown;
+        this.doCross(cross, ball);
       } else if (shot !== null) {
         this.shoot(shot, input, ball);
       }
     }
+  }
+
+  // Навес (A) — три типа по числу тапов, как в PES (ресёрч 08):
+  // ×1 — высокая свеча, ×2 — настильный под удар, ×3 — низовой прострел.
+  // Дуга задаётся углом вылета, подкрутка заворачивает мяч к воротам.
+  doCross(ev, ball) {
+    const C = CONFIG.cross;
+    const F = CONFIG.field;
+    const types = [C.high, C.mid, C.low];
+    const t = types[Math.min(ev.taps, 3) - 1];
+
+    const power = t.powerMin + (t.powerMax - t.powerMin) * ev.charge; // >1 = передержка
+    const lift = power * Math.tan((t.angle * Math.PI) / 180);
+
+    // Подкрутка в сторону той штрафной, в чьей половине стоим (inswing)
+    const pos = this.group.position;
+    const goalX = (pos.x >= 0 ? 1 : -1) * (F.length / 2);
+    const f = this.facing;
+    const side = (-f.z) * (goalX - pos.x) + f.x * (0 - pos.z); // перпендикуляр · направление на ворота
+    const curl = t.curl * Math.sign(side || 1);
+
+    ball.strike(f, power, lift, curl);
+    this.kickCooldown = CONFIG.player.kickCooldown;
   }
 
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
@@ -168,8 +187,9 @@ export class Player {
       const dir = new THREE.Vector3(goalX - bp.x, 0, targetZ - bp.z);
       const flightDist = dir.length();
       dir.normalize();
-      // Поправка на сопротивление воздуха: реальный полёт чуть дольше идеального
-      const t = flightDist / (power * 0.93);
+      // Поправка на сопротивление воздуха: реальный полёт дольше идеального
+      // (0.80 подобрано симуляцией под квадратичный drag)
+      const t = flightDist / (power * 0.80);
       // Вертикальная скорость, чтобы на воротах оказаться на высоте цели
       let vy = (targetY - bp.y) / t - 0.5 * B.gravity * t;
       vy = Math.max(0, Math.min(S.maxLift, vy));

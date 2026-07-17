@@ -95,10 +95,12 @@ function frame() {
   const event = ball.update(dt);
   if (event === 'goal' && goalTimer <= 0) onGoal();
 
-  // Шкала замаха видна, пока держится любая кнопка действия
+  // Шкала замаха видна, пока держится любая кнопка действия.
+  // Больше 100% — красная зона: передержка, исполнение уйдёт сильнее задуманного.
   if (input.charging) {
     powerEl.style.display = 'block';
-    powerFill.style.width = `${input.chargeLevel * 100}%`;
+    powerFill.style.width = `${Math.min(input.chargeLevel, 1) * 100}%`;
+    powerFill.classList.toggle('over', input.chargeLevel > 1);
   } else {
     powerEl.style.display = 'none';
   }

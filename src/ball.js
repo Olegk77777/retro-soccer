@@ -41,6 +41,7 @@ export class Ball {
     this.shadow.rotation.x = -Math.PI / 2;
     this.shadow.position.y = 0.02;
     this.vel = new THREE.Vector3();
+    this.spin = 0; // подкрутка (эффект Магнуса): уводит летящий мяч вбок
     this.spinAxis = new THREE.Vector3(1, 0, 0);
     this.reset();
     scene.add(this.mesh);
@@ -50,13 +51,16 @@ export class Ball {
   reset() {
     this.mesh.position.set(0, CONFIG.ball.radius, 0);
     this.vel.set(0, 0, 0);
+    this.spin = 0;
   }
 
-  // Удар: направление (единичный вектор), сила (м/с) и подъём
-  strike(dir, power, lift) {
+  // Удар: направление (единичный вектор), сила (м/с), подъём и подкрутка.
+  // curl > 0 — мяч в полёте заворачивает влево от направления, < 0 — вправо.
+  strike(dir, power, lift, curl = 0) {
     this.vel.x = dir.x * power;
     this.vel.z = dir.z * power;
     this.vel.y = lift;
+    this.spin = curl;
   }
 
   update(dt) {
@@ -64,20 +68,33 @@ export class Ball {
     const F = CONFIG.field;
     const p = this.mesh.position;
 
-    // Трение задано «за кадр при 60 fps» — приводим к реальному dt,
+    // Трение качения задано «за кадр при 60 fps» — приводим к реальному dt,
     // иначе на 120-герцовом iPad мяч катился бы вдвое дольше
     const roll = Math.pow(B.rollFriction, dt * 60);
-    const air = Math.pow(B.airFriction, dt * 60);
 
     // Гравитация в полёте
     if (p.y > B.radius || this.vel.y > 0) {
       this.vel.y += B.gravity * dt;
-      this.vel.x *= air;
-      this.vel.z *= air;
+      // Сопротивление воздуха ~ квадрату скорости: быстрый мяч тормозится
+      // сильнее, медленный почти нет — это и даёт «прострельность» PES
+      const sp = this.vel.length();
+      if (sp > 0.01) {
+        const d = Math.min(B.dragK * sp * dt, 0.5);
+        this.vel.multiplyScalar(1 - d);
+      }
+      // Эффект Магнуса: подкрутка заворачивает мяч перпендикулярно скорости
+      if (Math.abs(this.spin) > 0.01) {
+        const vx = this.vel.x;
+        const vz = this.vel.z;
+        this.vel.x += -vz * this.spin * B.magnus * dt;
+        this.vel.z += vx * this.spin * B.magnus * dt;
+        this.spin *= Math.pow(B.spinDecay, dt * 60);
+      }
     } else {
-      // Качение по газону
+      // Качение по газону: закрутка быстро гаснет о траву
       this.vel.x *= roll;
       this.vel.z *= roll;
+      this.spin *= Math.pow(0.9, dt * 60);
     }
 
     p.addScaledVector(this.vel, dt);
