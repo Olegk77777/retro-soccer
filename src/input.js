@@ -133,8 +133,7 @@ export class Input {
     bindHold('btn-pass', 'pass');
     bindHold('btn-shoot', 'shot');
     bindHold('btn-sprint', 'sprint');
-    bindHold('btn-cross', 'cross');     // тапы по НАВЕС проходят через PES-машину ×1/×2/×3
-    bindHold('btn-through', 'through');
+    // Навесы и пас на ход на таче — только жестом-свайпом («как нарисовал, так и полетело»)
 
     this._initSwipe();
   }
@@ -150,11 +149,11 @@ export class Input {
       if (e.target && e.target.classList && e.target.classList.contains('tbtn')) return;
       if (this._swipe.id !== null) return;
       this._swipe.id = e.pointerId;
-      this._swipe.pts = [{ x: e.clientX, y: e.clientY }];
+      this._swipe.pts = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
     });
     window.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this._swipe.id) return;
-      this._swipe.pts.push({ x: e.clientX, y: e.clientY });
+      this._swipe.pts.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
     });
     const endSwipe = (e) => {
       if (e.pointerId !== this._swipe.id) return;
@@ -166,10 +165,15 @@ export class Input {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
-      if (len < 40) return; // слишком короткий — не свайп
+      if (len < 36) return; // слишком короткий — не свайп
 
       // Сила: длина свайпа относительно трети экрана
       const power = Math.min(1.3, Math.max(0.2, len / (window.innerHeight * 0.35)));
+
+      // Скорость жеста (экранов в секунду): медленный — свеча, резкий — прострел
+      const durMs = Math.max(1, (pts[pts.length - 1].t || 0) - (a.t || 0));
+      let speed = (len / window.innerHeight) / (durMs / 1000);
+      if (durMs < 40) speed = 2; // защита от синтетических событий
 
       // Подкрутка: насколько середина траектории отклонилась от прямой (со знаком)
       const m = pts[(pts.length / 2) | 0];
@@ -180,6 +184,7 @@ export class Input {
       this._swipeEvent = {
         dir: { x: dx / len, z: dy / len },
         power,
+        speed,
         curl: curl01,
       };
     };

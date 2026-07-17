@@ -184,19 +184,33 @@ export class Player {
     this.kickCooldown = CONFIG.player.kickCooldown;
   }
 
-  // Свайп-удар с тача: направление пальца — куда, длина — сила,
-  // изгиб траектории — подкрутка (как в мобильных футболах)
+  // Жест-свайп с тача — «как нарисовал, так и полетело»:
+  // направление пальца — куда (независимо от бега), длина — сила,
+  // скорость жеста — характер (медленно — свеча, резко — прострел),
+  // изгиб траектории пальца — подкрутка. Короткий росчерк — пас на ход.
   swipeShot(sw, ball) {
     const S = CONFIG.shot;
+    const C = CONFIG.cross;
+    const P = CONFIG.player;
     const dir = new THREE.Vector3(sw.dir.x, 0, sw.dir.z).normalize();
     const charge = Math.min(sw.power, 1.3);
-    const power = S.powerMin + (S.powerMax - S.powerMin) * charge;
-    const lift = S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * Math.min(charge, 1);
     const curl = -sw.curl * S.swipeCurl; // палец гнёт вправо — мяч крутится вправо
-    ball.strike(dir, power, lift, curl);
-    // Развернуться в сторону удара — читаемость
+
+    if (charge < 0.45) {
+      // Короткий росчерк — острый пас на ход низом
+      const power = P.through.powerMin + (P.through.powerMax - P.through.powerMin) * (charge / 0.45);
+      ball.strike(dir, power, P.through.lift, curl * 0.5);
+    } else {
+      // Тип дуги по скорости жеста (экранов/сек): медленный — свеча,
+      // средний — настильный, резкий — низовой прострел
+      const type = sw.speed < 1.2 ? C.high : (sw.speed < 2.6 ? C.mid : C.low);
+      const power = type.powerMin + (type.powerMax - type.powerMin) * charge;
+      const lift = power * Math.tan((type.angle * Math.PI) / 180);
+      ball.strike(dir, power, lift, curl);
+    }
+    // Развернуться в сторону мяча — читаемость
     this.rot = Math.atan2(dir.x, dir.z);
-    this.kickCooldown = CONFIG.player.kickCooldown;
+    this.kickCooldown = P.kickCooldown;
   }
 
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
