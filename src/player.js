@@ -243,11 +243,21 @@ export class Player {
     pos.x = Math.max(-maxX, Math.min(maxX, pos.x));
     pos.z = Math.max(-maxZ, Math.min(maxZ, pos.z));
 
-    // --- Разворот в сторону бега (кратчайшей дугой); в прицельной стойке взгляд
-    // заморожен (на бегу с замахом — рулим как обычно), на спринте развороты тяжелее ---
+    // --- Разворот корпуса. В прицельной стойке взгляд заморожен.
+    // При ведении, пока мяч ДАЛЕКО впереди, игрок смотрит НА МЯЧ и бежит за
+    // ним — корпус разворачивается на новый курс только когда мяч рядом с ногой
+    // (фидбек Олега: иначе игрок доворачивался раньше мяча, и мяч «прилетал
+    // сбоку»). Вне ведения — обычный разворот в сторону бега.
     const speed = Math.hypot(this.vel.x, this.vel.z);
     if (!brake && speed > 0.5) {
-      const want = Math.atan2(this.vel.x, this.vel.z);
+      let want;
+      const bpp = ball.mesh.position; // bp определяется ниже — берём позицию напрямую
+      const bd2 = Math.hypot(bpp.x - pos.x, bpp.z - pos.z);
+      if (this.controlling && bd2 > P.dribbleChaseDist) {
+        want = Math.atan2(bpp.x - pos.x, bpp.z - pos.z); // смотрим на мяч, пока догоняем
+      } else {
+        want = Math.atan2(this.vel.x, this.vel.z);
+      }
       let d = want - this.rot;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
@@ -327,10 +337,15 @@ export class Player {
       } else if (!brake) {
         // Медленное ведение: мяч липнет у ноги — близкий контроль.
         // В прицельной стойке (brake) НЕ подтягиваем: мяч остаётся там, куда
-        // игрок подставил корпус — от этого зависит бьющая нога
-        const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
-        ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
-        ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
+        // игрок подставил корпус — от этого зависит бьющая нога.
+        // ВАЖНО (фидбек Олега): липнет только мяч РЯДОМ и ПЕРЕД игроком —
+        // издалека/из-за спины мяч не «прилетает сбоку», игрок добегает сам
+        const aheadF = (bp.x - pos.x) * this.facing.x + (bp.z - pos.z) * this.facing.z;
+        if (dist < P.stickyRadius && aheadF > -0.3) {
+          const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
+          ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
+          ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
+        }
       }
     }
 

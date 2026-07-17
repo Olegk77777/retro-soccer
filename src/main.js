@@ -48,6 +48,27 @@ presetBtn.addEventListener('click', (e) => {
   applyPreset(presetIndex + 1);
 });
 
+// --- Панель настроек ---
+const settingsPanel = document.getElementById('settings');
+document.getElementById('settings-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsPanel.classList.add('show');
+});
+document.getElementById('settings-close').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsPanel.classList.remove('show');
+});
+
+// Настройка камеры: подлёт к дальней бровке (пишем прямо в живой CONFIG)
+const farSlider = document.getElementById('set-far');
+const farVal = document.getElementById('set-far-val');
+farSlider.value = CONFIG.camera.farApproach;
+farVal.textContent = CONFIG.camera.farApproach;
+farSlider.addEventListener('input', () => {
+  CONFIG.camera.farApproach = Number(farSlider.value);
+  farVal.textContent = farSlider.value;
+});
+
 // --- «ГОЛ!» ---
 const goalFlash = document.getElementById('goal-flash');
 let goalTimer = 0;
@@ -112,10 +133,17 @@ function frame() {
 
   // ТВ-камера: стоит на боковой линии, плавно провожает мяч по X и по глубине.
   // followZ важен: без слежения по Z игрок у ближней бровки выпадал за нижний край.
+  // Подлёт к дальней бровке (принцип FIFA/FC 26): мяч уходит вглубь — камера
+  // плавно приближается и чуть снижается, чтобы дальний игрок не «мельчал».
   const C = CONFIG.camera;
   const bx = ball.mesh.position.x;
   const bz = ball.mesh.position.z;
-  camPos.set(bx * C.followFactor, C.height, C.distance);
+  const far01 = Math.min(1, Math.max(0, -bz / (CONFIG.field.width / 2)));
+  camPos.set(
+    bx * C.followFactor,
+    C.height - C.farLower * far01,
+    C.distance - C.farApproach * far01,
+  );
   camera.position.lerp(camPos, C.lerp * 60 * dt);
   camLook.lerp(new THREE.Vector3(bx * 0.8, C.lookHeight, bz * C.followZ), C.lerp * 60 * dt);
   camera.lookAt(camLook);
