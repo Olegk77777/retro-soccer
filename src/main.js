@@ -60,6 +60,22 @@ document.getElementById('settings-close').addEventListener('click', (e) => {
   settingsPanel.classList.remove('show');
 });
 
+// Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
+// запоминается в localStorage — на iPad настройка переживает перезапуск
+const assistSlider = document.getElementById('set-assist');
+const assistVal = document.getElementById('set-assist-val');
+const savedAssist = Number(localStorage.getItem('f98.shotAssist'));
+if (savedAssist >= 10 && savedAssist <= 30) {
+  CONFIG.shot.assist.level = savedAssist / 100;
+}
+assistSlider.value = Math.round(CONFIG.shot.assist.level * 100);
+assistVal.textContent = assistSlider.value;
+assistSlider.addEventListener('input', () => {
+  CONFIG.shot.assist.level = Number(assistSlider.value) / 100;
+  assistVal.textContent = assistSlider.value;
+  try { localStorage.setItem('f98.shotAssist', assistSlider.value); } catch (e) { /* приватный режим */ }
+});
+
 // Настройка камеры: подлёт к дальней бровке (пишем прямо в живой CONFIG)
 const farSlider = document.getElementById('set-far');
 const farVal = document.getElementById('set-far-val');

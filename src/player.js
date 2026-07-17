@@ -397,16 +397,20 @@ export class Player {
 
     // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
     // (на iPad это тот же виртуальный стик — жест одинаковый на всех платформах)
+    // Помощь в ударах усиливает докрутку: легче дотянуть мяч в угол
     const B = CONFIG.ball;
     if (ball.afterTouch > 0 && bp.y > B.radius * 1.5) {
       const vx = ball.vel.x;
       const vz = ball.vel.z;
       const sp = Math.hypot(vx, vz);
       if (sp > 1) {
+        const AS = CONFIG.shot.assist;
+        const rate = B.afterTouchRate * (1 + AS.level * AS.touchRate);
+        const cap = B.afterTouchMax * (1 + AS.level * AS.touchMax);
         // Боковая составляющая ввода относительно направления полёта → закрутка
         const lat = (input.move.x * -vz + input.move.z * vx) / sp;
-        ball.spin += lat * B.afterTouchRate * dt;
-        ball.spin = Math.max(-B.afterTouchMax, Math.min(B.afterTouchMax, ball.spin));
+        ball.spin += lat * rate * dt;
+        ball.spin = Math.max(-cap, Math.min(cap, ball.spin));
       }
     }
   }
@@ -635,8 +639,11 @@ export class Player {
     // У тычка сила почти не зависит от замаха — он всегда «средний, но мгновенный»
     const effCharge = styleName === 'toe' ? st.effCharge : charge;
     const power = (S.powerMin + (S.powerMax - S.powerMin) * effCharge) * st.powerFactor;
-    const nz = S.noiseZ * st.noiseFactor;
-    const ny = S.noiseY * st.noiseFactor;
+    // Помощь в ударах глушит часть шума исполнения (слайдер в НАСТРОЙКАХ)
+    const AS = S.assist;
+    const noiseK = Math.max(0, 1 - AS.level * AS.noiseCut);
+    const nz = S.noiseZ * st.noiseFactor * noiseK;
+    const ny = S.noiseY * st.noiseFactor * noiseK;
 
     // Щечка «вырезает» мяч внутрь бьющей ноги: корпус выбирает ногу,
     // нога — сторону завитка (правая — влево, левая — вправо).
@@ -666,6 +673,27 @@ export class Player {
       if (effCharge > S.overchargeFrom) targetY += Math.random() * S.overchargeRise; // перезаряд — риск выше ворот
       targetZ += (Math.random() - 0.5) * 2 * nz;
       targetY += (Math.random() - 0.5) * 2 * ny;
+
+      // Помощь в ударах: небольшой промах прощается — прицел дотягивается
+      // в створ (максимум level×pullMeters метров). Чем меньше был промах,
+      // тем глубже от штанги ложится мяч (tuck) — спасённые удары не липнут
+      // все в одну точку у штанги. Прицел, изначально попадающий в створ,
+      // не трогается; сознательный удар сильно мимо останется промахом.
+      const forgive = AS.level * AS.pullMeters;
+      const postEdge = G.width / 2 - B.radius;  // прицел, при котором мяч ещё в створе
+      if (Math.abs(targetZ) > postEdge) {
+        const miss = Math.abs(targetZ) - postEdge;
+        targetZ = Math.sign(targetZ) * (miss > forgive
+          ? postEdge + miss - forgive
+          : postEdge - (forgive - miss) * AS.tuck);
+      }
+      const barEdge = G.height - B.radius;
+      if (targetY > barEdge) {
+        const over = targetY - barEdge;
+        targetY = over > forgive
+          ? barEdge + over - forgive
+          : barEdge - (forgive - over) * AS.tuck;
+      }
 
       const dir = new THREE.Vector3(goalX - bp.x, 0, targetZ - bp.z);
       const flightDist = dir.length();

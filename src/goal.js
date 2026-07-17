@@ -348,10 +348,31 @@ export class GoalSystem {
       const speed = v.getComponent(axis);
       if (Math.abs(speed) < 1e-8) continue;
       const signed = p.getComponent(axis) - plane.value;
-      if (Math.abs(signed) <= radius + 1e-5) continue;
-      if (signed * speed >= 0) continue; // мяч удаляется от плоскости
+      const outSign = plane.outward.getComponent(axis);
+      if (signed * speed >= 0) {
+        // Мяч движется НАРУЖУ, но полотно ещё касается сферы, а центр не ушёл
+        // за плоскость — последний шанс схватить «побег» сквозь сетку
+        // (гол с угла: контакт с одной панелью умер, когда мяч уже прошивал другую)
+        if (speed * outSign <= 0) continue;            // уходит внутрь ворот — не побег
+        if (signed * outSign > 1e-5) continue;         // центр уже снаружи — поздно
+        if (Math.abs(signed) > radius + 1e-5) continue;
+        const point = p.clone();
+        point.setComponent(axis, plane.value);
+        if (!plane.inside(point)) continue;
+        const catchHit = {
+          time: 0, normal: plane.outward.clone().negate(), kind: 'net',
+          panel: plane.panel, outward: plane.outward, plane,
+        };
+        if (!best || catchHit.time < best.time) best = catchHit;
+        continue;
+      }
+      // Мяч уже частично пересекает плоскость (гол с острого угла: влетел
+      // почти вдоль полотна) — контакт начинается немедленно, а не пропускается.
+      // Раньше этот случай отбрасывался, и боковая сетка «не держала» мяч.
       const side = Math.sign(signed);
-      const time = (side * radius - signed) / speed;
+      const time = Math.abs(signed) <= radius + 1e-5
+        ? 0
+        : (side * radius - signed) / speed;
       if (time < -1e-7 || time > maxTime) continue;
       const point = p.clone().addScaledVector(v, Math.max(0, time));
       if (!plane.inside(point)) continue;
@@ -418,14 +439,21 @@ export class GoalSystem {
       const normalSpeed = ball.vel.dot(contact.pushDir);
 
       if (penetration <= 0 && normalSpeed <= 0 && contact.age > 0) {
-        ball.netContact = null;
-        break;
+        // Своя панель отпустила мяч — но он мог тем временем продавить соседнюю
+        // (скольжение вдоль задней в бок). Контакт передаётся, а не обрывается.
+        if (!this.transferNetContact(ball, contact)) break;
+        continue;
       }
 
       const stretch = Math.max(0, penetration);
       const extra = Math.max(0, stretch - N.physicalMaxStretch);
       const accel = -N.ballSpring * stretch - N.hardStopSpring * extra - N.ballDamping * normalSpeed;
       ball.vel.addScaledVector(contact.pushDir, accel * step);
+
+      // Гол с угла (грабля 17.07.2026): пока мяч скользит в «мешке» одной панели,
+      // он может уткнуться в СОСЕДНЮЮ (бок, крышу) — без её пружины он проходил
+      // сквозь полотно насквозь. Все продавленные панели работают одновременно.
+      this.applySidePanels(ball, contact, step);
 
       const vn = ball.vel.dot(contact.pushDir);
       const normalVelocity = contact.pushDir.clone().multiplyScalar(vn);
@@ -447,12 +475,76 @@ export class GoalSystem {
 
       contact.age += step;
       used += step;
-      if ((newPenetration <= 0 && ball.vel.dot(contact.pushDir) <= 0) ||
-          contact.age >= N.contactMaxTime) {
-        ball.netContact = null;
+      if (contact.age >= N.contactMaxTime) {
+        ball.netContact = null; // страховка от вечного контакта — жёсткий выход
+      } else if (newPenetration <= 0 && ball.vel.dot(contact.pushDir) <= 0) {
+        this.transferNetContact(ball, contact); // либо соседняя панель, либо null
       }
     }
     return { used, event };
+  }
+
+  // Смерть контакта ≠ свобода: если мяч в этот момент продавливает другую
+  // панель (шов задней и боковой при голе с угла), контакт переезжает на неё —
+  // с накопленным возрастом, чтобы страховка contactMaxTime не сбрасывалась.
+  transferNetContact(ball, contact) {
+    const R = CONFIG.ball.radius;
+    const p = ball.mesh.position;
+    let best = null;
+    let bestPen = 0.005;
+    for (const plane of this.netPlanes) {
+      if (plane === contact.plane) continue;
+      const axis = plane.axis;
+      const outSign = plane.outward.getComponent(axis);
+      const pen = (p.getComponent(axis) - plane.value) * outSign + R;
+      if (pen <= bestPen) continue;
+      const planePoint = p.clone();
+      planePoint.setComponent(axis, plane.value);
+      if (!plane.inside(planePoint)) continue;
+      best = plane;
+      bestPen = pen;
+    }
+    if (!best) {
+      ball.netContact = null;
+      return false;
+    }
+    ball.netContact = {
+      panel: best.panel,
+      plane: best,
+      pushDir: best.outward.clone(),
+      age: contact.age,
+      excited: contact.excited,
+    };
+    return true;
+  }
+
+  // Вторичные контакты: любая ДРУГАЯ панель, которую мяч продавил, пружинит
+  // тем же законом, что и основная. Так работает угловой «карман» — задняя и
+  // боковая сетки держат мяч вместе, и он не просачивается сквозь шов.
+  applySidePanels(ball, contact, step) {
+    const N = CONFIG.goal.net;
+    const R = CONFIG.ball.radius;
+    const p = ball.mesh.position;
+    for (const plane of this.netPlanes) {
+      if (plane === contact.plane) continue;
+      const axis = plane.axis;
+      const outSign = plane.outward.getComponent(axis);
+      const pen = (p.getComponent(axis) - plane.value) * outSign + R;
+      if (pen <= 0) continue;
+      const planePoint = p.clone();
+      planePoint.setComponent(axis, plane.value);
+      if (!plane.inside(planePoint)) continue; // панель другого края/ворот
+
+      const vn = ball.vel.dot(plane.outward);
+      if (!contact.excited.has(plane.panel)) {
+        contact.excited.add(plane.panel);
+        plane.panel.excite(planePoint, vn);
+      }
+      const extra = Math.max(0, pen - N.physicalMaxStretch);
+      const accel = -N.ballSpring * pen - N.hardStopSpring * extra - N.ballDamping * vn;
+      ball.vel.addScaledVector(plane.outward, accel * step);
+      plane.panel.press(planePoint, pen, step);
+    }
   }
 
   moveBall(ball, dt) {
@@ -492,6 +584,7 @@ export class GoalSystem {
           plane: hit.plane,
           pushDir: hit.normal.clone().negate(),
           age: 0,
+          excited: new Set([hit.panel]), // какие панели уже дёрнуты этим контактом
         };
         // Отладочный или испорченный импульс не должен протащить мяч дальше,
         // чем способен физически выдержать контакт. Игровые удары (до 30 м/с)
