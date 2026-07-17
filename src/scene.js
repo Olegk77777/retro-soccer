@@ -242,6 +242,75 @@ function buildFloodlights(scene) {
   }
 }
 
+// Текстура рекламного борта: цветные секции с выдуманными брендами
+// в духе телерекламы 90-х (реальные бренды по правилу проекта — нельзя)
+function createBoardTexture() {
+  const c = document.createElement('canvas');
+  c.width = 1024;
+  c.height = 64;
+  const ctx = c.getContext('2d');
+  const ads = [
+    ['#c0341d', '#fff', 'СПОРТ·ТВ'],
+    ['#f2f2f2', '#1a2a6b', 'КИНЕСКОП'],
+    ['#12507a', '#ffd23f', 'ВОЛНА'],
+    ['#1f2d1a', '#7fd642', 'ЭФИР 98'],
+    ['#e8b21a', '#3a1a00', 'МЕТЕОР'],
+    ['#2a2a2a', '#e0e0e0', 'ОРБИТА·888'],
+  ];
+  const secW = c.width / ads.length;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ads.forEach(([bg, fg, text], i) => {
+    ctx.fillStyle = bg;
+    ctx.fillRect(i * secW, 0, secW, c.height);
+    ctx.fillStyle = fg;
+    ctx.font = 'bold 34px "Arial Narrow", Arial, sans-serif';
+    ctx.fillText(text, i * secW + secW / 2, c.height / 2 + 2);
+  });
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function buildBoards(scene) {
+  const F = CONFIG.field;
+  const BD = CONFIG.boards;
+  const base = createBoardTexture();
+  const bx = F.length / 2 + BD.marginX; // позиция торцевых щитов по X
+  const bz = F.width / 2 + BD.marginZ;  // боковых по Z
+  const repeatPerMeter = 1 / 8;         // одна «простыня» рекламы на 8 м
+
+  // Один щит: длинная тонкая доска высотой BD.height, текстурой внутрь и наружу
+  const board = (len, horizontal) => {
+    const tex = base.clone();
+    tex.needsUpdate = true;
+    tex.repeat.set(len * repeatPerMeter, 1);
+    const mat = new THREE.MeshLambertMaterial({ map: tex, emissive: 0x222222 });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
+    const geo = new THREE.BoxGeometry(len, BD.height, 0.25);
+    // текстура — на широкие грани (±Z бокса), торцы тёмные
+    const m = new THREE.Mesh(geo, [dark, dark, dark, dark, mat, mat]);
+    if (!horizontal) m.rotation.y = Math.PI / 2;
+    return m;
+  };
+
+  // Северный и южный (вдоль длины поля)
+  for (const z of [-bz, bz]) {
+    const b = board(F.length + BD.marginX * 2, true);
+    b.position.set(0, BD.height / 2, z);
+    scene.add(b);
+  }
+  // Западный и восточный (за воротами)
+  for (const x of [-bx, bx]) {
+    const b = board(F.width + BD.marginZ * 2, false);
+    b.position.set(x, BD.height / 2, 0);
+    scene.add(b);
+  }
+}
+
 export function buildStadium() {
   const F = CONFIG.field;
   const scene = new THREE.Scene();
@@ -267,6 +336,7 @@ export function buildStadium() {
   scene.add(apron);
 
   buildGoals(scene);
+  buildBoards(scene);
   buildStands(scene);
   buildFloodlights(scene);
 

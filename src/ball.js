@@ -123,11 +123,12 @@ export class Ball {
       return 'goal';
     }
 
-    // Отскок от невидимых бортов за полем (чтобы мяч не укатился в трибуны)
-    const maxX = F.length / 2 + F.apron - 2;
-    const maxZ = F.width / 2 + F.apron - 2;
-    if (Math.abs(p.x) > maxX) { p.x = Math.sign(p.x) * maxX; this.vel.x *= -0.5; }
-    if (Math.abs(p.z) > maxZ) { p.z = Math.sign(p.z) * maxZ; this.vel.z *= -0.5; }
+    // Отскок от рекламных бортиков (позиция совпадает с их визуалом в scene.js)
+    const BD = CONFIG.boards;
+    const maxX = F.length / 2 + BD.marginX - B.radius;
+    const maxZ = F.width / 2 + BD.marginZ - B.radius;
+    if (Math.abs(p.x) > maxX) { p.x = Math.sign(p.x) * maxX; this.vel.x *= -BD.bounce; }
+    if (Math.abs(p.z) > maxZ) { p.z = Math.sign(p.z) * maxZ; this.vel.z *= -BD.bounce; }
 
     // Тень следует за мячом и тает с высотой полёта
     this.shadow.position.x = p.x;
