@@ -56,6 +56,7 @@ export class Ball {
     this.spin = 0;
     this.afterTouch = 0;
     this.goalScored = false;
+    this.netContact = null;
   }
 
   // Удар: направление (единичный вектор), сила (м/с), подъём и подкрутка.

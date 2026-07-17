@@ -96,6 +96,31 @@ class NetPanel {
     }
   }
 
+  // Пока мяч физически продавливает полотно, ближайшие узлы следуют за ним.
+  // Это и создаёт видимый локальный «мешок», а не едва заметную общую дрожь.
+  press(point, depth, dt) {
+    const N = CONFIG.goal.net;
+    const r2 = N.impactRadius * N.impactRadius;
+    const follow = 1 - Math.exp(-N.followRate * dt);
+    const limitedDepth = THREE.MathUtils.clamp(depth, -N.maxStretch, N.maxStretch);
+
+    for (let row = 1; row < this.rows - 1; row++) {
+      for (let col = 1; col < this.cols - 1; col++) {
+        const i = row * this.cols + col;
+        const j = i * 3;
+        const dx = this.rest[j] - point.x;
+        const dy = this.rest[j + 1] - point.y;
+        const dz = this.rest[j + 2] - point.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2) continue;
+        const weight = Math.exp(-d2 / (r2 * 0.5));
+        const target = limitedDepth * weight;
+        this.offset[i] += (target - this.offset[i]) * follow;
+      }
+    }
+    this.syncGeometry();
+  }
+
   update(dt) {
     const N = CONFIG.goal.net;
     const nextVelocity = this.nextVelocity;
@@ -309,9 +334,10 @@ export class GoalSystem {
     return best;
   }
 
-  findNetHit(p, v, maxTime, radius) {
+  findNetHit(p, v, maxTime, radius, ignorePanel = null) {
     let best = null;
     for (const plane of this.netPlanes) {
+      if (plane.panel === ignorePanel) continue;
       const axis = plane.axis;
       const speed = v.getComponent(axis);
       if (Math.abs(speed) < 1e-8) continue;
@@ -324,7 +350,10 @@ export class GoalSystem {
       const point = p.clone().addScaledVector(v, Math.max(0, time));
       if (!plane.inside(point)) continue;
       const normal = AXIS[axis].clone().multiplyScalar(side);
-      const hit = { time: Math.max(0, time), normal, kind: 'net', panel: plane.panel, outward: plane.outward };
+      const hit = {
+        time: Math.max(0, time), normal, kind: 'net', panel: plane.panel,
+        outward: plane.outward, plane,
+      };
       if (!best || hit.time < best.time) best = hit;
     }
     return best;
@@ -355,46 +384,131 @@ export class GoalSystem {
     return null;
   }
 
+  recordGoalCrossing(ball, from, to) {
+    if (ball.goalScored) return null;
+    const crossing = this.goalCrossing(from, to, CONFIG.ball.radius);
+    if (!crossing) return null;
+    ball.goalScored = true;
+    return 'goal';
+  }
+
+  // Мягкий контакт с сеткой. Мяч не отражается от невидимой плоскости:
+  // он входит в полотно, локально тянет узлы за собой, а пружина постепенно
+  // тормозит его и возвращает обратно. Шаг дробится до 1/120 с, чтобы сильный
+  // удар не перескочил весь диапазон растяжения на одном кадре планшета.
+  advanceNetContact(ball, maxTime) {
+    const N = CONFIG.goal.net;
+    const p = ball.mesh.position;
+    let used = 0;
+    let event = null;
+
+    while (ball.netContact && used < maxTime - 1e-7) {
+      const contact = ball.netContact;
+      const step = Math.min(1 / 120, maxTime - used);
+      const axis = contact.plane.axis;
+      const axisSign = contact.pushDir.getComponent(axis);
+      const signedTravel = (p.getComponent(axis) - contact.plane.value) * axisSign;
+      const penetration = signedTravel + CONFIG.ball.radius;
+      const normalSpeed = ball.vel.dot(contact.pushDir);
+
+      if (penetration <= 0 && normalSpeed <= 0 && contact.age > 0) {
+        ball.netContact = null;
+        break;
+      }
+
+      const stretch = Math.max(0, penetration);
+      const extra = Math.max(0, stretch - N.maxStretch);
+      const accel = -N.ballSpring * stretch - N.hardStopSpring * extra - N.ballDamping * normalSpeed;
+      ball.vel.addScaledVector(contact.pushDir, accel * step);
+
+      const vn = ball.vel.dot(contact.pushDir);
+      const normalVelocity = contact.pushDir.clone().multiplyScalar(vn);
+      const tangentVelocity = ball.vel.clone().sub(normalVelocity)
+        .multiplyScalar(Math.exp(-N.tangentDamping * step));
+      ball.vel.copy(normalVelocity).add(tangentVelocity);
+      ball.spin *= Math.exp(-3.5 * step);
+
+      const before = p.clone();
+      p.addScaledVector(ball.vel, step);
+      if (this.recordGoalCrossing(ball, before, p)) event = 'goal';
+
+      const newSignedTravel = (p.getComponent(axis) - contact.plane.value) * axisSign;
+      const newPenetration = Math.max(0, newSignedTravel + CONFIG.ball.radius);
+      const planePoint = p.clone();
+      planePoint.setComponent(axis, contact.plane.value);
+      const panelDepth = newPenetration * contact.panel.normal.dot(contact.pushDir);
+      contact.panel.press(planePoint, panelDepth, step);
+
+      contact.age += step;
+      used += step;
+      if ((newPenetration <= 0 && ball.vel.dot(contact.pushDir) <= 0) ||
+          contact.age >= N.contactMaxTime) {
+        ball.netContact = null;
+      }
+    }
+    return { used, event };
+  }
+
   moveBall(ball, dt) {
     const G = CONFIG.goal;
     const p = ball.mesh.position;
     let remaining = dt;
     let event = null;
 
+    if (ball.netContact) {
+      const soft = this.advanceNetContact(ball, remaining);
+      remaining -= soft.used;
+      if (soft.event) event = soft.event;
+    }
+
     for (let iteration = 0; iteration < G.collisionIterations && remaining > 1e-6; iteration++) {
       const frameHit = this.findFrameHit(p, ball.vel, remaining, CONFIG.ball.radius);
-      const netHit = this.findNetHit(p, ball.vel, remaining, CONFIG.ball.radius);
+      const netHit = this.findNetHit(
+        p, ball.vel, remaining, CONFIG.ball.radius, ball.netContact?.panel ?? null,
+      );
       let hit = frameHit;
       if (netHit && (!hit || netHit.time < hit.time)) hit = netHit;
       const travel = hit ? hit.time : remaining;
       const before = p.clone();
       p.addScaledVector(ball.vel, travel);
 
-      if (!ball.goalScored) {
-        const crossing = this.goalCrossing(before, p, CONFIG.ball.radius);
-        if (crossing) {
-          ball.goalScored = true;
-          event = 'goal';
-        }
-      }
+      if (this.recordGoalCrossing(ball, before, p)) event = 'goal';
 
       remaining -= travel;
       if (!hit) break;
 
+      if (hit.kind === 'net') {
+        const outwardImpact = ball.vel.dot(hit.outward);
+        const impactPoint = p.clone().addScaledVector(hit.normal, -CONFIG.ball.radius);
+        hit.panel.excite(impactPoint, outwardImpact);
+        ball.netContact = {
+          panel: hit.panel,
+          plane: hit.plane,
+          pushDir: hit.normal.clone().negate(),
+          age: 0,
+        };
+        // Отладочный или испорченный импульс не должен протащить мяч дальше,
+        // чем способна визуально растянуться сетка. Игровые удары (до 30 м/с)
+        // этот предохранитель не затрагивает.
+        const intoNet = ball.vel.dot(ball.netContact.pushDir);
+        if (intoNet > G.net.impactMaxSpeed) {
+          ball.vel.addScaledVector(ball.netContact.pushDir, G.net.impactMaxSpeed - intoNet);
+        }
+
+        const soft = this.advanceNetContact(ball, remaining);
+        remaining -= soft.used;
+        if (soft.event) event = soft.event;
+        continue;
+      }
+
       const vn = ball.vel.dot(hit.normal);
-      const outwardImpact = hit.kind === 'net' ? ball.vel.dot(hit.outward) : 0;
       if (vn < 0) {
-        const bounce = hit.kind === 'net' ? G.net.bounce : G.frameBounce;
-        const tangent = hit.kind === 'net' ? G.net.tangentRetention : G.frameTangent;
+        const bounce = G.frameBounce;
+        const tangent = G.frameTangent;
         const normalVelocity = hit.normal.clone().multiplyScalar(vn);
         const tangentVelocity = ball.vel.clone().sub(normalVelocity).multiplyScalar(tangent);
         ball.vel.copy(tangentVelocity).addScaledVector(hit.normal, -vn * bounce);
-        ball.spin *= hit.kind === 'net' ? 0.45 : 0.78;
-      }
-
-      if (hit.kind === 'net') {
-        const impactPoint = p.clone().addScaledVector(hit.normal, -CONFIG.ball.radius);
-        hit.panel.excite(impactPoint, outwardImpact);
+        ball.spin *= 0.78;
       }
 
       // Отделяем сферу от поверхности и съедаем крошечный кусок времени,
