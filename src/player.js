@@ -116,6 +116,7 @@ export class Player {
     const through = input.through.consume();
     const cross = input.consumeCross();
     const shot = input.shot.consume();
+    const swipe = input.consumeSwipe();
 
     if (this.hasBall) {
       // Дриблинг: мяч тянется к точке перед ногой.
@@ -139,6 +140,8 @@ export class Player {
         this.doCross(cross, ball);
       } else if (shot !== null) {
         this.shoot(shot, input, ball);
+      } else if (swipe !== null) {
+        this.swipeShot(swipe, ball);
       }
     }
 
@@ -181,6 +184,21 @@ export class Player {
     this.kickCooldown = CONFIG.player.kickCooldown;
   }
 
+  // Свайп-удар с тача: направление пальца — куда, длина — сила,
+  // изгиб траектории — подкрутка (как в мобильных футболах)
+  swipeShot(sw, ball) {
+    const S = CONFIG.shot;
+    const dir = new THREE.Vector3(sw.dir.x, 0, sw.dir.z).normalize();
+    const charge = Math.min(sw.power, 1.3);
+    const power = S.powerMin + (S.powerMax - S.powerMin) * charge;
+    const lift = S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * Math.min(charge, 1);
+    const curl = -sw.curl * S.swipeCurl; // палец гнёт вправо — мяч крутится вправо
+    ball.strike(dir, power, lift, curl);
+    // Развернуться в сторону удара — читаемость
+    this.rot = Math.atan2(dir.x, dir.z);
+    this.kickCooldown = CONFIG.player.kickCooldown;
+  }
+
   // Удар (D). В конусе к воротам — прицельный: стрелки выбирают угол створа
   // (вверх экрана = дальняя штанга), замах — высоту; траектория решается
   // баллистикой, так что мяч реально прилетает в выбранную точку.
@@ -191,16 +209,20 @@ export class Player {
     const B = CONFIG.ball;
     const bp = ball.mesh.position;
 
-    const goalX = (this.facing.x >= 0 ? 1 : -1) * (F.length / 2);
+    const f = this.facing;
+    const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
     const dist = toGoal.length();
-    const angle = this.facing.angleTo(toGoal.normalize()) * (180 / Math.PI);
+    const angle = f.angleTo(toGoal.normalize()) * (180 / Math.PI);
     const power = S.powerMin + (S.powerMax - S.powerMin) * charge;
 
-    if (angle < S.assistAngle && dist < S.assistDist && dist > 3) {
-      // Прицельный удар в створ (прицел запомнен за время замаха)
+    if (angle < S.assistAngle && dist < S.assistDist && dist > 3 && Math.abs(f.x) > 0.1) {
+      // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
+      // Стрелки сдвигают её; за штангу — можно, промах реален.
+      const baseZ = bp.z + (f.z / f.x) * (goalX - bp.x);
       const aimZ = input.shotAim ? input.shotAim.z : 0;
-      let targetZ = aimZ * (G.width / 2 - S.postMargin);
+      const maxZ = G.width / 2 + S.aimSlack;
+      let targetZ = Math.max(-maxZ, Math.min(maxZ, baseZ)) + aimZ * S.aimRange;
       let targetY = S.heightMin + (S.heightMax - S.heightMin) * Math.min(charge / S.overchargeFrom, 1);
       if (charge > S.overchargeFrom) targetY += Math.random() * S.overchargeRise; // перезаряд — риск выше ворот
       targetZ += (Math.random() - 0.5) * 2 * S.noiseZ;

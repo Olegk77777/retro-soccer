@@ -67,7 +67,8 @@ export class Input {
 
     this._padMove = { x: 0, z: 0 };
     this._pad = { pass: false, shot: false, cross: false, through: false, sprint: false };
-    this._touch = { pass: false, shot: false, sprint: false };
+    this._touch = { pass: false, shot: false, sprint: false, cross: false, through: false };
+    this._swipeEvent = null; // свайп-удар с тача: {dir, power, curl}
 
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -132,6 +133,64 @@ export class Input {
     bindHold('btn-pass', 'pass');
     bindHold('btn-shoot', 'shot');
     bindHold('btn-sprint', 'sprint');
+    bindHold('btn-cross', 'cross');     // тапы по НАВЕС проходят через PES-машину ×1/×2/×3
+    bindHold('btn-through', 'through');
+
+    this._initSwipe();
+  }
+
+  // Свайп-удар в правой зоне экрана (как в FIFA Mobile / Score! Hero):
+  // направление пальца — куда, длина — сила, ИЗГИБ траектории — подкрутка.
+  _initSwipe() {
+    this._swipe = { id: null, pts: [] };
+
+    window.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'touch') return;
+      if (e.clientX <= window.innerWidth * 0.55) return; // левая зона — стик
+      if (e.target && e.target.classList && e.target.classList.contains('tbtn')) return;
+      if (this._swipe.id !== null) return;
+      this._swipe.id = e.pointerId;
+      this._swipe.pts = [{ x: e.clientX, y: e.clientY }];
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== this._swipe.id) return;
+      this._swipe.pts.push({ x: e.clientX, y: e.clientY });
+    });
+    const endSwipe = (e) => {
+      if (e.pointerId !== this._swipe.id) return;
+      const pts = this._swipe.pts;
+      this._swipe.id = null;
+      if (pts.length < 3) return;
+      const a = pts[0];
+      const b = pts[pts.length - 1];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 40) return; // слишком короткий — не свайп
+
+      // Сила: длина свайпа относительно трети экрана
+      const power = Math.min(1.3, Math.max(0.2, len / (window.innerHeight * 0.35)));
+
+      // Подкрутка: насколько середина траектории отклонилась от прямой (со знаком)
+      const m = pts[(pts.length / 2) | 0];
+      const devSigned = ((m.x - a.x) * dy - (m.y - a.y) * dx) / len; // px, >0 — палец гнул вправо
+      const curl01 = Math.max(-1, Math.min(1, devSigned / (len * 0.25)));
+
+      // Экран → мир: вправо = +X, вверх экрана = -Z
+      this._swipeEvent = {
+        dir: { x: dx / len, z: dy / len },
+        power,
+        curl: curl01,
+      };
+    };
+    window.addEventListener('pointerup', endSwipe);
+    window.addEventListener('pointercancel', endSwipe);
+  }
+
+  consumeSwipe() {
+    const v = this._swipeEvent;
+    this._swipeEvent = null;
+    return v;
   }
 
   _pollGamepad() {
@@ -171,11 +230,11 @@ export class Input {
 
     // Замахи паса, паса на ход и удара
     this.pass.feed(dt, this.keys.has('KeyS') || this._pad.pass || this._touch.pass);
-    this.through.feed(dt, this.keys.has('KeyW') || this._pad.through);
+    this.through.feed(dt, this.keys.has('KeyW') || this._pad.through || this._touch.through);
     this.shot.feed(dt, this.keys.has('KeyD') || this._pad.shot || this._touch.shot);
 
     // Навес: полоска → окно тапов → событие {charge, taps}
-    this._feedCross(dt, this.keys.has('KeyA') || this._pad.cross);
+    this._feedCross(dt, this.keys.has('KeyA') || this._pad.cross || this._touch.cross);
 
     // Спринт — простое удержание
     this.sprint = this.keys.has('KeyE') || this._pad.sprint || this._touch.sprint;
