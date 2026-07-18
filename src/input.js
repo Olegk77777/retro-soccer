@@ -76,10 +76,15 @@ export class Input {
     this._touch = { pass: false, shot: false, sprint: false, cross: false, through: false };
     this._swipeEvent = null; // свайп-удар с тача: {dir, power, curl}
 
+    // Смена управляемого игрока (Фаза 2): Q / LB — событие-«фронт», не удержание
+    this._switchQueued = false;
+    this._padSwitchPrev = false;
+
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);
+      if (e.code === 'KeyQ') this._switchQueued = true;
     });
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
@@ -304,6 +309,17 @@ export class Input {
     this._pad.cross = btn(2);   // X / квадрат — навес (поменян местами с ударом)
     this._pad.through = btn(3); // Y / треугольник — пас на ход
     this._pad.sprint = trig(7); // RT / R2 (дальний правый курок) — спринт, перенесён с бампера RB
+    // LB / L1 — смена управляемого игрока (по фронту нажатия, как Q)
+    const sw = btn(4);
+    if (sw && !this._padSwitchPrev) this._switchQueued = true;
+    this._padSwitchPrev = sw;
+  }
+
+  // Смена игрока: одноразовое событие (Q / LB); на планшете — только авто
+  consumeSwitch() {
+    const v = this._switchQueued;
+    this._switchQueued = false;
+    return v;
   }
 
   update(dt) {

@@ -6,36 +6,66 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
 
-// Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом
+// Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
+// Исходные материалы НЕ трогаем — каждый клон собирает свои (цвет команды).
 let modelPromise = null;
 function loadPlayerModel() {
   if (!modelPromise) {
-    modelPromise = new GLTFLoader().loadAsync('./models/player.glb').then((gltf) => {
-      gltf.scene.traverse((o) => {
-        if (o.isMesh) {
-          // Скелет двигает вершины мимо исходной рамки объекта — отсечение по ней врёт
-          o.frustumCulled = false;
-          // Lambert вместо Standard: быстрее на планшете, а с плоскими гранями
-          // и пиксельной текстурой выглядит ровно так же (стиль PS1).
-          // Emissive ~45% — как у капсулы: без него фигура на вечернем поле чёрная
-          const src = o.material;
-          o.material = src.map
-            ? new THREE.MeshLambertMaterial({
-                map: src.map,
-                emissive: 0x737373,
-                emissiveMap: src.map,
-              })
-            : new THREE.MeshLambertMaterial({
-                color: src.color.clone(),
-                emissive: src.color.clone().multiplyScalar(0.45),
-              });
-          o.material.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
-        }
-      });
-      return gltf;
-    });
+    modelPromise = new GLTFLoader().loadAsync('./models/player.glb');
   }
   return modelPromise;
+}
+
+// Перекраска атласа формы под цвет команды: цветные пиксели (красный дефолт)
+// получают заданный цвет с сохранением светотени, белый/чёрный не трогаются.
+// Кэш по цвету: у 4 расцветок (2 команды + 2 вратаря) — 4 текстуры на всех.
+const kitTexCache = new Map();
+function getKitTexture(gltf, colorHex) {
+  if (!colorHex) return null;
+  if (kitTexCache.has(colorHex)) return kitTexCache.get(colorHex);
+  let srcMap = null;
+  gltf.scene.traverse((o) => {
+    if (o.isMesh && o.material && o.material.name === 'kit' && o.material.map) {
+      srcMap = o.material.map;
+    }
+  });
+  if (!srcMap || !srcMap.image) return null;
+  const img = srcMap.image;
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const id = ctx.getImageData(0, 0, c.width, c.height);
+  // Цвет берём напрямую из hex в sRGB-байты (THREE.Color здесь нельзя:
+  // он конвертирует в linear, и на canvas цвет вышел бы темнее задуманного)
+  const n = parseInt(colorHex.replace('#', ''), 16);
+  const cr = (n >> 16) & 255;
+  const cg = (n >> 8) & 255;
+  const cb = n & 255;
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i];
+    const g = d[i + 1];
+    const b = d[i + 2];
+    const mx = Math.max(r, g, b);
+    const mn = Math.min(r, g, b);
+    if (mx - mn > 30) { // насыщенный пиксель = «цвет команды»
+      const v = mx / 255; // яркость исходника сохраняет светотень атласа
+      d[i] = cr * v;
+      d[i + 1] = cg * v;
+      d[i + 2] = cb * v;
+    }
+  }
+  ctx.putImageData(id, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.flipY = false; // glTF-развёртка хранится без переворота
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  kitTexCache.set(colorHex, tex);
+  return tex;
 }
 
 // Какие клипы играются один раз (удары, падения), остальные — циклы
@@ -46,14 +76,21 @@ const ONE_SHOT = new Set([
 ]);
 
 export class Player {
-  constructor(scene) {
+  // opts.kitColor — hex-цвет формы ('#3a62d8'); без него — атлас как есть.
+  // Команду, роль и isKeeper проставляет Team (src/ai/team.js).
+  constructor(scene, opts = {}) {
     const P = CONFIG.player;
+    this.kitColor = opts.kitColor || null;
     this.group = new THREE.Group();
 
     // Emissive-подсветка, чтобы фигура читалась на тёмном вечернем поле
+    const capCol = new THREE.Color(this.kitColor || '#d84a3c');
     this.body = new THREE.Mesh(
       new THREE.CapsuleGeometry(P.radius, P.height - P.radius * 2, 4, 8),
-      new THREE.MeshLambertMaterial({ color: 0xd84a3c, emissive: 0x571712 }),
+      new THREE.MeshLambertMaterial({
+        color: capCol,
+        emissive: capCol.clone().multiplyScalar(0.4),
+      }),
     );
     this.body.position.y = P.height / 2;
     this.group.add(this.body);
@@ -107,6 +144,28 @@ export class Player {
   attachModel(gltf) {
     this.model = cloneSkeleton(gltf.scene);
     this.model.scale.setScalar(CONFIG.player.modelScale); // ноги в origin — растём вверх, не в землю
+
+    // Материалы — свои у каждого клона: форма перекрашена в цвет команды.
+    // Lambert вместо Standard: быстрее на планшете, с плоскими гранями и
+    // пиксельной текстурой выглядит так же (стиль PS1). Emissive ~45% —
+    // без него фигура на вечернем поле чёрная.
+    const kitTex = getKitTexture(gltf, this.kitColor);
+    this.model.traverse((o) => {
+      if (!o.isMesh) return;
+      // Скелет двигает вершины мимо исходной рамки объекта — отсечение по ней врёт
+      o.frustumCulled = false;
+      const src = o.material;
+      const map = (src.name === 'kit' && kitTex) ? kitTex : src.map;
+      const mat = map
+        ? new THREE.MeshLambertMaterial({ map, emissive: 0x737373, emissiveMap: map })
+        : new THREE.MeshLambertMaterial({
+            color: src.color.clone(),
+            emissive: src.color.clone().multiplyScalar(0.45),
+          });
+      mat.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
+      o.material = mat;
+    });
+
     this.group.add(this.model);
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
@@ -164,10 +223,10 @@ export class Player {
     this.oneShot = a;
   }
 
-  reset() {
-    this.group.position.set(-3, 0, 0);
+  reset(x = -3, z = 0, rot = Math.PI / 2) {
+    this.group.position.set(x, 0, z);
     this.vel.set(0, 0, 0);
-    this.rot = Math.PI / 2;  // лицом к правым воротам
+    this.rot = rot;
     this.kickCooldown = 0;
     this.hasBall = false;
     this.controlling = false;
@@ -175,10 +234,120 @@ export class Player {
     this.chargeRun = false;
     this.dribbleTouchCd = 0;
     this.sprintBoost = 0;
+    if (this.ai) this.ai.dribDir = null; // мозг AI начинает с чистого листа
+    this.group.rotation.y = rot;
+    this.shadow.position.x = x;
+    this.shadow.position.z = z;
   }
 
   get facing() {
     return new THREE.Vector3(Math.sin(this.rot), 0, Math.cos(this.rot));
+  }
+
+  // Анимация по движению — общая для человека и AI (вызывать раз в кадр)
+  _updateAnim(dt, speed) {
+    const P = CONFIG.player;
+    if (this.mixer) {
+      // Выбор клипа по движению; пока играет одноразовый (удар) — не дёргаем
+      if (!this.oneShot) {
+        if (speed < 0.6) {
+          this.playAction('idle', 0.18);
+        } else {
+          this.playAction('run', 0.1);
+          // Темп ног растёт со скоростью (сам клип снят под лёгкую трусцу)
+          this.actions.run.timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
+        }
+      }
+      this.mixer.update(dt);
+    } else {
+      // Капсула-фолбэк: лёгкое покачивание вместо анимаций
+      this.bobT += dt * speed * 1.8;
+      this.body.position.y = P.height / 2 + Math.abs(Math.sin(this.bobT)) * 0.06 * (speed / P.speed);
+    }
+  }
+
+  // ===== AI-канал управления («ноги» исполняют решения мозга из src/ai/) =====
+
+  // Движение AI-игрока: та же физика разгона/разворота, что у человека,
+  // но без ввода. move — желаемый вектор 0..1; opts: sprint, face (угол,
+  // куда смотреть стоя на месте). Вызывается ровно раз в кадр вместо update().
+  aiUpdate(dt, move, opts = {}) {
+    const P = CONFIG.player;
+    const F = CONFIG.field;
+    const pos = this.group.position;
+
+    if (this.kickCooldown > 0) this.kickCooldown -= dt;
+
+    const sprinting = !!opts.sprint;
+    const boostK = sprinting ? Math.min(1, dt * 12) : Math.min(1, dt / P.sprintInertia);
+    this.sprintBoost += ((sprinting ? 1 : 0) - this.sprintBoost) * boostK;
+
+    let maxSpeed = P.speed * CONFIG.ai.speedFactor *
+      (this.isToucher ? P.dribbleSpeedFactor : 1);
+    maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
+
+    let mvx = move.x;
+    let mvz = move.z;
+    const il = Math.hypot(mvx, mvz);
+    if (il > 1) {
+      mvx /= il;
+      mvz /= il;
+    }
+
+    const k = Math.min(1, dt * P.accel);
+    this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
+    this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
+    pos.x += this.vel.x * dt;
+    pos.z += this.vel.z * dt;
+
+    // AI не выбегает за поле дальше пары метров
+    const maxX = F.length / 2 + 2;
+    const maxZ = F.width / 2 + 2;
+    pos.x = Math.max(-maxX, Math.min(maxX, pos.x));
+    pos.z = Math.max(-maxZ, Math.min(maxZ, pos.z));
+
+    // Корпус: бежим — смотрим по ходу; стоим — куда велел мозг (обычно на мяч)
+    const speed = Math.hypot(this.vel.x, this.vel.z);
+    let want = null;
+    if (speed > 0.5) want = Math.atan2(this.vel.x, this.vel.z);
+    else if (opts.face != null) want = opts.face;
+    if (want != null) {
+      let d = want - this.rot;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      const turn = P.turnRate * (1 - (1 - P.sprintTurnFactor) * this.sprintBoost);
+      this.rot += d * Math.min(1, turn * dt);
+    }
+    this.group.rotation.y = this.rot;
+
+    this._updateAnim(dt, speed);
+    this.shadow.position.x = pos.x;
+    this.shadow.position.z = pos.z;
+  }
+
+  // Ведение AI: мяч у ноги подтягивается в сторону курса (как липкое
+  // ведение человека, но без ввода). Работает только на владеющем (isToucher).
+  aiDribble(dt, ball, dirX, dirZ) {
+    const P = CONFIG.player;
+    const bp = ball.mesh.position;
+    const pos = this.group.position;
+    if (this.kickCooldown > 0 || bp.y > CONFIG.ball.radius * 2.2) return;
+    const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    if (dist > P.stickyRadius) return;
+    const tx = pos.x + dirX * P.dribbleAhead;
+    const tz = pos.z + dirZ * P.dribbleAhead;
+    ball.vel.x = this.vel.x + (tx - bp.x) * P.dribbleStrength;
+    ball.vel.z = this.vel.z + (tz - bp.z) * P.dribbleStrength;
+  }
+
+  // Удар AI: пас/выстрел/вынос — обычный strike с анимацией и кулдауном
+  aiKick(ball, dir, power, lift, curl = 0) {
+    const d = Math.hypot(dir.x, dir.z) || 1;
+    const ndir = { x: dir.x / d, z: dir.z / d };
+    ball.strike(ndir, power, lift, curl);
+    this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
+    this.kickCooldown = CONFIG.player.kickCooldown;
+    this.playOneShot('kick', 1.6, 0.20);
   }
 
   update(dt, input, ball) {
@@ -267,23 +436,7 @@ export class Player {
     }
     this.group.rotation.y = this.rot;
 
-    if (this.mixer) {
-      // Выбор клипа по движению; пока играет одноразовый (удар) — не дёргаем
-      if (!this.oneShot) {
-        if (speed < 0.6) {
-          this.playAction('idle', 0.18);
-        } else {
-          this.playAction('run', 0.1);
-          // Темп ног растёт со скоростью (сам клип снят под лёгкую трусцу)
-          this.actions.run.timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
-        }
-      }
-      this.mixer.update(dt);
-    } else {
-      // Капсула-фолбэк: лёгкое покачивание вместо анимаций
-      this.bobT += dt * speed * 1.8;
-      this.body.position.y = P.height / 2 + Math.abs(Math.sin(this.bobT)) * 0.06 * (speed / P.speed);
-    }
+    this._updateAnim(dt, speed);
 
     this.shadow.position.x = pos.x;
     this.shadow.position.z = pos.z;
@@ -296,7 +449,10 @@ export class Player {
     const bp = ball.mesh.position;
     const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
     const reach = this.controlling ? P.controlKeepRadius : P.controlRadius;
-    this.hasBall = this.kickCooldown <= 0 &&
+    // isToucher выставляет Match: из 22 игроков мячом владеет ближайший.
+    // В одиночных тестах поля нет — undefined !== false, всё работает как раньше.
+    this.hasBall = this.isToucher !== false &&
+      this.kickCooldown <= 0 &&
       dist < reach &&
       bp.y < CONFIG.ball.radius * 2.2;
     this.controlling = this.hasBall;
@@ -376,16 +532,17 @@ export class Player {
       const s = this.pendingStrike;
       this.pendingStrike = null;
       const lerp = (a, b, t) => a + (b - a) * t;
-      if (s.type === 'pass') {
-        // S — пас низом, сила от замаха
-        ball.strike(this.facing, lerp(P.pass.powerMin, P.pass.powerMax, s.v), P.pass.lift);
+      if (s.type === 'pass' || s.type === 'through') {
+        // S — пас низом; W — пас на ход (настильный). Сила — от замаха.
+        // Пас-ассист (Фаза 2): Match доворачивает направление на партнёра
+        // в конусе взгляда и посылает его встречать мяч; без партнёров
+        // в конусе (или без Match) пас летит строго по взгляду, как раньше.
+        const cfg = s.type === 'pass' ? P.pass : P.through;
+        const power = lerp(cfg.powerMin, cfg.powerMax, s.v);
+        const assist = this.passAssist ? this.passAssist(this, s.type, power) : null;
+        ball.strike(assist ? assist.dir : this.facing, power, cfg.lift);
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
-      } else if (s.type === 'through') {
-        // W — пас на ход: быстрый, настильный
-        ball.strike(this.facing, lerp(P.through.powerMin, P.through.powerMax, s.v), P.through.lift);
-        this.kickCooldown = P.kickCooldown;
-        this.playOneShot('kick', 1.6, 0.20);
       } else if (s.type === 'cross') {
         this.doCross(s.v, input, ball);
       } else if (s.type === 'shot') {

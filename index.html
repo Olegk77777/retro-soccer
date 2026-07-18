@@ -25,6 +25,19 @@
       pointer-events: none;
     }
 
+    /* Табло-телеграфика: счёт и минута, как плашка трансляции 90-х */
+    #scoreboard {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 10px; align-items: baseline;
+      background: linear-gradient(#232a52, #12162e);
+      border: 1px solid rgba(255,255,255,0.55);
+      color: #fff; font-weight: bold; font-size: 16px; letter-spacing: 2px;
+      padding: 6px 14px 5px; pointer-events: none; z-index: 10;
+      text-shadow: 1px 1px 0 #000;
+    }
+    #sb-score { color: #ffd23f; font-size: 19px; letter-spacing: 3px; }
+    #sb-time { color: #7fd642; min-width: 40px; text-align: right; }
+
     #goal-flash {
       position: fixed; top: 38%; left: 0; right: 0;
       text-align: center;
@@ -158,6 +171,7 @@
 <body>
   <canvas id="game"></canvas>
   <div id="bug">Ф·98</div>
+  <div id="scoreboard"><span id="sb-home">КРА</span><span id="sb-score">0:0</span><span id="sb-away">СИН</span><span id="sb-time">0'</span></div>
   <div id="goal-flash">ГОЛ!</div>
   <button id="settings-btn">⚙ НАСТРОЙКИ</button>
 
@@ -188,6 +202,7 @@
 
     <h3>УПРАВЛЕНИЕ — КЛАВИАТУРА</h3>
     <div class="row"><span class="key">Стрелки</span> — движение; во время замаха удара — прицел по створу</div>
+    <div class="row"><span class="key">Q</span> — смена управляемого игрока (берётся ближний к мячу); авто — когда партнёр принял мяч или сосед заметно ближе к мячу</div>
     <div class="row"><span class="key">E</span> — спринт (мяч ведётся толчками, хуже контроль)</div>
     <div class="row"><span class="key">S</span> — пас низом</div>
     <div class="row"><span class="key">W</span> — пас на ход (настильный)</div>
@@ -198,13 +213,14 @@
     <div class="row"><span class="key">После удара держать направление</span> — докрутка мяча в полёте</div>
 
     <h3>УПРАВЛЕНИЕ — ГЕЙМПАД</h3>
-    <div class="row"><span class="key">Левый стик</span> — движение · <span class="key">RT/R2</span> (дальний правый курок) — спринт</div>
+    <div class="row"><span class="key">Левый стик</span> — движение · <span class="key">RT/R2</span> (дальний правый курок) — спринт · <span class="key">LB/L1</span> — смена игрока</div>
     <div class="row"><span class="key">A</span> пас · <span class="key">Y</span> пас на ход · <span class="key">B</span> удар · <span class="key">X</span> навес</div>
     <div class="row"><span class="key">После удара наклонить левый стик вбок</span> — подкрутка мяча в полёте (тот же приём, что жест-докрутка на планшете)</div>
 
     <h3>УПРАВЛЕНИЕ — ПЛАНШЕТ</h3>
     <div class="row"><span class="key">Левая половина</span> — виртуальный стик (движение; после удара — докрутка)</div>
     <div class="row"><span class="key">Кнопки</span> ПАС · УДАР · ⚡спринт</div>
+    <div class="row"><span class="key">Смена игрока</span> — автоматическая: партнёр принял мяч или оказался заметно ближе к мячу (жёлтое кольцо показывает, кем управляешь)</div>
     <div class="row"><span class="key">УДАР</span> — тап/удержание = обычный удар; свайп от кнопки рисует траекторию: направление = куда летит мяч, длина = сила, изгиб = подкрутка</div>
     <div class="row"><span class="key">Правая зона (круг НАВЕС)</span> — жест: направление = куда, длина = сила, скорость = характер дуги, изгиб пальца = подкрутка, короткий росчерк = пас на ход</div>
     <div class="row"><span class="key">Жест с фланга в сторону ворот</span> — навес наводится в штрафную сам: длина жеста = адрес (ближняя/центр/дальняя), изгиб пальца докручивает дугу</div>
@@ -215,7 +231,7 @@
     <div class="row">Нога решает дугу навеса: правая с правого фланга — аутсвингер (от вратаря к набегающим), с левого — инсвингер (закручивается к воротам)</div>
   </div>
 
-  <div id="hint"><span class="desktop-hint">Стрелки — бег · E спринт · S пас · W на ход · A навес — с фланга сам в штрафную, сила = адрес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</span><span class="touch-hint">Стик — бег · свайп от УДАР — направление, сила и подкрутка · круг НАВЕС — подача жестом</span></div>
+  <div id="hint"><span class="desktop-hint">Стрелки — бег · Q смена игрока · E спринт · S пас · W на ход · A навес (с фланга сам в штрафную) · D удар · после удара держи направление — докрутка</span><span class="touch-hint">Стик — бег · свайп от УДАР — направление, сила и подкрутка · круг НАВЕС — подача жестом · смена игрока — авто</span></div>
   <div id="stick-base"><div id="stick-knob"></div></div>
   <div id="cross-zone">НАВЕС</div>
   <canvas id="gesture-viz"></canvas>
