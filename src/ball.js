@@ -7,22 +7,36 @@ import { predictLanding } from './ai/steering.js';
 
 function createBallTexture() {
   const c = document.createElement('canvas');
-  c.width = 64;
-  c.height = 32;
+  c.width = 256;
+  c.height = 128;
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#f0f0ea';
-  ctx.fillRect(0, 0, 64, 32);
+  ctx.fillRect(0, 0, c.width, c.height);
   // Чёрные «пятна» — с расстояния читаются как классический мяч с пятиугольниками
+  // и остаются мгновенным фолбэком, пока грузится Tricolore-98.
   ctx.fillStyle = '#1a1a1a';
-  for (let i = 0; i < 10; i++) {
-    const x = (i * 17 + (i % 2) * 7) % 64;
-    const y = (i * 11) % 32;
-    ctx.fillRect(x, y, 7, 6);
+  for (let i = 0; i < 14; i++) {
+    const x = (i * 67 + (i % 2) * 29) % c.width;
+    const y = (i * 43) % c.height;
+    ctx.fillRect(x, y, 28, 24);
   }
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
+  // На рабочей ТВ-камере мяч занимает считаные пиксели: мипмапы не дают
+  // красно-синему рисунку мерцать при быстром вращении.
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 2;
   tex.colorSpace = THREE.SRGBColorSpace;
+
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    tex.needsUpdate = true;
+  };
+  img.onerror = () => console.warn('Не загрузилась текстура мяча: ./textures/ball/tricolore-98.png');
+  img.src = './textures/ball/tricolore-98.png';
   return tex;
 }
 

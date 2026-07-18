@@ -1,12 +1,69 @@
 // Сцена стадиона: газон с разметкой, ворота, трибуны, прожекторы.
-// Всё из примитивов и canvas-текстур — ни одного внешнего файла (стиль PS1).
+// Геометрия — из примитивов, а крупные цветовые карты дают фактуру 1998-го.
+// Если PNG не загрузился, canvas-заглушка остаётся: белого/чёрного экрана нет.
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { GoalSystem } from './goal.js';
 
-// Текстура газона: полосы покоса + вся разметка рисуются на одном canvas.
-// Отдельные PNG не нужны — Олегу ничего генерировать не надо.
+const STADIUM_TEXTURES = Object.freeze({
+  grass: './textures/stadium/grass-98.png',
+  crowd: './textures/stadium/crowd-night-98.png',
+  boards: './textures/stadium/ads-france-98.png',
+});
+
+// Один Image на файл: газон нужен и полю, и отбивке, но дважды качать PNG незачем.
+const imageCache = new Map();
+const textureClones = new WeakMap();
+function loadTextureImage(path) {
+  if (!imageCache.has(path)) {
+    imageCache.set(path, new Promise((resolve, reject) => {
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`Не загрузилась текстура: ${path}`));
+      img.src = path;
+    }));
+  }
+  return imageCache.get(path);
+}
+
+function configureColorTexture(tex, { wrap = false, anisotropy = 4 } = {}) {
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = anisotropy;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  if (wrap) {
+    tex.wrapS = THREE.MirroredRepeatWrapping;
+    tex.wrapT = THREE.MirroredRepeatWrapping;
+  }
+  return tex;
+}
+
+function markTextureDirty(tex) {
+  tex.needsUpdate = true;
+  for (const clone of textureClones.get(tex) || []) clone.needsUpdate = true;
+}
+
+// Чередуем обычную и зеркальную плитку: даже если края AI-текстуры не идеальны,
+// стыки совпадают пиксель-в-пиксель и не рисуют клетку на поле.
+function drawMirroredTiles(ctx, img, width, height, tileSize) {
+  for (let y = 0, iy = 0; y < height; y += tileSize, iy++) {
+    for (let x = 0, ix = 0; x < width; x += tileSize, ix++) {
+      const flipX = ix % 2 === 1;
+      const flipY = iy % 2 === 1;
+      ctx.save();
+      ctx.translate(x + (flipX ? tileSize : 0), y + (flipY ? tileSize : 0));
+      ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      ctx.drawImage(img, 0, 0, tileSize, tileSize);
+      ctx.restore();
+    }
+  }
+}
+
+// Текстура газона: живая фактура PNG + точные полосы покоса и разметка на canvas.
+// Линии остаются кодом: так их размеры всегда точны, а на дальней камере они не мигают.
 function createPitchTexture() {
   const F = CONFIG.field;
   const scale = 10; // пикселей на метр
@@ -16,75 +73,126 @@ function createPitchTexture() {
   c.width = w;
   c.height = h;
   const ctx = c.getContext('2d');
-
-  // Полосы покоса: 14 полос вдоль поля, два оттенка зелёного
-  const stripes = 14;
-  const stripeW = w / stripes;
-  for (let i = 0; i < stripes; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#4d9038' : '#5aa344';
-    ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
-  }
-
-  // Лёгкое зерно, чтобы газон не был «пластиковым»
-  for (let i = 0; i < 9000; i++) {
-    const x = Math.random() * w;
-    const y = Math.random() * h;
-    ctx.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.05)';
-    ctx.fillRect(x, y, 2, 2);
-  }
-
-  // Разметка (белые линии). Размеры — стандарт ФИФА, в метрах × scale.
-  // Линии толще реальных (0.3 м): при сжатии кадра тонкие бьются в пунктир.
-  ctx.strokeStyle = '#e8e8e8';
-  ctx.fillStyle = '#e8e8e8';
-  ctx.lineWidth = 0.3 * scale;
-
   const m = (v) => v * scale;
   const cx = w / 2;
   const cy = h / 2;
 
-  ctx.strokeRect(ctx.lineWidth, ctx.lineWidth, w - ctx.lineWidth * 2, h - ctx.lineWidth * 2); // границы
-  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();                        // центральная
-  ctx.beginPath(); ctx.arc(cx, cy, m(9.15), 0, Math.PI * 2); ctx.stroke();                    // центральный круг
-  ctx.beginPath(); ctx.arc(cx, cy, m(0.22), 0, Math.PI * 2); ctx.fill();                      // центральная точка
+  const paint = (grass = null) => {
+    ctx.clearRect(0, 0, w, h);
 
-  // Штрафные, вратарские, точки пенальти и дуги — для обоих ворот
-  for (const side of [0, 1]) {
-    const dir = side === 0 ? 1 : -1;
-    const gx = side === 0 ? 0 : w;
-    // Штрафная 16.5 × 40.32
-    ctx.strokeRect(
-      side === 0 ? 0 : w - m(16.5), cy - m(20.16), m(16.5), m(40.32),
-    );
-    // Вратарская 5.5 × 18.32
-    ctx.strokeRect(
-      side === 0 ? 0 : w - m(5.5), cy - m(9.16), m(5.5), m(18.32),
-    );
-    // Точка пенальти
-    ctx.beginPath(); ctx.arc(gx + dir * m(11), cy, m(0.22), 0, Math.PI * 2); ctx.fill();
-    // Дуга штрафной
-    ctx.beginPath();
-    const a = Math.acos(m(5.5) / m(9.15)); // угол, где дуга упирается в линию штрафной
-    if (side === 0) ctx.arc(gx + m(11), cy, m(9.15), -a, a);
-    else ctx.arc(gx - m(11), cy, m(9.15), Math.PI - a, Math.PI + a);
-    ctx.stroke();
+    if (grass) {
+      ctx.imageSmoothingEnabled = true;
+      drawMirroredTiles(ctx, grass, w, h, m(18));
+      // Исходный albedo нарочно «земляной», но после sRGB → CRT становился слишком тёмным.
+      // Screen-подсветка имитирует мощные прожекторы и возвращает зелень, не стирая фактуру.
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = 'rgba(95,185,65,0.46)';
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+      // Полосы слабее прежних: газон по-прежнему читается с камеры, но не выглядит линолеумом.
+      const stripes = 14;
+      const stripeW = w / stripes;
+      for (let i = 0; i < stripes; i++) {
+        ctx.fillStyle = i % 2 === 0 ? 'rgba(0,0,0,0.055)' : 'rgba(255,255,210,0.045)';
+        ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
+      }
+
+      // Чуть вытоптанные зоны там, где они естественно появляются: у ворот и в центре.
+      const wear = (x, y, rx, ry, opacity) => {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(rx, ry);
+        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        g.addColorStop(0, `rgba(170,150,92,${opacity})`);
+        g.addColorStop(0.55, `rgba(120,115,70,${opacity * 0.5})`);
+        g.addColorStop(1, 'rgba(80,100,55,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(-1, -1, 2, 2);
+        ctx.restore();
+      };
+      wear(m(4), cy, m(5.5), m(7.5), 0.12);
+      wear(w - m(4), cy, m(5.5), m(7.5), 0.12);
+      wear(cx, cy, m(3.8), m(6.5), 0.055);
+    } else {
+      // Мгновенный фолбэк на время загрузки PNG и на случай 404.
+      const stripes = 14;
+      const stripeW = w / stripes;
+      for (let i = 0; i < stripes; i++) {
+        ctx.fillStyle = i % 2 === 0 ? '#4d9038' : '#5aa344';
+        ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
+      }
+      for (let i = 0; i < 9000; i++) {
+        const x = Math.random() * w;
+        const y = Math.random() * h;
+        ctx.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.05)';
+        ctx.fillRect(x, y, 2, 2);
+      }
+    }
+
+    // Разметка (белые линии). Размеры — стандарт ФИФА, в метрах × scale.
+    // Линии толще реальных (0.3 м): при сжатии кадра тонкие бьются в пунктир.
+    ctx.strokeStyle = '#e8e8e4';
+    ctx.fillStyle = '#e8e8e4';
+    ctx.lineWidth = 0.3 * scale;
+
+    ctx.strokeRect(ctx.lineWidth, ctx.lineWidth, w - ctx.lineWidth * 2, h - ctx.lineWidth * 2);
+    ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, m(9.15), 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, m(0.22), 0, Math.PI * 2); ctx.fill();
+
+    for (const side of [0, 1]) {
+      const dir = side === 0 ? 1 : -1;
+      const gx = side === 0 ? 0 : w;
+      ctx.strokeRect(side === 0 ? 0 : w - m(16.5), cy - m(20.16), m(16.5), m(40.32));
+      ctx.strokeRect(side === 0 ? 0 : w - m(5.5), cy - m(9.16), m(5.5), m(18.32));
+      ctx.beginPath(); ctx.arc(gx + dir * m(11), cy, m(0.22), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath();
+      const a = Math.acos(m(5.5) / m(9.15));
+      if (side === 0) ctx.arc(gx + m(11), cy, m(9.15), -a, a);
+      else ctx.arc(gx - m(11), cy, m(9.15), Math.PI - a, Math.PI + a);
+      ctx.stroke();
+    }
+  };
+
+  paint();
+  const tex = configureColorTexture(new THREE.CanvasTexture(c));
+  loadTextureImage(STADIUM_TEXTURES.grass)
+    .then((img) => { paint(img); markTextureDirty(tex); })
+    .catch((e) => console.warn(e.message));
+  return tex;
+}
+
+// За бровкой та же трава, но темнее и без полос: отбивка больше не выглядит однотонной зелёной стеной.
+function createApronTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#315d25';
+  ctx.fillRect(0, 0, c.width, c.height);
+  for (let i = 0; i < 1500; i++) {
+    ctx.fillStyle = Math.random() > 0.5 ? 'rgba(180,190,145,0.035)' : 'rgba(0,0,0,0.045)';
+    ctx.fillRect(Math.random() * c.width, Math.random() * c.height, 2, 2);
   }
 
-  const tex = new THREE.CanvasTexture(c);
-  // Вблизи — жёсткие пиксели (PS1), вдали — мипмапы: без них линии
-  // разметки бьются в пунктир и мигают при движении камеры (муар).
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.generateMipmaps = true;
-  tex.anisotropy = 4;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  const tex = configureColorTexture(new THREE.CanvasTexture(c), { wrap: true, anisotropy: 2 });
+  tex.repeat.set(10, 8);
+  loadTextureImage(STADIUM_TEXTURES.grass)
+    .then((img) => {
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      ctx.fillStyle = 'rgba(10,24,10,0.43)';
+      ctx.fillRect(0, 0, c.width, c.height);
+      markTextureDirty(tex);
+    })
+    .catch((e) => console.warn(e.message));
   return tex;
 }
 
 // Текстура толпы: шумные цветные точки — с ТВ-дистанции читается как трибуна
 function createCrowdTexture() {
   const c = document.createElement('canvas');
-  c.width = 512;
+  c.width = 1024;
   c.height = 128;
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#1c2030';
@@ -94,19 +202,29 @@ function createCrowdTexture() {
     ctx.fillStyle = palette[(Math.random() * palette.length) | 0];
     ctx.fillRect(Math.random() * c.width, Math.random() * c.height, 2, 3);
   }
-  const tex = new THREE.CanvasTexture(c);
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter; // толпа тоже не должна «кипеть»
-  tex.generateMipmaps = true;
+  const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 2 });
   tex.wrapS = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  loadTextureImage(STADIUM_TEXTURES.crowd)
+    .then((img) => {
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      // Дальний сектор остаётся тёмным, но отдельные головы и флаги должны пережить CRT.
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = 'rgba(90,95,115,0.18)';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.restore();
+      markTextureDirty(tex);
+    })
+    .catch((e) => console.warn(e.message));
   return tex;
 }
 
 function buildStands(scene) {
   const F = CONFIG.field;
   const crowd = createCrowdTexture();
-  const standMat = new THREE.MeshLambertMaterial({ map: crowd });
+  // Свет уже «запечён» в изображении сектора; Basic не даёт наклону бокса
+  // случайно погасить толпу и стоит дешевле на планшете.
+  const standMat = new THREE.MeshBasicMaterial({ map: crowd });
   const sideMat = new THREE.MeshLambertMaterial({ color: 0x232838 });
 
   const standH = 17;
@@ -171,12 +289,12 @@ function buildFloodlights(scene) {
   }
 }
 
-// Текстура рекламного борта: цветные секции с выдуманными брендами
-// в духе телерекламы 90-х (реальные бренды по правилу проекта — нельзя)
+// До публичного релиза используем настоящие бренды эпохи: они сразу продают кадр как трансляцию 1998-го.
+// При подготовке релиза PNG можно заменить без правки геометрии или физики.
 function createBoardTexture() {
   const c = document.createElement('canvas');
   c.width = 1024;
-  c.height = 64;
+  c.height = 128;
   const ctx = c.getContext('2d');
   const ads = [
     ['#c0341d', '#fff', 'СПОРТ·ТВ'],
@@ -193,14 +311,18 @@ function createBoardTexture() {
     ctx.fillStyle = bg;
     ctx.fillRect(i * secW, 0, secW, c.height);
     ctx.fillStyle = fg;
-    ctx.font = 'bold 34px "Arial Narrow", Arial, sans-serif';
+    ctx.font = 'bold 58px "Arial Narrow", Arial, sans-serif';
     ctx.fillText(text, i * secW + secW / 2, c.height / 2 + 2);
   });
-  const tex = new THREE.CanvasTexture(c);
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 2 });
   tex.wrapS = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  textureClones.set(tex, []);
+  loadTextureImage(STADIUM_TEXTURES.boards)
+    .then((img) => {
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      markTextureDirty(tex);
+    })
+    .catch((e) => console.warn(e.message));
   return tex;
 }
 
@@ -210,14 +332,17 @@ function buildBoards(scene) {
   const base = createBoardTexture();
   const bx = F.length / 2 + BD.marginX; // позиция торцевых щитов по X
   const bz = F.width / 2 + BD.marginZ;  // боковых по Z
-  const repeatPerMeter = 1 / 8;         // одна «простыня» рекламы на 8 м
+  const repeatPerMeter = 1 / 48;        // шесть бортов по ~8 м: логотипы читаются крупно, как в 1998-м
 
   // Один щит: длинная тонкая доска высотой BD.height, текстурой внутрь и наружу
   const board = (len, horizontal) => {
     const tex = base.clone();
     tex.needsUpdate = true;
     tex.repeat.set(len * repeatPerMeter, 1);
-    const mat = new THREE.MeshLambertMaterial({ map: tex, emissive: 0x222222 });
+    textureClones.get(base).push(tex);
+    // Печатные щиты стоят прямо под прожекторами; Basic сохраняет их крупные цвета
+    // после CRT и стоит дешевле освещаемого материала.
+    const mat = new THREE.MeshBasicMaterial({ map: tex });
     const dark = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
     const geo = new THREE.BoxGeometry(len, BD.height, 0.25);
     // текстура — на широкие грани (±Z бокса), торцы тёмные
@@ -260,7 +385,7 @@ export function buildStadium() {
   // растворяется в тумане (fog) — жёсткой границы не видно.
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(F.length + 150, F.width + 130),
-    new THREE.MeshBasicMaterial({ color: 0x336324 }),
+    new THREE.MeshBasicMaterial({ map: createApronTexture() }),
   );
   apron.rotation.x = -Math.PI / 2;
   apron.position.y = -0.02;
