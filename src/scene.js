@@ -294,7 +294,10 @@ function buildFloodlights(scene) {
 function createBoardTexture() {
   const c = document.createElement('canvas');
   c.width = 1024;
-  c.height = 128;
+  // Щит имеет пропорцию примерно 48:1. Старые 1024×128 давали вертикальную
+  // плотность в шесть раз выше горизонтальной: mipmap выбирался слишком грубый
+  // и стирал буквы ещё ДО CRT. 1024×32 ближе к физической пропорции и резче.
+  c.height = 32;
   const ctx = c.getContext('2d');
   const ads = [
     ['#c0341d', '#fff', 'СПОРТ·ТВ'],
@@ -311,10 +314,14 @@ function createBoardTexture() {
     ctx.fillStyle = bg;
     ctx.fillRect(i * secW, 0, secW, c.height);
     ctx.fillStyle = fg;
-    ctx.font = 'bold 58px "Arial Narrow", Arial, sans-serif';
+    ctx.font = 'bold 22px "Arial Narrow", Arial, sans-serif';
     ctx.fillText(text, i * secW + secW / 2, c.height / 2 + 2);
   });
-  const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 2 });
+  const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 8 });
+  // Для тонкой полосы щитов trilinear смешивал два mip-уровня и снова мыл
+  // буквы. Берём один ближайший mip, но внутри него оставляем linear — резче,
+  // без пиксельного мерцания при движении ТВ-камеры.
+  tex.minFilter = THREE.LinearMipmapNearestFilter;
   tex.wrapS = THREE.RepeatWrapping;
   textureClones.set(tex, []);
   loadTextureImage(STADIUM_TEXTURES.boards)
@@ -332,9 +339,11 @@ function buildBoards(scene) {
   const base = createBoardTexture();
   const bx = F.length / 2 + BD.marginX; // позиция торцевых щитов по X
   const bz = F.width / 2 + BD.marginZ;  // боковых по Z
+  const visualH = BD.visualHeight || BD.height;
   const repeatPerMeter = 1 / 48;        // шесть бортов по ~8 м: логотипы читаются крупно, как в 1998-м
 
-  // Один щит: длинная тонкая доска высотой BD.height, текстурой внутрь и наружу
+  // Один щит: физическая высота остаётся в BD.height, визуальная слегка
+  // преувеличена для читаемости с ТВ-камеры (тот же принцип, что у мяча/сетки).
   const board = (len, horizontal) => {
     const tex = base.clone();
     tex.needsUpdate = true;
@@ -344,7 +353,7 @@ function buildBoards(scene) {
     // после CRT и стоит дешевле освещаемого материала.
     const mat = new THREE.MeshBasicMaterial({ map: tex });
     const dark = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
-    const geo = new THREE.BoxGeometry(len, BD.height, 0.25);
+    const geo = new THREE.BoxGeometry(len, visualH, 0.25);
     // текстура — на широкие грани (±Z бокса), торцы тёмные
     const m = new THREE.Mesh(geo, [dark, dark, dark, dark, mat, mat]);
     if (!horizontal) m.rotation.y = Math.PI / 2;
@@ -354,13 +363,13 @@ function buildBoards(scene) {
   // Северный и южный (вдоль длины поля)
   for (const z of [-bz, bz]) {
     const b = board(F.length + BD.marginX * 2, true);
-    b.position.set(0, BD.height / 2, z);
+    b.position.set(0, visualH / 2, z);
     scene.add(b);
   }
   // Западный и восточный (за воротами)
   for (const x of [-bx, bx]) {
     const b = board(F.width + BD.marginZ * 2, false);
-    b.position.set(x, BD.height / 2, 0);
+    b.position.set(x, visualH / 2, 0);
     scene.add(b);
   }
 }

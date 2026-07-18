@@ -143,13 +143,62 @@ export class Match {
     return best;
   }
 
+  // Автодобегание включаем только к действительно свободному мячу или к
+  // явной ошибке соперника. На уверенно владеющего соперника не наводимся:
+  // иначе переключение превращалось бы в бесплатный отбор.
+  armControlledApproach(p) {
+    p.cancelBallApproach();
+    if (this.state !== 'play' && this.state !== 'kickoff') return;
+    const bp = this.ball.mesh.position;
+    if (bp.y > CONFIG.player.approach.maxBallY) return;
+
+    const owner = this.toucher;
+    let loose = !owner;
+    if (owner && owner !== p && owner.team !== p.team) {
+      const op = owner.group.position;
+      const ownerGap = Math.hypot(bp.x - op.x, bp.z - op.z);
+      loose = ownerGap > CONFIG.ai.defence.badTouchDist;
+    }
+    if (owner === p || (owner && owner.team === p.team) || !loose) return;
+    p.beginBallApproach('switch', this.ball);
+  }
+
+  validateControlledApproach() {
+    const p = this.controlled;
+    const a = p && p.ballApproach;
+    if (!a) return;
+    if ((this.state !== 'play' && this.state !== 'kickoff') ||
+        p.downT > 0 || p.kickCooldown > 0) {
+      p.cancelBallApproach();
+      return;
+    }
+
+    const owner = this.toucher;
+    if (!owner || owner === p) return;
+    if (a.kind === 'dribble' || owner.team === p.team) {
+      p.cancelBallApproach();
+      return;
+    }
+    const bp = this.ball.mesh.position;
+    const op = owner.group.position;
+    const ownerGap = Math.hypot(bp.x - op.x, bp.z - op.z);
+    if (ownerGap <= CONFIG.ai.defence.badTouchDist) p.cancelBallApproach();
+  }
+
   setControlled(p, cd = CONFIG.ai.switch.cooldown) {
-    if (!p || p === this.controlled) return;
+    if (!p) return;
+    if (p === this.controlled) {
+      this.switchCd = cd;
+      this.armControlledApproach(p);
+      return;
+    }
+    if (this.controlled) this.controlled.cancelBallApproach();
     this.controlled = p;
     this.switchCd = cd;
     p.pendingStrike = null;
     p.chargeRun = false;
     if (p.ai) p.ai.dribDir = null;
+    this.armControlledApproach(p);
   }
 
   update(dt) {
@@ -207,6 +256,7 @@ export class Match {
     const aiBall = paused ? this._centerBall : this.ball;
 
     if (!paused) this.updateToucher();
+    this.validateControlledApproach();
 
     for (const team of this.teams) team.update(dt, aiBall);
 
