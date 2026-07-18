@@ -541,6 +541,13 @@ export class Player {
     const charge = Math.min(sw.power, 1.3);
     const curl = -sw.curl * S.swipeCurl; // палец гнёт вправо — мяч крутится вправо
 
+    // Жест, начатый на кнопке УДАР, — именно удар по нарисованному курсу.
+    // Свободный жест из круга НАВЕС ниже сохраняет прежнюю логику подачи.
+    if (sw.kind === 'shot') {
+      this.shoot(charge, input, ball, { dir, curl });
+      return;
+    }
+
     if (charge < 0.45) {
       // Короткий росчерк — острый пас на ход низом
       const fw = this.applyFootwork(curl, ball);
@@ -626,7 +633,7 @@ export class Player {
   // баллистикой, так что мяч реально прилетает в выбранную точку.
   // Поверх — модификаторы типа удара: подъём мощнее и настильнее,
   // носок слабее/ниже/шумнее, щечка точнее всех.
-  shoot(charge, input, ball) {
+  shoot(charge, input, ball, gesture = null) {
     const S = CONFIG.shot;
     const F = CONFIG.field;
     const G = CONFIG.goal;
@@ -638,7 +645,7 @@ export class Player {
     this.lastStrikeStyle = styleName;
     // У тычка сила почти не зависит от замаха — он всегда «средний, но мгновенный»
     const effCharge = styleName === 'toe' ? st.effCharge : charge;
-    const power = (S.powerMin + (S.powerMax - S.powerMin) * effCharge) * st.powerFactor;
+    let power = (S.powerMin + (S.powerMax - S.powerMin) * effCharge) * st.powerFactor;
     // Помощь в ударах глушит часть шума исполнения (слайдер в НАСТРОЙКАХ)
     const AS = S.assist;
     const noiseK = Math.max(0, 1 - AS.level * AS.noiseCut);
@@ -649,13 +656,22 @@ export class Player {
     // нога — сторону завитка (правая — влево, левая — вправо).
     // Подъём и носок бьют без вращения (driven/тычок).
     let curl = 0;
-    if (styleName === 'side') {
+    if (gesture) {
+      const fw = this.applyFootwork(gesture.curl, ball);
+      power *= fw.powerF;
+      curl = gesture.curl * fw.curlF;
+    } else if (styleName === 'side') {
       const foot = this.kickFoot(ball);
       curl = (foot === 'R' ? -1 : 1) * st.curl; // внутренняя сторона: правая режет влево
       this.lastKick = { foot, contact: 'inside' };
     }
 
-    const f = this.facing;
+    const f = gesture ? gesture.dir : this.facing;
+    if (gesture) {
+      // Корпус и анимация тоже поворачиваются по нарисованному удару.
+      this.facing.copy(f);
+      this.rot = Math.atan2(f.x, f.z);
+    }
     const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
     const dist = toGoal.length();
@@ -665,7 +681,7 @@ export class Player {
       // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
       // Стрелки сдвигают её; за штангу — можно, промах реален.
       const baseZ = bp.z + (f.z / f.x) * (goalX - bp.x);
-      const aimZ = input.shotAim ? input.shotAim.z : 0;
+      const aimZ = gesture ? 0 : (input.shotAim ? input.shotAim.z : 0);
       const maxZ = G.width / 2 + S.aimSlack;
       let targetZ = Math.max(-maxZ, Math.min(maxZ, baseZ)) + aimZ * S.aimRange;
       let targetY = (S.heightMin + (S.heightMax - S.heightMin) *

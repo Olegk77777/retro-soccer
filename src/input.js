@@ -43,6 +43,12 @@ class ChargeAction {
     return this._edge; // посмотреть, не забирая
   }
 
+  cancel() {
+    this.held = false;
+    this.t = 0;
+    this._edge = null;
+  }
+
   get charge01() {
     return this.t / this.chargeTime;
   }
@@ -131,18 +137,19 @@ export class Input {
       el.addEventListener('pointerleave', up);
     };
     bindHold('btn-pass', 'pass');
-    bindHold('btn-shoot', 'shot');
     bindHold('btn-sprint', 'sprint');
     // Навесы и пас на ход на таче — только жестом-свайпом («как нарисовал, так и полетело»)
 
     this._initSwipe();
   }
 
-  // Свайп-удар в правой зоне экрана (как в FIFA Mobile / Score! Hero):
-  // направление пальца — куда, длина — сила, ИЗГИБ траектории — подкрутка.
-  // Пока палец рисует — на #gesture-viz след и кольцо силы (ненавязчиво).
+  // Два жеста с общей визуализацией:
+  // - круг НАВЕС: свободный росчерк в правой зоне;
+  // - кнопка УДАР: тап/удержание сохраняет обычный удар, а движение пальца
+  //   превращает кнопку в направленный удар с нарисованной траекторией.
+  // Направление пальца — куда, длина — сила, ИЗГИБ — подкрутка.
   _initSwipe() {
-    this._swipe = { id: null, pts: [] };
+    this._swipe = { id: null, pts: [], kind: null, active: false };
 
     const viz = document.getElementById('gesture-viz');
     const vctx = viz ? viz.getContext('2d') : null;
@@ -185,31 +192,66 @@ export class Input {
       vctx.fill();
     };
 
+    const shotBtn = document.getElementById('btn-shoot');
+    shotBtn.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'touch' || this._swipe.id !== null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      shotBtn.setPointerCapture?.(e.pointerId);
+      shotBtn.classList.add('gesture-active');
+      this._touch.shot = true; // пока палец стоит — прежний замах кнопкой
+      this._swipe.id = e.pointerId;
+      this._swipe.kind = 'shot';
+      this._swipe.active = false;
+      this._swipe.pts = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
+    });
+
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
       if (e.clientX <= window.innerWidth * 0.55) return; // левая зона — стик
       if (e.target && e.target.classList && e.target.classList.contains('tbtn')) return;
       if (this._swipe.id !== null) return;
       this._swipe.id = e.pointerId;
+      this._swipe.kind = 'cross';
+      this._swipe.active = true;
       this._swipe.pts = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
     });
     window.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this._swipe.id) return;
       this._swipe.pts.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+      if (this._swipe.kind === 'shot' && !this._swipe.active) {
+        const a = this._swipe.pts[0];
+        if (Math.hypot(e.clientX - a.x, e.clientY - a.y) < 28) return;
+        // Палец явно пошёл рисовать: отменяем накопленный обычный замах,
+        // чтобы после жеста не вылетели два мяча подряд.
+        this._swipe.active = true;
+        this._touch.shot = false;
+        this.shot.cancel();
+      }
       drawViz();
     });
-    const endSwipe = (e) => {
+    const endSwipe = (e, cancelled = false) => {
       if (e.pointerId !== this._swipe.id) return;
       const pts = this._swipe.pts;
+      const kind = this._swipe.kind;
+      const active = this._swipe.active;
       this._swipe.id = null;
+      this._swipe.kind = null;
+      this._swipe.active = false;
+      if (kind === 'shot') {
+        this._touch.shot = false;
+        if (cancelled) this.shot.cancel();
+        shotBtn.classList.remove('gesture-active');
+      }
       clearViz(); // жест закончен — след убираем сразу
+      if (cancelled || (kind === 'shot' && !active)) return;
       if (pts.length < 3) return;
       const a = pts[0];
       const b = pts[pts.length - 1];
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
-      if (len < 36) return; // слишком короткий — не свайп
+      if (len < (kind === 'shot' ? 28 : 36)) return; // слишком короткий — не свайп
 
       // Сила: длина свайпа относительно трети экрана
       const power = Math.min(1.3, Math.max(0.2, len / (window.innerHeight * 0.35)));
@@ -226,14 +268,15 @@ export class Input {
 
       // Экран → мир: вправо = +X, вверх экрана = -Z
       this._swipeEvent = {
+        kind,
         dir: { x: dx / len, z: dy / len },
         power,
         speed,
         curl: curl01,
       };
     };
-    window.addEventListener('pointerup', endSwipe);
-    window.addEventListener('pointercancel', endSwipe);
+    window.addEventListener('pointerup', (e) => endSwipe(e));
+    window.addEventListener('pointercancel', (e) => endSwipe(e, true));
   }
 
   consumeSwipe() {

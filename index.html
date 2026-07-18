@@ -108,15 +108,23 @@
     .tbtn:active { background: rgba(255,255,255,0.25); }
     .tbtn { touch-action: manipulation; } /* убирает double-tap-зум по кнопке */
     #btn-pass   { right: 124px; bottom: 26px; }
-    #btn-shoot  { right: 22px;  bottom: 118px; }
-    #btn-sprint { right: 22px;  bottom: 214px; width: 72px; height: 72px; font-size: 22px; }
+    #btn-shoot  {
+      right: 22px; bottom: 118px; width: 108px; height: 108px;
+      border-style: dashed; background: rgba(255,255,255,0.04);
+    }
+    #btn-shoot.gesture-active {
+      border-color: rgba(232,212,77,0.85);
+      background: rgba(232,212,77,0.12);
+      box-shadow: 0 0 18px rgba(232,212,77,0.22);
+    }
+    #btn-sprint { right: 22px; bottom: 236px; width: 72px; height: 72px; font-size: 22px; }
     @media (pointer: coarse) { .tbtn { display: flex; } }
 
     /* Зона жеста навеса (планшет): большой пунктирный круг-подсказка.
        Жест работает во всей правой зоне, круг показывает «рисуй здесь» */
     #cross-zone {
-      position: fixed; right: 118px; bottom: 140px;
-      width: 162px; height: 162px; border-radius: 50%;
+      position: fixed; right: 134px; bottom: 140px;
+      width: 148px; height: 148px; border-radius: 50%;
       border: 2px dashed rgba(255,255,255,0.22);
       background: rgba(255,255,255,0.03);
       color: rgba(255,255,255,0.38);
@@ -129,9 +137,12 @@
     #gesture-viz {
       position: fixed; inset: 0; pointer-events: none; z-index: 4; display: none;
     }
+    #hint .touch-hint { display: none; }
     @media (pointer: coarse) {
       #cross-zone { display: flex; }
       #gesture-viz { display: block; }
+      #hint .desktop-hint { display: none; }
+      #hint .touch-hint { display: inline; }
     }
 
     /* Шкала замаха удара */
@@ -194,6 +205,7 @@
     <h3>УПРАВЛЕНИЕ — ПЛАНШЕТ</h3>
     <div class="row"><span class="key">Левая половина</span> — виртуальный стик (движение; после удара — докрутка)</div>
     <div class="row"><span class="key">Кнопки</span> ПАС · УДАР · ⚡спринт</div>
+    <div class="row"><span class="key">УДАР</span> — тап/удержание = обычный удар; свайп от кнопки рисует траекторию: направление = куда летит мяч, длина = сила, изгиб = подкрутка</div>
     <div class="row"><span class="key">Правая зона (круг НАВЕС)</span> — жест: направление = куда, длина = сила, скорость = характер дуги, изгиб пальца = подкрутка, короткий росчерк = пас на ход</div>
     <div class="row"><span class="key">Жест с фланга в сторону ворот</span> — навес наводится в штрафную сам: длина жеста = адрес (ближняя/центр/дальняя), изгиб пальца докручивает дугу</div>
 
@@ -203,7 +215,7 @@
     <div class="row">Нога решает дугу навеса: правая с правого фланга — аутсвингер (от вратаря к набегающим), с левого — инсвингер (закручивается к воротам)</div>
   </div>
 
-  <div id="hint">Стрелки — бег · E спринт · S пас · W на ход · A навес — с фланга сам в штрафную, сила = адрес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</div>
+  <div id="hint"><span class="desktop-hint">Стрелки — бег · E спринт · S пас · W на ход · A навес — с фланга сам в штрафную, сила = адрес (×2 настил, ×3 прострел) · D удар · после удара держи направление — докрутка</span><span class="touch-hint">Стик — бег · свайп от УДАР — направление, сила и подкрутка · круг НАВЕС — подача жестом</span></div>
   <div id="stick-base"><div id="stick-knob"></div></div>
   <div id="cross-zone">НАВЕС</div>
   <canvas id="gesture-viz"></canvas>
