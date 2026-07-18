@@ -281,9 +281,11 @@ export class Player {
     this.ballApproach = {
       kind,
       ttl: kind === 'switch' ? A.switchTimeout : A.dribbleTimeout,
+      age: 0,
       closest: dist,
       missArmed: dist <= A.missArmDist,
       contactArmed: kind === 'switch',
+      controlTime: 0,
       intent: null,
     };
     return true;
@@ -291,6 +293,42 @@ export class Player {
 
   cancelBallApproach() {
     this.ballApproach = null;
+  }
+
+  // Две честные границы завершения автодобегания:
+  // 1) мяч действительно отходил — ждём нового физического касания;
+  // 2) слабый толчок вообще не отделил мяч от бутсы — подтверждённое владение
+  //    и одинаковая скорость означают, что руль уже можно отдать человеку.
+  // Формального владения одного кадра недостаточно: controlTime принадлежит
+  // самому latch и копит одинаковое реальное время на экранах 30–120 Гц.
+  _ballApproachComplete(a, ball, dist) {
+    const P = CONFIG.player;
+    const A = P.approach;
+    const bp = ball.mesh.position;
+    if (a.contactArmed && dist <= A.contactRadius) return true;
+
+    const pos = this.group.position;
+    const dx = bp.x - pos.x;
+    const dz = bp.z - pos.z;
+    const relVx = ball.vel.x - this.vel.x;
+    const relVz = ball.vel.z - this.vel.z;
+    const separatingSpeed = (dx * relVx + dz * relVz) / Math.max(dist, 0.001);
+
+    // Неотделившийся мяч снова вошёл в физический контакт. Быстро летящий
+    // НА игрока мяч тоже честно считается касанием; уходящий — ещё нет.
+    if (a.kind === 'dribble' && !a.contactArmed && a.age >= A.settleTime &&
+        dist <= A.contactRadius && separatingSpeed <= A.settleSpeed) return true;
+
+    // Расширенная зона «у бутсы» допустима только для мяча, который устойчиво
+    // принадлежит игроку и целиком движется вместе с ним. Одна лишь
+    // радиальная скорость пропустила бы быстрый мяч, скользящий поперёк ноги.
+    const stableControl = a.controlTime >= A.settleTime && this.isToucher === true &&
+      dist <= P.stickyRadius && bp.y < CONFIG.ball.radius * 2.2;
+    if (!stableControl || Math.hypot(relVx, ball.vel.y, relVz) > A.settleSpeed) return false;
+
+    // switch: владение подтверждено непрерывным интервалом реального времени;
+    // dribble: короткая пауза отличает слабый толчок от начала настоящего ухода.
+    return a.kind === 'switch' || (!a.contactArmed && a.age >= A.settleTime);
   }
 
   // Анимация по движению — общая для человека и AI (вызывать раз в кадр).
@@ -486,12 +524,16 @@ export class Player {
     if (this.ballApproach) {
       const a = this.ballApproach;
       a.ttl -= dt;
+      a.age += dt;
       const intentLen = Math.hypot(input.move.x, input.move.z);
       if (intentLen > APP.intentDeadZone) {
         a.intent = { x: input.move.x / intentLen, z: input.move.z / intentLen };
       }
 
       const approachDist = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+      const controlSeen = this.isToucher === true && approachDist <= P.stickyRadius &&
+        bpEarly.y < CONFIG.ball.radius * 2.2;
+      a.controlTime = controlSeen ? a.controlTime + dt : 0;
       const unavailable = a.ttl <= 0 || downed || this.diveT > 0 || brake ||
         this.kickCooldown > 0 || bpEarly.y > APP.maxBallY;
       if (unavailable) {
@@ -504,6 +546,10 @@ export class Player {
           if (a.missArmed && approachDist > a.closest + APP.missMargin) {
             this.cancelBallApproach(); // добежал в зону, но мяч уже прошёл мимо
           }
+        }
+        if (this.ballApproach && this._ballApproachComplete(a, ball, approachDist)) {
+          approachIntentAtContact = a.intent;
+          this.cancelBallApproach();
         }
         if (this.ballApproach) {
           approachMove = pursuitBall(pos.x, pos.z, ball, P.speed * P.sprintFactor);
@@ -579,9 +625,9 @@ export class Player {
     // настоящий первый контакт фиксируем здесь — уже ПОСЛЕ шага футболиста.
     if (this.ballApproach) {
       const contactDist = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
-      if (this.ballApproach.contactArmed &&
-          contactDist <= APP.contactRadius && bpEarly.y <= APP.maxBallY) {
-        approachIntentAtContact = this.ballApproach.intent;
+      const a = this.ballApproach;
+      if (bpEarly.y <= APP.maxBallY && this._ballApproachComplete(a, ball, contactDist)) {
+        approachIntentAtContact = a.intent;
         this.cancelBallApproach();
       }
     }
@@ -638,7 +684,10 @@ export class Player {
 
     if (this.dribbleTouchCd > 0) this.dribbleTouchCd -= dt;
     if (!this.hasBall) this.dribbleDir = null; // мяч потерян — курс ведения сброшен
-    if (this.hasBall) {
+    // Пока ноги ещё честно добегают до мяча, обычное липкое ведение не должно
+    // параллельно тянуть тот же мяч. После завершения контакта latch уже снят,
+    // и этот блок исполняется в том же кадре.
+    if (this.hasBall && !this.ballApproach) {
       if ((sprinting || this.sprintBoost > 0.35) && speed > P.sprintTouchMinSpeed) {
         // Дриблинг на спринте — ТОЛЧКАМИ (фидбек Олега, 17.07.2026):
         // игрок пинает мяч вперёд, тот катится и тормозит (трение в ball.update),
@@ -654,7 +703,8 @@ export class Player {
         ball.vel.x -= latX * P.sprintTouchLateral;
         ball.vel.z -= latZ * P.sprintTouchLateral;
         // Мяч подкатился к ноге и пауза выдержана — новый толчок
-        if (ahead < P.sprintTouchTrigger && this.dribbleTouchCd <= 0) {
+        if (ahead < P.sprintTouchTrigger && dist <= APP.contactRadius &&
+            this.dribbleTouchCd <= 0) {
           // Толчок — в сторону ввода (руль применяется у мяча), без ввода — по корпусу
           let pdx = this.facing.x;
           let pdz = this.facing.z;
