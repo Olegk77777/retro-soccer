@@ -37,6 +37,9 @@ export class Team {
     this.runnerTimer = 0;
     this._runCheckTimer = 0;
 
+    // Врывания в штрафную под навес: игрок → точка рывка (ближняя/дальняя/11 м)
+    this.boxRuns = new Map();
+
     // Support spots Бакленда: сетка точек на половине соперника
     const SP = CONFIG.ai.attack.spot;
     this._spots = [];
@@ -139,6 +142,52 @@ export class Team {
     // (sweeper/cover из PES Defence System) и персональный разбор в своей трети
     this.coverer = this.attacking ? null : this.pickCoverer(ball);
     this.updateMarks(ball);
+
+    // Врывания под навес: мяч на нашем фланге в финальной трети —
+    // форварды рывками занимают штанги и точку 11 м
+    this.updateBoxRuns(ball);
+  }
+
+  // Мяч во фланговом коридоре чужой трети (у нас) — форварды не стоят
+  // и не ждут, а ВРЫВАЮТСЯ в штрафную (фидбек Олега 18.07.2026): ближняя
+  // штанга, дальняя, подбор на 11 м. Цели живут, пока идёт фланговая атака.
+  updateBoxRuns(ball) {
+    const AC = CONFIG.ai.attack.cross;
+    const F = CONFIG.field;
+    this.boxRuns.clear();
+    if (!this.attacking) return;
+    const bp = ball.mesh.position;
+    const inFlank = Math.abs(bp.z) > AC.flankZ - 2;
+    const inFinal = this.side * bp.x > F.length / 2 - AC.finalThird;
+    if (!inFlank || !inFinal) return;
+
+    const goalX = this.attackGoalX;
+    const s = Math.sign(bp.z || 1);
+    const targets = [
+      { x: goalX - this.side * 6.5, z: s * 3.2 },    // ближняя штанга
+      { x: goalX - this.side * 8.0, z: -s * 4.8 },   // дальняя штанга
+      { x: goalX - this.side * 11.5, z: -s * 0.5 },  // подбор у 11 метров
+    ];
+    // Кандидаты: оба форварда + открывающийся; занятые роли не трогаем
+    const pool = [this.players[9], this.players[10], this.supporter]
+      .filter((p, i, arr) => p && arr.indexOf(p) === i &&
+        p !== this.match.toucher && p !== this.match.controlled &&
+        p !== this.receiver && p !== this.chaser && p !== this.runner);
+    for (const t of targets) {
+      if (!pool.length) break;
+      let bi = 0;
+      let bd = Infinity;
+      pool.forEach((p, i) => {
+        const pp = p.group.position;
+        const d = Math.hypot(pp.x - t.x, pp.z - t.z);
+        if (d < bd) {
+          bd = d;
+          bi = i;
+        }
+      });
+      this.boxRuns.set(pool[bi], t);
+      pool.splice(bi, 1);
+    }
   }
 
   // Оценка support spots (веса Params.ini Бакленда + свободная зона):

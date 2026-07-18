@@ -234,7 +234,11 @@ export class Player {
     this.chargeRun = false;
     this.dribbleTouchCd = 0;
     this.sprintBoost = 0;
-    if (this.ai) this.ai.dribDir = null; // мозг AI начинает с чистого листа
+    if (this.ai) {
+      this.ai.dribDir = null; // мозг AI начинает с чистого листа
+      this.ai.holdT = 0;      // кипер не «держит» несуществующий мяч
+      this.ai.dropkickStarted = false;
+    }
     this.group.rotation.y = rot;
     this.shadow.position.x = x;
     this.shadow.position.z = z;
@@ -399,6 +403,19 @@ export class Player {
     let mvx = brake ? 0 : input.move.x;
     let mvz = brake ? 0 : input.move.z;
 
+    // Ожидание исполнения (пас/удар нажат, мяч ещё не в зоне ноги): игрок
+    // ДОБЕГАЕТ до мяча сам, а стик в это время рулит НАПРАВЛЕНИЕМ паса,
+    // не уводя бег — раньше смена направления в этот момент «убегала от
+    // мяча» и пас сгорал (фидбек Олега, 18.07.2026). Так это делает PES:
+    // код доводит игрока до касания, направление берётся из намерения.
+    const bpEarly = ball.mesh.position;
+    const distEarly = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+    if (this.pendingStrike && !brake && distEarly < 6 && distEarly > 0.4) {
+      const toBall = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) || 1;
+      mvx = (bpEarly.x - pos.x) / toBall;
+      mvz = (bpEarly.z - pos.z) / toBall;
+    }
+
     // Смена направления на ведении — «через касание», как в PES (фидбек Олега):
     // пока мяч впереди дальше dribbleChaseDist, бег примагничивается К МЯЧУ —
     // игрок сначала догоняет его, а руль применится в момент сближения.
@@ -540,10 +557,20 @@ export class Player {
     else if (swipe !== null) strike = { type: 'swipe', v: swipe };
 
     if (strike) {
-      this.pendingStrike = { ...strike, ttl: P.strikeBufferTime };
+      this.pendingStrike = { ...strike, ttl: P.strikeBufferTime, aim: null };
     } else if (this.pendingStrike) {
       this.pendingStrike.ttl -= dt;
       if (this.pendingStrike.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+    }
+
+    // Пока пас ждёт мяча, стик пишет НАПРАВЛЕНИЕ будущей передачи:
+    // игрок добегает сам (см. выше), а намерение живёт до исполнения
+    if (this.pendingStrike &&
+        (this.pendingStrike.type === 'pass' || this.pendingStrike.type === 'through')) {
+      const ail = Math.hypot(input.move.x, input.move.z);
+      if (ail > 0.3) {
+        this.pendingStrike.aim = { x: input.move.x / ail, z: input.move.z / ail };
+      }
     }
 
     if (canKick && this.pendingStrike) {
@@ -552,13 +579,23 @@ export class Player {
       const lerp = (a, b, t) => a + (b - a) * t;
       if (s.type === 'pass' || s.type === 'through') {
         // S — пас низом; W — пас на ход (настильный). Сила — от замаха.
-        // Пас-ассист (Фаза 2): Match доворачивает направление на партнёра
-        // в конусе взгляда и посылает его встречать мяч; без партнёров
-        // в конусе (или без Match) пас летит строго по взгляду, как раньше.
+        // Направление: намерение стика на подходе к мячу (s.aim) или взгляд.
+        // Пас-ассист: Match доворачивает на партнёра в конусе и подтягивает
+        // силу к дистанции (слайдер «Помощь в пасах»); партнёр бросается
+        // встречать. Без адресата пас летит строго как нарисован.
         const cfg = s.type === 'pass' ? P.pass : P.through;
         const power = lerp(cfg.powerMin, cfg.powerMax, s.v);
-        const assist = this.passAssist ? this.passAssist(this, s.type, power) : null;
-        ball.strike(assist ? assist.dir : this.facing, power, cfg.lift);
+        let aimDir = null;
+        if (s.aim) {
+          aimDir = new THREE.Vector3(s.aim.x, 0, s.aim.z);
+          this.rot = Math.atan2(s.aim.x, s.aim.z); // корпус доворачивается по пасу
+        }
+        const assist = this.passAssist ? this.passAssist(this, s.type, power, aimDir) : null;
+        ball.strike(
+          assist ? assist.dir : (aimDir || this.facing),
+          assist ? assist.power : power,
+          cfg.lift,
+        );
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
       } else if (s.type === 'cross') {

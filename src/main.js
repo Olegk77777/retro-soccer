@@ -88,6 +88,22 @@ assistSlider.addEventListener('input', () => {
   try { localStorage.setItem('f98.shotAssist', assistSlider.value); } catch (e) { /* приватный режим */ }
 });
 
+// Помощь в пасах: слайдер 10–30%, живёт в CONFIG.ai.humanPass.assist.level,
+// запоминается в localStorage (та же схема, что помощь в ударах)
+const passSlider = document.getElementById('set-pass-assist');
+const passVal = document.getElementById('set-pass-assist-val');
+const savedPass = Number(localStorage.getItem('f98.passAssist'));
+if (savedPass >= 10 && savedPass <= 30) {
+  CONFIG.ai.humanPass.assist.level = savedPass / 100;
+}
+passSlider.value = Math.round(CONFIG.ai.humanPass.assist.level * 100);
+passVal.textContent = passSlider.value;
+passSlider.addEventListener('input', () => {
+  CONFIG.ai.humanPass.assist.level = Number(passSlider.value) / 100;
+  passVal.textContent = passSlider.value;
+  try { localStorage.setItem('f98.passAssist', passSlider.value); } catch (e) { /* приватный режим */ }
+});
+
 // Настройка камеры: подлёт к дальней бровке (пишем прямо в живой CONFIG)
 const farSlider = document.getElementById('set-far');
 const farVal = document.getElementById('set-far-val');

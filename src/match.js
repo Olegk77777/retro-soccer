@@ -102,6 +102,7 @@ export class Match {
       team.runner = null;
       team.runnerTarget = null;
       team.bestSpot = null;
+      team.boxRuns.clear();
       team.defLineX = team.defLineTarget(this._centerBall); // линия сразу на месте
       for (const p of team.players) {
         const home = team.homeTarget(p, this._centerBall);
@@ -246,6 +247,11 @@ export class Match {
         }
       }
     }
+    // Кипер с мячом в руках — безусловный владелец (мяч на высоте рук,
+    // обычный радиус-арбитраж его не видит)
+    for (const team of this.teams) {
+      if (team.keeper.ai && team.keeper.ai.holdT > 0) best = team.keeper;
+    }
     this.toucher = best;
     for (const p of this._all) p.isToucher = p === best;
     if (best) this.possession = best.team;
@@ -285,13 +291,17 @@ export class Match {
 
   // Пас-ассист человека: адресат — партнёр в конусе взгляда; направление
   // доворачивается с упреждением на его бег, партнёр бросается встречать.
-  // Сила паса остаётся от полоски (передержал — мяч уйдёт дальше адресата).
-  resolvePass(player, type, power) {
+  // Уровень помощи (слайдер 10–30%, как у ударов): шире конус поиска и
+  // подтяжка силы полоски к дистанции адресата. aimDir — направление
+  // намерения (стик в момент паса), по умолчанию взгляд игрока.
+  resolvePass(player, type, power, aimDir = null) {
     const HP = CONFIG.ai.humanPass;
+    const AS = HP.assist;
     const team = player.team;
     if (!team) return null;
-    const f = player.facing;
+    const f = aimDir || player.facing;
     const pos = player.group.position;
+    const coneCos = AS.coneBase - AS.level * AS.coneWiden;
 
     let best = null;
     let bestScore = -Infinity;
@@ -303,7 +313,7 @@ export class Match {
       const dist = Math.hypot(dx, dz);
       if (dist < HP.minDist || dist > HP.maxDist) continue;
       const cos = (dx * f.x + dz * f.z) / dist;
-      if (cos < HP.coneCos) continue;
+      if (cos < coneCos) continue;
       const score = cos * 30 - dist * 0.25; // ближе к линии взгляда и не слишком далеко
       if (score > bestScore) {
         bestScore = score;
@@ -312,8 +322,16 @@ export class Match {
     }
     if (!best) return null;
 
+    // Помощь в силе: полоска тянется к «идеальной для дистанции» на долю
+    // level×powerPull. Осознанная передержка всё равно уводит мяч дальше
+    const ideal = best.dist * AS.idealK;
+    const P = CONFIG.player;
+    const cfg = type === 'through' ? P.through : P.pass;
+    let outPower = power + (ideal - power) * Math.min(1, AS.level * AS.powerPull);
+    outPower = Math.max(cfg.powerMin * 0.8, Math.min(cfg.powerMax * 1.3, outPower));
+
     const lead = type === 'through' ? HP.leadThrough : HP.lead;
-    const t = best.dist / Math.max(power, 6);
+    const t = best.dist / Math.max(outPower, 6);
     const mp = best.mate.group.position;
     const tx = mp.x + best.mate.vel.x * t * lead;
     const tz = mp.z + best.mate.vel.z * t * lead;
@@ -323,7 +341,7 @@ export class Match {
     team.receiveTarget = { x: tx, z: tz };
     team.receiveTimer = CONFIG.ai.receiveGiveUp;
 
-    return { dir: new THREE.Vector3((tx - pos.x) / d, 0, (tz - pos.z) / d) };
+    return { dir: new THREE.Vector3((tx - pos.x) / d, 0, (tz - pos.z) / d), power: outPower };
   }
 
   // Гол: определяем сторону по позиции мяча, счёт, пауза, потом розыгрыш

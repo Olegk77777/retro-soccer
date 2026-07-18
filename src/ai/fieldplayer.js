@@ -57,6 +57,11 @@ export function updateFieldPlayer(p, dt, ball) {
       // увидит рывок и положит мяч на ход (приоритет в choosePass)
       move = seek(pos.x, pos.z, team.runnerTarget.x, team.runnerTarget.z);
       sprint = true;
+    } else if (team.boxRuns.get(p)) {
+      // Врывание в штрафную под навес: рывком на штангу / 11 метров
+      const t = team.boxRuns.get(p);
+      move = arrive(pos.x, pos.z, t.x, t.z, 2);
+      sprint = Math.hypot(t.x - pos.x, t.z - pos.z) > 3;
     } else if (team.coverer === p && !team.attacking && match.toucher && match.toucher.team !== team) {
       // Второй защитник (cover): за спиной прессингующего, под углом
       // к центру — ловит обыгрыш и закрывает прострел (ресёрч 09 + PES sweeper)
@@ -284,8 +289,8 @@ function aiCross(p, ball, oppD) {
     }
   }
   if (!target) {
-    // В штрафной пусто, но есть рывок туда? Иначе — дальняя штанга
-    if (team.runner || team.receiver) return false; // подождём набегающих
+    // В штрафной пусто, но туда уже бегут (рывок/врывания)? Подождём их.
+    if (team.runner || team.receiver || team.boxRuns.size) return false;
     target = { x: team.side * (F.length / 2 - 5.5), z: -Math.sign(pos.z) * AC.farPostZ };
   }
 

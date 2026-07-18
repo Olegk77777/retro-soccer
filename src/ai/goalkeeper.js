@@ -14,25 +14,52 @@ export function updateKeeper(p, dt, ball) {
   const pos = p.group.position;
   const bp = ball.mesh.position;
   const goalX = team.ownGoalX;
+  if (!p.ai) p.ai = {};
 
   const ballDist = distToBall(p, ball);
 
-  // Мяч в руках/в ногах — вынос: сильный удар в сторону фланга своей атаки.
-  // Анимация — вратарская (фидбек Олега: «отбивает ногами»): пушку снимает
-  // броском (gk_dive), верховой ловит корпусом (gk_catch), низовой
-  // подбирает и выбивает с рук (gk_dropkick).
+  // === Мяч в руках: держим holdTime, затем вынос с маха (фидбек Олега:
+  // мяч больше не отскакивает «как от дерева» в тот же кадр) ===
+  if (p.ai.holdT > 0) {
+    p.ai.holdT -= dt;
+    // Мяч живёт в руках: перед грудью, без скорости — полевые не дотянутся
+    const f = p.facing;
+    bp.set(pos.x + f.x * 0.5, AI.holdY, pos.z + f.z * 0.5);
+    ball.vel.set(0, 0, 0);
+    ball.spin = 0;
+    if (p.ai.holdT <= AI.dropkickLead && !p.ai.dropkickStarted) {
+      // Мах начинается заранее — нога встретит мяч в момент вылета
+      p.ai.dropkickStarted = true;
+      p.playOneShot('gk_dropkick', 1.6, 1.15);
+    }
+    if (p.ai.holdT <= 0) {
+      // Вынос: сильным ударом на фланг своей атаки
+      const zSign = Math.abs(pos.z) > 2 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
+      const d = Math.hypot(team.side, zSign * 0.55) || 1;
+      ball.strike({ x: team.side / d, z: (zSign * 0.55) / d }, AI.clearPower, AI.clearLift);
+      p.kickCooldown = P.kickCooldown * 2; // выбитый мяч не ловим тут же обратно
+      p.ai.dropkickStarted = false;
+    }
+    p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(team.side, 0) });
+    return;
+  }
+
+  // Мяч досягаем — ЛОВЛЯ: гасим его в руках, клип по характеру мяча
+  // (пушка — бросок, верховой — корпусом, низовой — подбор)
   const reachable =
     (ballDist < AI.catchRadius && bp.y < AI.catchMaxY) ||
     (ballDist < P.kickRadius && bp.y < P.kickMaxBallY);
   if (p.kickCooldown <= 0 && reachable) {
-    const zSign = Math.abs(bp.z) > 2 ? Math.sign(bp.z) : (Math.random() < 0.5 ? -1 : 1);
     const shotSpeed = Math.hypot(ball.vel.x, ball.vel.z);
-    const anim = shotSpeed > 14
-      ? { name: 'gk_dive', ts: 1.3, at: 0.12 }
-      : bp.y > 1.0
-        ? { name: 'gk_catch', ts: 1.2, at: 0.10 }
-        : { name: 'gk_dropkick', ts: 1.3, at: 0.18 };
-    p.aiKick(ball, { x: team.side, z: zSign * 0.55 }, AI.clearPower, AI.clearLift, 0, anim);
+    const clip = shotSpeed > 14
+      ? { name: 'gk_dive', ts: 1.5, at: 0.25 }
+      : bp.y > 0.8
+        ? { name: 'gk_catch', ts: 1.4, at: 0.45 }
+        : { name: 'gk_scoop', ts: 1.4, at: 0.35 };
+    p.playOneShot(clip.name, clip.ts, clip.at);
+    p.ai.holdT = AI.holdTime;
+    p.ai.dropkickStarted = false;
+    p.rot = Math.atan2(team.side, 0); // разворачивается с мячом в поле
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
     return;
   }
