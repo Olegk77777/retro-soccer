@@ -253,11 +253,14 @@ export class Input {
     const ay = p.axes[1] || 0;
     if (Math.hypot(ax, ay) > 0.22) { this._padMove.x = ax; this._padMove.z = ay; }
     const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
+    // Правый триггер RT/R2 (7) — аналоговый: считаем нажатым и по value,
+    // чтобы спринт ловился от лёгкого выжима, а не только «до упора».
+    const trig = (i) => { const b = p.buttons[i]; return !!b && (b.pressed || b.value > 0.35); };
     this._pad.pass = btn(0);    // A / крест — пас
-    this._pad.cross = btn(1);   // B / круг — навес
-    this._pad.shot = btn(2);    // X / квадрат — удар
+    this._pad.shot = btn(1);    // B / круг — удар (по просьбе Олега поменян местами с навесом)
+    this._pad.cross = btn(2);   // X / квадрат — навес (поменян местами с ударом)
     this._pad.through = btn(3); // Y / треугольник — пас на ход
-    this._pad.sprint = btn(5);  // RB / R1 — спринт, как в PES
+    this._pad.sprint = trig(7); // RT / R2 (дальний правый курок) — спринт, перенесён с бампера RB
   }
 
   update(dt) {
