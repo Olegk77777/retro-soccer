@@ -244,18 +244,32 @@ export class Player {
     return new THREE.Vector3(Math.sin(this.rot), 0, Math.cos(this.rot));
   }
 
-  // Анимация по движению — общая для человека и AI (вызывать раз в кадр)
+  // Анимация по движению — общая для человека и AI (вызывать раз в кадр).
+  // Клип выбирается по соотношению скорости и взгляда: бег вперёд, приставные
+  // шаги вбок (strafe), бег спиной (run_back). Вратарь стоит своей стойкой
+  // (gk_idle, руки наготове) — фидбек Олега 18.07.2026 «отбивает ногами».
   _updateAnim(dt, speed) {
     const P = CONFIG.player;
     if (this.mixer) {
-      // Выбор клипа по движению; пока играет одноразовый (удар) — не дёргаем
+      // Пока играет одноразовый (удар, ловля) — не дёргаем
       if (!this.oneShot) {
         if (speed < 0.6) {
-          this.playAction('idle', 0.18);
+          const idle = this.isKeeper && this.actions.gk_idle ? 'gk_idle' : 'idle';
+          this.playAction(idle, 0.18);
         } else {
-          this.playAction('run', 0.1);
-          // Темп ног растёт со скоростью (сам клип снят под лёгкую трусцу)
-          this.actions.run.timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
+          // Продольная и поперечная составляющие скорости относительно взгляда
+          const f = this.facing;
+          const fwd = this.vel.x * f.x + this.vel.z * f.z;
+          const side = f.x * this.vel.z - f.z * this.vel.x; // >0 — движение вправо от взгляда
+          let clip = 'run';
+          if (Math.abs(fwd) < speed * 0.5 && this.actions.strafe_l) {
+            clip = side > 0 ? 'strafe_r' : 'strafe_l'; // боком — приставные шаги
+          } else if (fwd < -speed * 0.5 && this.actions.run_back) {
+            clip = 'run_back'; // пятимся, не отворачиваясь от мяча
+          }
+          this.playAction(clip, 0.12);
+          // Темп ног растёт со скоростью (клипы сняты под лёгкую трусцу)
+          this.actions[clip].timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
         }
       }
       this.mixer.update(dt);
@@ -285,6 +299,8 @@ export class Player {
     let maxSpeed = P.speed * CONFIG.ai.speedFactor *
       (this.isToucher ? P.dribbleSpeedFactor : 1);
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
+    // Кап скорости от мозга: сдерживающий защитник зеркалит темп владельца
+    if (opts.speedCap != null) maxSpeed = Math.min(maxSpeed, opts.speedCap);
 
     let mvx = move.x;
     let mvz = move.z;
@@ -340,14 +356,16 @@ export class Player {
     ball.vel.z = this.vel.z + (tz - bp.z) * P.dribbleStrength;
   }
 
-  // Удар AI: пас/выстрел/вынос — обычный strike с анимацией и кулдауном
-  aiKick(ball, dir, power, lift, curl = 0) {
+  // Удар AI: пас/выстрел/вынос — обычный strike с анимацией и кулдауном.
+  // anim позволяет мозгу выбрать клип (вратарь ловит/выбивает своими)
+  aiKick(ball, dir, power, lift, curl = 0, anim = null) {
     const d = Math.hypot(dir.x, dir.z) || 1;
     const ndir = { x: dir.x / d, z: dir.z / d };
     ball.strike(ndir, power, lift, curl);
     this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.6, 0.20);
+    const a = anim || { name: 'kick', ts: 1.6, at: 0.20 };
+    this.playOneShot(a.name, a.ts, a.at);
   }
 
   update(dt, input, ball) {

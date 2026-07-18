@@ -17,13 +17,22 @@ export function updateKeeper(p, dt, ball) {
 
   const ballDist = distToBall(p, ball);
 
-  // Мяч в руках/в ногах — вынос: сильный удар в сторону фланга своей атаки
+  // Мяч в руках/в ногах — вынос: сильный удар в сторону фланга своей атаки.
+  // Анимация — вратарская (фидбек Олега: «отбивает ногами»): пушку снимает
+  // броском (gk_dive), верховой ловит корпусом (gk_catch), низовой
+  // подбирает и выбивает с рук (gk_dropkick).
   const reachable =
     (ballDist < AI.catchRadius && bp.y < AI.catchMaxY) ||
     (ballDist < P.kickRadius && bp.y < P.kickMaxBallY);
   if (p.kickCooldown <= 0 && reachable) {
     const zSign = Math.abs(bp.z) > 2 ? Math.sign(bp.z) : (Math.random() < 0.5 ? -1 : 1);
-    p.aiKick(ball, { x: team.side, z: zSign * 0.55 }, AI.clearPower, AI.clearLift);
+    const shotSpeed = Math.hypot(ball.vel.x, ball.vel.z);
+    const anim = shotSpeed > 14
+      ? { name: 'gk_dive', ts: 1.3, at: 0.12 }
+      : bp.y > 1.0
+        ? { name: 'gk_catch', ts: 1.2, at: 0.10 }
+        : { name: 'gk_dropkick', ts: 1.3, at: 0.18 };
+    p.aiKick(ball, { x: team.side, z: zSign * 0.55 }, AI.clearPower, AI.clearLift, 0, anim);
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
     return;
   }

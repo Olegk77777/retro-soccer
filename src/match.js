@@ -97,9 +97,14 @@ export class Match {
       team.receiveTarget = null;
       team.supporter = null;
       team.chaser = null;
+      team.coverer = null;
+      team.marks.clear();
+      team.defLineX = team.defLineTarget(this._centerBall); // линия сразу на месте
       for (const p of team.players) {
         const home = team.homeTarget(p, this._centerBall);
-        p.reset(home.x, home.z, Math.atan2(team.side, 0)); // лицом к чужим воротам
+        // Все за пределами центрального круга (форварды с defOff не в круге)
+        const x = Math.min(team.side * home.x, -10) * team.side;
+        p.reset(x, home.z, Math.atan2(team.side, 0)); // лицом к чужим воротам
       }
     }
 

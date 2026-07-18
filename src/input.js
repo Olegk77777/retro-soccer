@@ -143,6 +143,15 @@ export class Input {
     };
     bindHold('btn-pass', 'pass');
     bindHold('btn-sprint', 'sprint');
+
+    // Кнопка ⇄ — смена игрока: событие по касанию (как Q), не удержание
+    const switchBtn = document.getElementById('btn-switch');
+    if (switchBtn) {
+      switchBtn.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        this._switchQueued = true;
+      });
+    }
     // Навесы и пас на ход на таче — только жестом-свайпом («как нарисовал, так и полетело»)
 
     this._initSwipe();

@@ -21,11 +21,14 @@ export class Team {
     });
 
     this.attacking = false;   // владеем ли мячом (по мнению тренера)
-    this.chaser = null;       // кто бежит к свободному мячу
+    this.chaser = null;       // кто бежит к свободному мячу / прессингует
+    this.coverer = null;      // кто страхует за спиной прессингующего (cover)
+    this.marks = new Map();   // персональный разбор в своей трети: защитник → соперник
     this.receiver = null;     // кто ждёт адресованный ему пас
     this.receiveTarget = null; // куда этот пас летит
     this.receiveTimer = 0;
     this.supporter = null;    // кто открывается впереди под пас
+    this.defLineX = -side * (CONFIG.field.length / 2 - 25); // линия защиты (мир)
     this._coachTimer = 0;
   }
 
@@ -71,6 +74,13 @@ export class Team {
     // а реакция на отскок мгновенная, как у Бакленда в ChaseBall
     this.chaser = this.pickChaser(ball);
 
+    // Линия защиты «дышит»: плавно едет к расчётной высоте (не телепорт) —
+    // push up за мячом, drop off к своим воротам (ресёрч 09, lineSpeed)
+    const lt = this.defLineTarget(ball);
+    const step = CONFIG.ai.defence.lineSpeed * dt;
+    const dl = lt - this.defLineX;
+    this.defLineX += Math.abs(dl) < step ? dl : Math.sign(dl) * step;
+
     this._coachTimer -= dt;
     if (this._coachTimer > 0) return;
     this._coachTimer = AI.coachTick;
@@ -80,6 +90,84 @@ export class Team {
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
     this.supporter = this.attacking ? this.pickSupporter(ball) : null;
+
+    // Оборонительные назначения: страхующий за спиной прессингующего
+    // (sweeper/cover из PES Defence System) и персональный разбор в своей трети
+    this.coverer = this.attacking ? null : this.pickCoverer(ball);
+    this.updateMarks(ball);
+  }
+
+  // Высота линии защиты — считается ОТ МЯЧА (ресёрч 09: формула UvA/RoboCup):
+  // мяч у чужих ворот — линия у центра, мяч катится к нам — линия отступает,
+  // но никогда не прижимается к ленточке (lineMinDepth). Лечит фидбек Олега
+  // «защитники жмутся к линии ворот».
+  defLineTarget(ball) {
+    const D = CONFIG.ai.defence;
+    const F = CONFIG.field;
+    const bp = ball.mesh.position;
+    // Продвижение мяча: 0 = у наших ворот, 1 = у чужих
+    const ballDepth = this.side * bp.x + F.length / 2;
+    const adv = Math.max(0, Math.min(1, ballDepth / F.length));
+    let depth = D.lineMinDepth + D.lineRange * adv * D.mentality;
+    // Линия держится глубже мяча (goal-side) минимум на зазор
+    depth = Math.min(depth, ballDepth - D.lineBallGap);
+    depth = Math.max(D.lineMinDepth, Math.min(F.length / 2 + 8, depth));
+    return this.ownGoalX + this.side * depth;
+  }
+
+  // Страхующий (cover): второй по близости к мячу полевой — встаёт за спиной
+  // прессингующего под углом к центру, ловит обыгрыш и прострел
+  pickCoverer(ball) {
+    let best = null;
+    let bestD = Infinity;
+    for (const p of this.fieldPlayers) {
+      if (p === this.match.controlled || p === this.chaser) continue;
+      const d = distToBall(p, ball);
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  // Персональный разбор в своей трети (гибрид MarliK/PES Mark Man):
+  // свободные защитники разбирают ближних к нашим воротам соперников.
+  // Дальше своей трети — чистая зона (линия), как Mark Zone в PES.
+  updateMarks(ball) {
+    const D = CONFIG.ai.defence;
+    const F = CONFIG.field;
+    this.marks.clear();
+    if (this.attacking) return;
+    const bp = ball.mesh.position;
+    const ballDepth = this.side * bp.x + F.length / 2;
+    if (ballDepth > D.markThird) return;
+
+    const gx = this.ownGoalX;
+    const threats = this.opponents
+      .filter((o) => !o.isKeeper && this.side * o.group.position.x < 2)
+      .sort((a, b) =>
+        Math.hypot(a.group.position.x - gx, a.group.position.z) -
+        Math.hypot(b.group.position.x - gx, b.group.position.z));
+    // Защитники (индексы 1–4), не занятые прессингом/страховкой/человеком
+    const free = this.players.slice(1, 5).filter((p) =>
+      p !== this.chaser && p !== this.coverer && p !== this.match.controlled);
+    for (const t of threats) {
+      if (!free.length) break;
+      const tp = t.group.position;
+      let bi = 0;
+      let bd = Infinity;
+      free.forEach((d, i) => {
+        const dp = d.group.position;
+        const dd = Math.hypot(dp.x - tp.x, dp.z - tp.z);
+        if (dd < bd) {
+          bd = dd;
+          bi = i;
+        }
+      });
+      this.marks.set(free[bi], t);
+      free.splice(bi, 1);
+    }
   }
 
   // Кто бежит к мячу: ближний полевой игрок. Управляемого человеком не
@@ -129,11 +217,15 @@ export class Team {
     return best;
   }
 
-  // Домашняя точка игрока: регион формации, сдвинутый состоянием команды
-  // (атака/оборона) и притянутый к мячу — линии «дышат», команда компактна
+  // Домашняя точка игрока. В атаке — регион формации, сдвинутый вперёд и
+  // притянутый к мячу. В обороне — строимся ОТ ЛИНИИ ЗАЩИТЫ (ресёрч 09):
+  // защитники стоят на линии (плоская четвёрка), опорные — второй линией
+  // (defOff), форварды остаются выше под контратаку; все сжимаются к мячу
+  // по ширине (компактность).
   homeTarget(p, ball) {
     const F = CONFIG.field;
     const AI = CONFIG.ai;
+    const D = AI.defence;
     const base = CONFIG.formation.roles[p.homeIdx];
     const bp = ball.mesh.position;
 
@@ -143,11 +235,20 @@ export class Team {
       return { x: this.side * base.x * (F.length / 2), z: 0 };
     }
 
-    const shift = this.attacking ? AI.attackShift : -AI.defendShift;
-    let x = this.side * (base.x + shift) * (F.length / 2);
-    x += bp.x * AI.ballPullX;
-    let z = base.z * (F.width / 2) * 0.92;
-    z += bp.z * AI.ballPullZ;
+    let x;
+    let z;
+    if (this.attacking) {
+      x = this.side * (base.x + AI.attackShift) * (F.length / 2) + bp.x * AI.ballPullX;
+      z = base.z * (F.width / 2) * 0.92 + bp.z * AI.ballPullZ;
+    } else {
+      x = this.defLineX + this.side * base.defOff;
+      z = base.z * (F.width / 2) * D.zCompact;
+      // Четвёрка защитников не разъезжается шире компактного блока
+      if (base.defOff === 0) {
+        z = Math.max(-D.defWidth / 2, Math.min(D.defWidth / 2, z));
+      }
+      z += bp.z * AI.ballPullZ;
+    }
 
     x = Math.max(-F.length / 2 + 2, Math.min(F.length / 2 - 2, x));
     z = Math.max(-F.width / 2 + 1.5, Math.min(F.width / 2 - 1.5, z));
