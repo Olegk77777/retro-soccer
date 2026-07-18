@@ -308,14 +308,16 @@ function buildStands(scene) {
   // случайно погасить толпу и стоит дешевле на планшете.
   const standMat = new THREE.MeshBasicMaterial({ map: crowd });
   const sideMat = new THREE.MeshLambertMaterial({ color: 0x232838 });
-  // Наклонная трибуна начинается выше земли. В реальном олимпийском стадионе
-  // проём закрывает подпорная стенка; здесь она продолжает бордовый ран-аут,
-  // поэтому между дорожкой и зрителями больше не просвечивает ночное небо.
-  const baseMat = new THREE.MeshBasicMaterial({ color: CONFIG.track.wallColor });
 
   const standH = 17;
   const standD = 18;
   const tilt = -0.42; // наклон трибуны к полю
+  const a = Math.abs(tilt);
+  // Нижний ряд сам доходит до поверхности y=-0.02, без отдельного забора.
+  // Размер сектора не растягиваем: толпа сохраняет прежний масштаб.
+  const standY = -0.02
+    + (standH / 2) * Math.cos(a)
+    - (standD / 2) * Math.sin(a);
 
   const make = (len) => {
     const geo = new THREE.BoxGeometry(len, standH, standD);
@@ -325,8 +327,6 @@ function buildStands(scene) {
 
   // Овал шире футбольной коробки у ворот. Чаша подстраивается под его внешний
   // край, иначе торцевые сектора срезали бы белые линии на рабочих кадрах.
-  const a = Math.abs(tilt);
-  const baseH = standH / 2 + 1 - (standH / 2) * Math.cos(a) + (standD / 2) * Math.sin(a);
   const faceInset = (standH / 2) * Math.sin(a) + (standD / 2) * Math.cos(a);
   const trackOuter = CONFIG.track.innerRadius
     + CONFIG.track.lanes * CONFIG.track.laneWidth
@@ -341,45 +341,28 @@ function buildStands(scene) {
   const dx = trackEnd + faceInset;
 
   const north = make(long);
-  north.position.set(0, standH / 2 + 1, -dz);
+  north.position.set(0, standY, -dz);
   north.rotation.x = tilt;
   scene.add(north);
 
   const south = make(long);
-  south.position.set(0, standH / 2 + 1, dz);
+  south.position.set(0, standY, dz);
   south.rotation.x = -tilt;
   scene.add(south);
 
   const west = make(short);
+  west.rotation.order = 'YXZ'; // сначала развернуть торец, затем наклонить весь ряд ровно
   west.rotation.y = Math.PI / 2;
   west.rotation.x = tilt;
-  west.position.set(-dx, standH / 2 + 1, 0);
+  west.position.set(-dx, standY, 0);
   scene.add(west);
 
   const east = make(short);
+  east.rotation.order = 'YXZ';
   east.rotation.y = -Math.PI / 2;
   east.rotation.x = tilt;
-  east.position.set(dx, standH / 2 + 1, 0);
+  east.position.set(dx, standY, 0);
   scene.add(east);
-
-  // Нижняя ближняя точка наклонного бокса — точная высота/позиция его фасада.
-  const wallDepth = 0.7;
-  const makeBase = (len) => new THREE.Mesh(
-    new THREE.BoxGeometry(len, baseH, wallDepth),
-    baseMat,
-  );
-
-  for (const z of [-dz + faceInset, dz - faceInset]) {
-    const wall = makeBase(long);
-    wall.position.set(0, baseH / 2, z);
-    scene.add(wall);
-  }
-  for (const x of [-dx + faceInset, dx - faceInset]) {
-    const wall = makeBase(short);
-    wall.rotation.y = Math.PI / 2;
-    wall.position.set(x, baseH / 2, 0);
-    scene.add(wall);
-  }
 }
 
 function buildFloodlights(scene) {
