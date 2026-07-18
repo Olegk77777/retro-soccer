@@ -5,7 +5,7 @@
 // Решения — здесь, само движение исполняет player.aiUpdate («ноги»).
 
 import { CONFIG } from '../config.js';
-import { arrive, seek, pursuitBall, separation, distToBall } from './steering.js';
+import { arrive, seek, pursuitBall, separation, distToBall, freeSpace } from './steering.js';
 
 export function updateFieldPlayer(p, dt, ball) {
   const AI = CONFIG.ai;
@@ -52,6 +52,11 @@ export function updateFieldPlayer(p, dt, ball) {
       sprint = r.sprint;
       face = r.face;
       speedCap = r.speedCap;
+    } else if (team.runner === p && team.runnerTarget) {
+      // Забегание за спину: спринт в зону за линией защиты — владелец
+      // увидит рывок и положит мяч на ход (приоритет в choosePass)
+      move = seek(pos.x, pos.z, team.runnerTarget.x, team.runnerTarget.z);
+      sprint = true;
     } else if (team.coverer === p && !team.attacking && match.toucher && match.toucher.team !== team) {
       // Второй защитник (cover): за спиной прессингующего, под углом
       // к центру — ловит обыгрыш и закрывает прострел (ресёрч 09 + PES sweeper)
@@ -212,6 +217,10 @@ function withBall(p, ball) {
       p.ai.dribDir = null;
       return { x: 0, z: 0 };
     }
+    if (aiCross(p, ball, oppD)) {
+      p.ai.dribDir = null;
+      return { x: 0, z: 0 };
+    }
     if (oppD < AI.passPressure || Math.random() < AI.passUrge) {
       const pass = team.choosePass(p, ball);
       if (pass) {
@@ -240,6 +249,63 @@ function withBall(p, ball) {
   }
   p.ai.dribDir = { x: dx, z: dz };
   return { x: dx, z: dz };
+}
+
+// AI-навес с фланга (ресёрч 10 + PES): вингер в финальной трети упёрся
+// в защитника — подача в штрафную на самого свободного из своих; никого
+// нет — на дальнюю штангу (PES-дефолт). Сила — баллистикой под дистанцию.
+// Возвращает true, если навес исполнен.
+function aiCross(p, ball, oppD) {
+  const AI = CONFIG.ai;
+  const AC = AI.attack.cross;
+  const F = CONFIG.field;
+  const B = CONFIG.ball;
+  const team = p.team;
+  const pos = p.group.position;
+
+  const inFlank = Math.abs(pos.z) > AC.flankZ;
+  const inFinalThird = team.side * pos.x > F.length / 2 - AC.finalThird;
+  if (!inFlank || !inFinalThird || oppD > AC.blockedDist) return false;
+
+  // Адресат: свой в штрафной соперника с максимально свободной зоной
+  const boxX = F.length / 2 - 16.5;
+  let target = null;
+  let mate = null;
+  let bestSpace = -1;
+  for (const m of team.players) {
+    if (m === p || m.isKeeper) continue;
+    const mp = m.group.position;
+    if (team.side * mp.x < boxX || Math.abs(mp.z) > 20.16) continue;
+    const space = freeSpace(mp.x, mp.z, team.opponents);
+    if (space > bestSpace) {
+      bestSpace = space;
+      mate = m;
+      target = { x: mp.x + m.vel.x * 0.6, z: mp.z + m.vel.z * 0.6 };
+    }
+  }
+  if (!target) {
+    // В штрафной пусто, но есть рывок туда? Иначе — дальняя штанга
+    if (team.runner || team.receiver) return false; // подождём набегающих
+    target = { x: team.side * (F.length / 2 - 5.5), z: -Math.sign(pos.z) * AC.farPostZ };
+  }
+
+  const dx = target.x - pos.x;
+  const dz = target.z - pos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < AC.minDist) return false;
+
+  // Баллистика под адрес (как crossSolution): скорость из угла дуги
+  const theta = (AC.angle * Math.PI) / 180;
+  const g = -B.gravity;
+  let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * 1.15;
+  power = Math.max(14, Math.min(30, power));
+  const lift = power * Math.tan(theta);
+  p.aiKick(ball, { x: dx / dist, z: dz / dist }, power, lift, 0,
+    { name: 'kick', ts: 1.2, at: 0.16 }); // навес — с проводкой
+  if (mate) {
+    team.commitPass({ mate, target });
+  }
+  return true;
 }
 
 // Удар AI: случайная точка створа + шум промаха, растущий с дистанцией.

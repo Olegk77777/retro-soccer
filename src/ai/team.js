@@ -4,7 +4,7 @@
 // назначения, «головы» игроков (fieldplayer.js) их исполняют.
 
 import { CONFIG } from '../config.js';
-import { distToBall, passLaneClearance } from './steering.js';
+import { distToBall, passLaneClearance, freeSpace, isPassSafe } from './steering.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -30,6 +30,26 @@ export class Team {
     this.supporter = null;    // кто открывается впереди под пас
     this.defLineX = -side * (CONFIG.field.length / 2 - 25); // линия защиты (мир)
     this._coachTimer = 0;
+
+    // Забегание за спину (ресёрч 10): один активный раннер на команду
+    this.runner = null;
+    this.runnerTarget = null;
+    this.runnerTimer = 0;
+    this._runCheckTimer = 0;
+
+    // Support spots Бакленда: сетка точек на половине соперника
+    const SP = CONFIG.ai.attack.spot;
+    this._spots = [];
+    for (let ix = 0; ix < SP.cols; ix++) {
+      for (let iz = 0; iz < SP.rows; iz++) {
+        this._spots.push({
+          x: side * (4 + (42 * ix) / (SP.cols - 1)),
+          z: -27 + (54 * iz) / (SP.rows - 1),
+        });
+      }
+    }
+    this.bestSpot = null;
+    this._spotTimer = 0;
   }
 
   get keeper() {
@@ -81,12 +101,36 @@ export class Team {
     const dl = lt - this.defLineX;
     this.defLineX += Math.abs(dl) < step ? dl : Math.sign(dl) * step;
 
+    // Раннер: рывок живёт durationSec или пока не потеряли мяч
+    if (this.runner) {
+      this.runnerTimer -= dt;
+      if (this.runnerTimer <= 0 || !this.attacking) {
+        this.runner = null;
+        this.runnerTarget = null;
+      }
+    }
+    if (this._runCheckTimer > 0) this._runCheckTimer -= dt;
+    if (this._spotTimer > 0) this._spotTimer -= dt;
+
     this._coachTimer -= dt;
     if (this._coachTimer > 0) return;
     this._coachTimer = AI.coachTick;
 
     // Владение — по последнему касанию (считает Match)
     this.attacking = this.match.possession === this;
+
+    if (this.attacking) {
+      // Лучший спот открывания (Бакленд, пересчёт раз в updateSec)
+      if (this._spotTimer <= 0) {
+        this._spotTimer = CONFIG.ai.attack.spot.updateSec;
+        this.updateBestSpot(ball);
+      }
+      // Пора ли кому-то рвануть за спину защите
+      if (!this.runner && this._runCheckTimer <= 0) {
+        this._runCheckTimer = CONFIG.ai.attack.runs.checkSec;
+        this.tryStartRun(ball);
+      }
+    }
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
     this.supporter = this.attacking ? this.pickSupporter(ball) : null;
@@ -95,6 +139,81 @@ export class Team {
     // (sweeper/cover из PES Defence System) и персональный разбор в своей трети
     this.coverer = this.attacking ? null : this.pickCoverer(ball);
     this.updateMarks(ball);
+  }
+
+  // Оценка support spots (веса Params.ini Бакленда + свободная зона):
+  // безопасный пас 2.0, ударная позиция 1.0, оптимальная дистанция до 2.0
+  updateBestSpot(ball) {
+    const SP = CONFIG.ai.attack.spot;
+    const AI = CONFIG.ai;
+    const bp = ball.mesh.position;
+    const goalX = this.attackGoalX;
+    const opp = this.opponents;
+    let best = null;
+    let bestScore = -1;
+    for (const s of this._spots) {
+      let score = 1;
+      if (isPassSafe(bp.x, bp.z, s.x, s.z, 22, opp)) score += SP.passSafeScore;
+      if (Math.hypot(goalX - s.x, s.z) < AI.shootRange + 4) score += SP.canScoreScore;
+      const d = Math.hypot(s.x - bp.x, s.z - bp.z);
+      const t = Math.abs(SP.optimalDist - d);
+      if (t < SP.optimalDist) score += SP.distScore * (SP.optimalDist - t) / SP.optimalDist;
+      score += SP.spaceScore * freeSpace(s.x, s.z, opp);
+      if (score > bestScore) {
+        bestScore = score;
+        best = s;
+      }
+    }
+    this.bestSpot = best;
+  }
+
+  // Запуск забегания за спину (триггер из GameplayFootball): раннер — ближний
+  // к точке впереди владельца атакующий; рывок случается, если он не слишком
+  // далеко для паса и рядом с ним мало защитников. Цель — за линию обороны.
+  tryStartRun(ball) {
+    const R = CONFIG.ai.attack.runs;
+    const F = CONFIG.field;
+    const owner = this.match.toucher;
+    if (!owner || owner.team !== this) return;
+    const op = owner.group.position;
+    const fx = op.x + this.side * R.focusAhead;
+
+    let runner = null;
+    let bd = Infinity;
+    for (const p of this.players.slice(5)) {
+      if (p === owner || p === this.receiver || p === this.supporter ||
+          p === this.match.controlled) continue;
+      const d = Math.hypot(p.group.position.x - fx, p.group.position.z - op.z);
+      if (d < bd) {
+        bd = d;
+        runner = p;
+      }
+    }
+    if (!runner) return;
+
+    const rp = runner.group.position;
+    const dOwner = Math.hypot(rp.x - op.x, rp.z - op.z);
+    const distanceRating = Math.sqrt(Math.max(0, 1 - dOwner / R.maxDist));
+    // Плотность защитников за спиной раннера глушит рывок
+    const px = rp.x - this.side * 10;
+    const nearest = this.opponents
+      .map((o) => Math.hypot(o.group.position.x - px, o.group.position.z - rp.z))
+      .sort((a, b) => a - b)
+      .slice(0, 4);
+    let density = 1;
+    for (const d of nearest) {
+      density -= R.densityPenalty * Math.sqrt(Math.max(0, 1 - d / R.densityRadius));
+    }
+    if (distanceRating * density < R.trigger) return;
+
+    // Цель — за фактическую линию защиты соперника, ближе к центру (канал)
+    const oppTeam = this.match.otherTeam(this);
+    let tx = oppTeam.defLineX + this.side * R.behindLine;
+    const maxDepth = F.length / 2 - 8; // не в объятия вратаря
+    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
+    this.runner = runner;
+    this.runnerTarget = { x: tx, z: Math.max(-18, Math.min(18, rp.z * 0.6)) };
+    this.runnerTimer = R.durationSec;
   }
 
   // Высота линии защиты — считается ОТ МЯЧА (ресёрч 09: формула UvA/RoboCup):
@@ -187,9 +306,10 @@ export class Team {
     return best;
   }
 
-  // Упрощённые support spots Бакленда: точка впереди мяча ближе к центру
-  // (подача с фланга найдёт адресата, прострел — набегающего)
+  // Точка открывания: лучший спот сетки Бакленда; пока не посчитан —
+  // фолбэк «впереди мяча ближе к центру»
   supportSpot(ball) {
+    if (this.bestSpot) return this.bestSpot;
     const F = CONFIG.field;
     const AI = CONFIG.ai;
     const bp = ball.mesh.position;
@@ -207,12 +327,22 @@ export class Team {
     let bestD = Infinity;
     // Открываются атакующие роли (полузащита и нападение — индексы 5..10)
     for (const p of this.players.slice(5)) {
-      if (p === this.match.controlled || p === this.chaser || p === this.receiver) continue;
+      if (p === this.match.controlled || p === this.chaser ||
+          p === this.receiver || p === this.runner) continue;
       const d = Math.hypot(spot.x - p.group.position.x, spot.z - p.group.position.z);
       if (d < bestD) {
         bestD = d;
         best = p;
       }
+    }
+    // Гистерезис (слабость Бакленда — суппорт «мигает»): текущий держится,
+    // пока новый кандидат не ближе к споту на switchHysteresis метров
+    if (this.supporter && best && best !== this.supporter &&
+        this.supporter !== this.match.controlled && this.supporter !== this.chaser &&
+        this.supporter !== this.receiver && this.supporter !== this.runner) {
+      const sp = this.supporter.group.position;
+      const curD = Math.hypot(spot.x - sp.x, spot.z - sp.z);
+      if (curD < bestD + CONFIG.ai.attack.spot.switchHysteresis) return this.supporter;
     }
     return best;
   }
@@ -239,7 +369,13 @@ export class Team {
     let z;
     if (this.attacking) {
       x = this.side * (base.x + AI.attackShift) * (F.length / 2) + bp.x * AI.ballPullX;
-      z = base.z * (F.width / 2) * 0.92 + bp.z * AI.ballPullZ;
+      // Вингеры держат ширину у бровки и НЕ стягиваются к мячу — растяжка
+      // обороны и адресат для перевода на пустой фланг (ресёрч 10 + PES)
+      if (base.id === 'LM' || base.id === 'RM') {
+        z = base.z * (F.width / 2) * CONFIG.ai.attack.wingerWide;
+      } else {
+        z = base.z * (F.width / 2) * 0.92 + bp.z * AI.ballPullZ;
+      }
     } else {
       x = this.defLineX + this.side * base.defOff;
       z = base.z * (F.width / 2) * D.zCompact;
@@ -270,19 +406,30 @@ export class Team {
       const dist = Math.hypot(mp.x - fp.x, mp.z - fp.z);
       if (dist < AI.passMin || dist > AI.passMax) continue;
 
-      // Упреждение: пас на ход бегущему, а не в точку, где он был
+      // Упреждение: пас на ход бегущему, а не в точку, где он был.
+      // Раннеру за спину защиты мяч кладётся дальше в зону рывка (leadRun)
+      const isRunner = mate === this.runner;
+      const lead = isRunner ? CONFIG.ai.attack.runs.leadRun : 0.7;
       const speed = Math.min(AI.passSpeedMax,
         Math.max(AI.passSpeedMin, dist * AI.passSpeedK + AI.passSpeedMin * 0.5));
       const t = dist / speed;
-      const tx = mp.x + mate.vel.x * t * 0.7;
-      const tz = mp.z + mate.vel.z * t * 0.7;
+      const tx = mp.x + mate.vel.x * t * lead;
+      const tz = mp.z + mate.vel.z * t * lead;
 
       const clearance = passLaneClearance(fp.x, fp.z, tx, tz, opponents);
-      if (clearance < AI.passOpenRadius) continue;
+      // Пас в разрез терпит более узкую щель (riskFactor, Gliders2d)
+      const needClear = isRunner
+        ? AI.passOpenRadius * CONFIG.ai.attack.runs.riskFactor
+        : AI.passOpenRadius;
+      if (clearance < needClear) continue;
 
-      // Ценим продвижение к чужим воротам и чистоту коридора
+      // Ценим продвижение к воротам, чистоту коридора, свободную зону на
+      // приёме (перевод из толпы на пустой фланг) и бегущего в разрез
       const forward = this.side * (tx - fp.x);
-      const score = forward + clearance * 1.5 - dist * 0.08;
+      const score = forward + clearance * 1.5 +
+        freeSpace(tx, tz, opponents) * 2 +
+        (isRunner ? CONFIG.ai.attack.runs.passBonus : 0) -
+        dist * 0.08;
       if (score > bestScore) {
         bestScore = score;
         const d = Math.hypot(tx - fp.x, tz - fp.z) || 1;
@@ -303,5 +450,10 @@ export class Team {
     this.receiver = pass.mate;
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
+    if (this.runner === pass.mate) {
+      // Пас на рывок отдан — дальше раннер живёт как обычный приёмщик
+      this.runner = null;
+      this.runnerTarget = null;
+    }
   }
 }

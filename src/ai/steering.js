@@ -76,6 +76,45 @@ export function distToBall(player, ball) {
   return distTo(player, bp.x, bp.z);
 }
 
+// Свободная зона вокруг точки: 1 = пусто, 0 = толпа (ресёрч 10, формула
+// GameplayFootball AI_CalculateFreeSpace — 90% пользы pitch control за O(n)).
+// Соперники берутся с упреждением на их движение.
+export function freeSpace(px, pz, opponents, safeDist = CONFIG.ai.attack.freeSpaceSafeDist) {
+  let crowd = 0;
+  for (const o of opponents) {
+    if (o.isKeeper) continue;
+    const op = o.group.position;
+    const ox = op.x + o.vel.x * 0.2;
+    const oz = op.z + o.vel.z * 0.2;
+    crowd += 1 - Math.min(1, Math.hypot(ox - px, oz - pz) / safeDist);
+  }
+  return 1 - Math.min(1, crowd / 2.5);
+}
+
+// Пас безопасен? Схема Бакленда (isPassSafeFromOpponent, ресёрч 10):
+// соперник в координатах линии паса; за спиной пасующего — не мешает;
+// иначе успевает ли добежать до траектории раньше мяча (reach = v·tМяча).
+export function isPassSafe(fromX, fromZ, toX, toZ, power, opponents) {
+  const dx = toX - fromX;
+  const dz = toZ - fromZ;
+  const len = Math.hypot(dx, dz) || 1;
+  const nx = dx / len;
+  const nz = dz / len;
+  const P = CONFIG.player;
+  const oppSpeed = P.speed * CONFIG.ai.speedFactor * P.sprintFactor;
+  for (const o of opponents) {
+    const op = o.group.position;
+    const lx = (op.x - fromX) * nx + (op.z - fromZ) * nz; // вдоль линии паса
+    if (lx < 0 || lx > len + 3) continue; // за пасующим или дальше цели
+    const ly = Math.abs(-(op.x - fromX) * nz + (op.z - fromZ) * nx); // поперёк
+    // Время мяча до проекции соперника: линейно с поправкой на трение
+    const tBall = lx / Math.max(power * 0.8, 1);
+    const reach = oppSpeed * tBall + 1.2; // радиус досягаемости + корпус
+    if (ly < reach && lx > 2) return false;
+  }
+  return true;
+}
+
 // Насколько «чист» коридор паса: минимальное расстояние от соперников
 // до отрезка (fromX,fromZ)→(toX,toZ). Меньше порога = пас перехватят.
 export function passLaneClearance(fromX, fromZ, toX, toZ, opponents) {

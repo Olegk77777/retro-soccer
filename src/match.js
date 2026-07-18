@@ -99,6 +99,9 @@ export class Match {
       team.chaser = null;
       team.coverer = null;
       team.marks.clear();
+      team.runner = null;
+      team.runnerTarget = null;
+      team.bestSpot = null;
       team.defLineX = team.defLineTarget(this._centerBall); // линия сразу на месте
       for (const p of team.players) {
         const home = team.homeTarget(p, this._centerBall);

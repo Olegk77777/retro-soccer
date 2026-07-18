@@ -60,9 +60,11 @@ export class Input {
     this.move = { x: 0, z: 0 };
 
     const cap = CONFIG.player.chargeOverCap;
-    this.pass = new ChargeAction(CONFIG.player.chargeTime, cap);     // S / геймпад A
-    this.through = new ChargeAction(CONFIG.player.chargeTime, cap);  // W / геймпад Y
-    this.shot = new ChargeAction(CONFIG.shot.chargeTime, cap);       // D / геймпад X
+    // Пас и пас на ход — своя БЫСТРАЯ шкала (passChargeTime): тап = резкая
+    // передача, держать долго не нужно. Навес остаётся на медленной полоске
+    this.pass = new ChargeAction(CONFIG.player.passChargeTime, cap);    // S / геймпад A
+    this.through = new ChargeAction(CONFIG.player.passChargeTime, cap); // W / геймпад Y
+    this.shot = new ChargeAction(CONFIG.shot.chargeTime, cap);          // D / геймпад X
 
     // Навес (A / геймпад B) — своя стейт-машина, как в PES: полоска, затем
     // окно «замаха ноги», где доп. тапы меняют тип навеса (×1 / ×2 / ×3)
