@@ -163,28 +163,110 @@ function createPitchTexture() {
   return tex;
 }
 
-// За бровкой та же трава, но темнее и без полос: отбивка больше не выглядит однотонной зелёной стеной.
+// Общая карта пола за бровкой: тёмная трава + олимпийская дорожка в одном
+// непрозрачном canvas. Так нет второго draw call, прозрачной сортировки и
+// z-fighting; асинхронная загрузка травы каждый раз перерисовывает весь слой.
 function createApronTexture() {
+  const F = CONFIG.field;
+  const T = CONFIG.track;
+  const apronW = F.length + 150;
+  const apronD = F.width + 130;
+  const pxPerM = 4;
   const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 256;
+  c.width = apronW * pxPerM;
+  c.height = apronD * pxPerM;
   const ctx = c.getContext('2d');
-  ctx.fillStyle = '#315d25';
-  ctx.fillRect(0, 0, c.width, c.height);
-  for (let i = 0; i < 1500; i++) {
-    ctx.fillStyle = Math.random() > 0.5 ? 'rgba(180,190,145,0.035)' : 'rgba(0,0,0,0.045)';
-    ctx.fillRect(Math.random() * c.width, Math.random() * c.height, 2, 2);
-  }
+  const m = (v) => v * pxPerM;
+  const cx = c.width / 2;
+  const cz = c.height / 2;
+  const laneOuter = T.innerRadius + T.lanes * T.laneWidth;
+  const fullOuter = laneOuter + T.shoulder;
 
-  const tex = configureColorTexture(new THREE.CanvasTexture(c), { wrap: true, anisotropy: 2 });
-  tex.repeat.set(10, 8);
-  loadTextureImage(STADIUM_TEXTURES.grass)
-    .then((img) => {
-      ctx.drawImage(img, 0, 0, c.width, c.height);
+  // Замкнутый «стадион»: две прямые и две полуокружности.
+  const ovalSubpath = (radius) => {
+    const h = m(T.straightHalf);
+    const r = m(radius);
+    ctx.moveTo(cx - h, cz - r);
+    ctx.lineTo(cx + h, cz - r);
+    ctx.arc(cx + h, cz, r, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(cx - h, cz + r);
+    ctx.arc(cx - h, cz, r, Math.PI / 2, Math.PI * 1.5);
+    ctx.closePath();
+  };
+
+  const fillBand = (outer, inner, color) => {
+    ctx.beginPath();
+    ovalSubpath(outer);
+    ovalSubpath(inner);
+    ctx.fillStyle = color;
+    ctx.fill('evenodd');
+  };
+
+  const paint = (grass = null) => {
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (grass) {
+      drawMirroredTiles(ctx, grass, c.width, c.height, m(18));
       ctx.fillStyle = 'rgba(10,24,10,0.43)';
       ctx.fillRect(0, 0, c.width, c.height);
-      markTextureDirty(tex);
-    })
+    } else {
+      ctx.fillStyle = '#315d25';
+      ctx.fillRect(0, 0, c.width, c.height);
+      // Детерминированные тёмные/светлые точки — фолбэк тоже не однотонный.
+      for (let i = 0; i < 4200; i++) {
+        const x = (i * 73) % c.width;
+        const y = (i * 151 + (i >> 4) * 19) % c.height;
+        ctx.fillStyle = i % 2 ? 'rgba(180,190,145,0.035)' : 'rgba(0,0,0,0.045)';
+        ctx.fillRect(x, y, 2, 2);
+      }
+    }
+
+    // Сначала тёмный внешний ран-аут до основания трибун, затем восемь полос.
+    fillBand(fullOuter, laneOuter, T.shoulderColor);
+    fillBand(laneOuter, T.innerRadius, T.color);
+
+    // Широкие слабые пятна износа: резина матовая, но не шумит в 480p.
+    ctx.save();
+    ctx.beginPath();
+    ovalSubpath(laneOuter);
+    ovalSubpath(T.innerRadius);
+    ctx.clip('evenodd');
+    for (let i = 0; i < 90; i++) {
+      const x = (i * 113 + 47) % c.width;
+      const y = (i * 197 + 83) % c.height;
+      ctx.fillStyle = i % 3 ? 'rgba(255,210,205,0.025)' : 'rgba(40,0,10,0.035)';
+      ctx.beginPath();
+      ctx.ellipse(x, y, 5 + (i % 11), 2 + (i % 4), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Кремовые разделители: выцветшая краска конца 90-х, не ярче поля/рекламы.
+    ctx.strokeStyle = T.lineColor;
+    ctx.globalAlpha = 0.88;
+    ctx.lineWidth = Math.max(1, m(T.lineWidth));
+    for (let lane = 0; lane <= T.lanes; lane++) {
+      ctx.beginPath();
+      ovalSubpath(T.innerRadius + lane * T.laneWidth);
+      ctx.stroke();
+    }
+
+    // Финишная черта на дальней прямой делает покрытие именно дорожкой.
+    const finishX = cx + m(10);
+    ctx.globalAlpha = 0.82;
+    ctx.lineWidth = Math.max(1.2, m(T.lineWidth) * 1.35);
+    ctx.beginPath();
+    ctx.moveTo(finishX, cz - m(T.innerRadius));
+    ctx.lineTo(finishX, cz - m(laneOuter));
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  };
+
+  paint();
+
+  const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 4 });
+  tex.magFilter = THREE.LinearFilter; // дуги гладкие, а не ступенчатые
+  loadTextureImage(STADIUM_TEXTURES.grass)
+    .then((img) => { paint(img); markTextureDirty(tex); })
     .catch((e) => console.warn(e.message));
   return tex;
 }
@@ -226,6 +308,10 @@ function buildStands(scene) {
   // случайно погасить толпу и стоит дешевле на планшете.
   const standMat = new THREE.MeshBasicMaterial({ map: crowd });
   const sideMat = new THREE.MeshLambertMaterial({ color: 0x232838 });
+  // Наклонная трибуна начинается выше земли. В реальном олимпийском стадионе
+  // проём закрывает подпорная стенка; здесь она продолжает бордовый ран-аут,
+  // поэтому между дорожкой и зрителями больше не просвечивает ночное небо.
+  const baseMat = new THREE.MeshBasicMaterial({ color: CONFIG.track.wallColor });
 
   const standH = 17;
   const standD = 18;
@@ -237,12 +323,22 @@ function buildStands(scene) {
     return new THREE.Mesh(geo, [sideMat, sideMat, sideMat, sideMat, standMat, standMat]);
   };
 
-  const long = F.length + 46;
+  // Овал шире футбольной коробки у ворот. Чаша подстраивается под его внешний
+  // край, иначе торцевые сектора срезали бы белые линии на рабочих кадрах.
+  const a = Math.abs(tilt);
+  const baseH = standH / 2 + 1 - (standH / 2) * Math.cos(a) + (standD / 2) * Math.sin(a);
+  const faceInset = (standH / 2) * Math.sin(a) + (standD / 2) * Math.cos(a);
+  const trackOuter = CONFIG.track.innerRadius
+    + CONFIG.track.lanes * CONFIG.track.laneWidth
+    + CONFIG.track.shoulder;
+  const trackEnd = CONFIG.track.straightHalf + trackOuter;
+  const bowlOverlap = 2.5;
+  const long = (trackEnd + bowlOverlap) * 2;
   const short = F.width + 46;
   // Трибуны вынесены наружу так, чтобы ТВ-камера (z≈58) была ВНУТРИ ближней
   // трибуны, как настоящая телекамера, а не за ней (иначе видно её тёмную изнанку)
   const dz = F.width / 2 + F.apron + 20;
-  const dx = F.length / 2 + F.apron + 20;
+  const dx = trackEnd + faceInset;
 
   const north = make(long);
   north.position.set(0, standH / 2 + 1, -dz);
@@ -265,6 +361,25 @@ function buildStands(scene) {
   east.rotation.x = tilt;
   east.position.set(dx, standH / 2 + 1, 0);
   scene.add(east);
+
+  // Нижняя ближняя точка наклонного бокса — точная высота/позиция его фасада.
+  const wallDepth = 0.7;
+  const makeBase = (len) => new THREE.Mesh(
+    new THREE.BoxGeometry(len, baseH, wallDepth),
+    baseMat,
+  );
+
+  for (const z of [-dz + faceInset, dz - faceInset]) {
+    const wall = makeBase(long);
+    wall.position.set(0, baseH / 2, z);
+    scene.add(wall);
+  }
+  for (const x of [-dx + faceInset, dx - faceInset]) {
+    const wall = makeBase(short);
+    wall.rotation.y = Math.PI / 2;
+    wall.position.set(x, baseH / 2, 0);
+    scene.add(wall);
+  }
 }
 
 function buildFloodlights(scene) {
