@@ -123,8 +123,16 @@ export class Player {
     this.dribbleDir = null;  // курс ведения (обновляется в момент касания)
     this.sprintBoost = 0;    // инерция спринта: 1 = полный темп, спадает плавно
     this.jumpT = 0;          // остаток прыжка под удар головой (визуальная дуга)
+    this.diveT = 0;          // бросок корпусом (ласточка): время полёта
+    this.diveDir = null;     // направление броска
+    this.downT = 0;          // лежим после броска + подъём (getup)
+    this._gotUp = false;     // клип подъёма уже запущен
+    this.challengeCd = 0;    // откат между навалами корпусом
     this.kickCooldown = 0;
     this.bobT = 0;
+    // Порядок эйлера YXZ: сначала разворот (Y), потом наклон ласточки (X)
+    // — наклон идёт вперёд по взгляду, а не вокруг мировой оси
+    this.group.rotation.order = 'YXZ';
 
     // --- Анимации (заполнится после загрузки glb) ---
     this.model = null;
@@ -237,7 +245,13 @@ export class Player {
     this.dribbleTouchCd = 0;
     this.sprintBoost = 0;
     this.jumpT = 0;
+    this.diveT = 0;
+    this.diveDir = null;
+    this.downT = 0;
+    this._gotUp = false;
+    this.challengeCd = 0;
     this.group.position.y = 0;
+    this.group.rotation.x = 0;
     if (this.ai) {
       this.ai.dribDir = null; // мозг AI начинает с чистого листа
       this.ai.holdT = 0;      // кипер не «держит» несуществующий мяч
@@ -267,6 +281,27 @@ export class Player {
       this.group.position.y = Math.sin(Math.PI * k) * A.jumpHeight;
       if (this.jumpT <= 0) this.group.position.y = 0;
     }
+    // Бросок корпусом (ласточка) и подъём: наклон фигуры вперёд по взгляду
+    // (порядок эйлера YXZ), после броска — лежим и встаём клипом getup
+    const DV = P.aerial.dive;
+    let tilt = 0;
+    if (this.diveT > 0) {
+      this.diveT -= dt;
+      tilt = (1 - Math.max(0, this.diveT) / DV.time) * DV.tiltMax;
+      if (this.diveT <= 0) {
+        this.downT = DV.recover;
+        this._gotUp = false;
+      }
+    } else if (this.downT > 0) {
+      this.downT -= dt;
+      const k = Math.max(0, this.downT) / DV.recover;
+      if (k < 0.55 && !this._gotUp) {
+        this._gotUp = true;
+        this.playOneShot('getup', 1.4, 0);
+      }
+      tilt = Math.min(1, k / 0.55) * DV.tiltMax; // поднимаемся вместе с getup
+    }
+    this.group.rotation.x = tilt;
     if (this.mixer) {
       // Пока играет одноразовый (удар, ловля) — не дёргаем
       if (!this.oneShot) {
@@ -308,6 +343,11 @@ export class Player {
     const pos = this.group.position;
 
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
+    if (this.challengeCd > 0) this.challengeCd -= dt;
+
+    // Лежим после броска — не двигаемся; в броске — несёт по курсу ласточки
+    if (this.downT > 0) move = { x: 0, z: 0 };
+    else if (this.diveT > 0 && this.diveDir) move = this.diveDir;
 
     const sprinting = !!opts.sprint;
     const boostK = sprinting ? Math.min(1, dt * 12) : Math.min(1, dt / P.sprintInertia);
@@ -318,6 +358,7 @@ export class Player {
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     // Кап скорости от мозга: сдерживающий защитник зеркалит темп владельца
     if (opts.speedCap != null) maxSpeed = Math.min(maxSpeed, opts.speedCap);
+    if (this.diveT > 0) maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
 
     let mvx = move.x;
     let mvz = move.z;
@@ -391,6 +432,8 @@ export class Player {
     const pos = this.group.position;
 
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
+    if (this.challengeCd > 0) this.challengeCd -= dt;
+    const downed = this.downT > 0; // лежим после броска — ввод не работает
 
     // Замах удара, два режима (решение Олега, 17.07.2026):
     // - начал замах НА БЕГУ (быстрее runKeepSpeed) — бег продолжается, будет
@@ -413,8 +456,15 @@ export class Player {
     let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     const k = Math.min(1, dt * P.accel);
-    let mvx = brake ? 0 : input.move.x;
-    let mvz = brake ? 0 : input.move.z;
+    let mvx = (brake || downed) ? 0 : input.move.x;
+    let mvz = (brake || downed) ? 0 : input.move.z;
+
+    // Бросок корпусом: несёт по курсу ласточки, руль отключён
+    if (this.diveT > 0 && this.diveDir) {
+      mvx = this.diveDir.x;
+      mvz = this.diveDir.z;
+      maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
+    }
 
     // Ожидание исполнения (пас/удар нажат, мяч ещё не в зоне ноги): игрок
     // ДОБЕГАЕТ до мяча сам, а стик в это время рулит НАПРАВЛЕНИЕМ паса,
@@ -422,7 +472,7 @@ export class Player {
     // мяча» и пас сгорал (фидбек Олега, 18.07.2026). Так это делает PES:
     // код доводит игрока до касания, направление берётся из намерения.
     const bpEarly = ball.mesh.position;
-    if (this.pendingStrike && !brake) {
+    if (this.pendingStrike && !brake && !downed && this.diveT <= 0) {
       // Мяч летит верхом, а игрок ждёт удар — бежим не за тенью мяча,
       // а к ТОЧКЕ ПРИЗЕМЛЕНИЯ (замыкание навеса: врывание на прилёт)
       let tx = bpEarly.x;
@@ -571,11 +621,15 @@ export class Player {
     // --- Замахи: событие этого кадра или недавнее из буфера «удара с хода».
     // Нажал чуть раньше, чем добежал до мяча — удар исполнится в момент,
     // когда мяч войдёт в зону ноги (kickRadius). Так бьют с хода и с паса на ход.
-    const pass = input.pass.consume();
+    let pass = input.pass.consume();
     const through = input.through.consume();
     const cross = input.consumeCross();
     const shot = input.shot.consume();
     const swipe = input.consumeSwipe();
+
+    // Борьба корпусом (ресёрч 12): кнопка ПАСА, когда мяч не у нас, —
+    // навал плечом на владельца / оттеснение соперника под верховым мячом
+    if (pass !== null && !downed && this.tryChallenge(ball)) pass = null;
 
     let strike = null;
     if (pass !== null) strike = { type: 'pass', v: pass };
@@ -583,6 +637,8 @@ export class Player {
     else if (cross !== null) strike = { type: 'cross', v: cross };
     else if (shot !== null) strike = { type: 'shot', v: shot };
     else if (swipe !== null) strike = { type: 'swipe', v: swipe };
+
+    if (downed) strike = null; // лежим — замахи не копим
 
     if (strike) {
       // Удар по летящему мячу живёт в буфере дольше обычного: жми D,
@@ -610,7 +666,8 @@ export class Player {
       }
     }
 
-    if (canKick && this.pendingStrike) {
+    const diving = this.diveT > 0;
+    if (canKick && !diving && !downed && this.pendingStrike) {
       const s = this.pendingStrike;
       this.pendingStrike = null;
       const lerp = (a, b, t) => a + (b - a) * t;
@@ -646,21 +703,45 @@ export class Player {
 
     // Замыкание верхового мяча (ресёрч 11): мяч выше зоны ноги, но в
     // досягаемости — удар исполняется В ОДНО КАСАНИЕ, с лёта или головой.
-    // Мощь и точность решает врывание (скорость бега), см. shoot(aerial)
+    // Мощь и точность решает врывание (скорость бега), см. shoot(aerial).
+    // В броске (ласточка) зона контакта другая: вытянутый корпус достаёт
+    // дальше и ниже, но выше dive.maxY в падении не дотянуться
     const A = P.aerial;
-    const canAerial = this.kickCooldown <= 0 &&
-      dist < A.reach &&
-      bp.y >= P.kickMaxBallY && bp.y <= A.maxY;
-    if (canAerial && this.pendingStrike) {
+    const DV = A.dive;
+    const canAerial = this.kickCooldown <= 0 && !downed && (
+      diving
+        ? (dist < A.reach + DV.stretch && bp.y >= DV.minY && bp.y <= DV.maxY)
+        : (dist < A.reach && bp.y >= P.kickMaxBallY && bp.y <= A.maxY)
+    );
+    const wantShot = this.pendingStrike &&
+      (this.pendingStrike.type === 'shot' ||
+        (this.pendingStrike.type === 'swipe' && this.pendingStrike.v.kind === 'shot'));
+    if (canAerial && wantShot) {
       const s = this.pendingStrike;
+      this.pendingStrike = null;
       if (s.type === 'shot') {
-        this.pendingStrike = null;
-        this.shoot(s.v, input, ball, null, { aerial: true });
-      } else if (s.type === 'swipe' && s.v.kind === 'shot') {
-        this.pendingStrike = null;
+        this.shoot(s.v, input, ball, null, { aerial: true, dive: diving });
+      } else {
         const gdir = new THREE.Vector3(s.v.dir.x, 0, s.v.dir.z).normalize();
         this.shoot(Math.min(s.v.power, 1.3), input, ball,
-          { dir: gdir, curl: -s.v.curl * CONFIG.shot.swipeCurl }, { aerial: true });
+          { dir: gdir, curl: -s.v.curl * CONFIG.shot.swipeCurl },
+          { aerial: true, dive: diving });
+      }
+    } else if (wantShot && !diving && !downed && this.kickCooldown <= 0 &&
+        dist >= A.reach && dist < DV.reach &&
+        bp.y >= DV.minY && bp.y <= DV.maxY) {
+      // Удар в падении (просьба Олега): на ноги не успеваю, а мяч ПРОЛЕТАЕТ
+      // МИМО — бросок корпусом. Если мяч и так летит в игрока, броска нет:
+      // дождёмся обычного замыкания (проверка ближайшей точки траектории)
+      const sp2 = ball.vel.x * ball.vel.x + ball.vel.z * ball.vel.z;
+      if (sp2 > 9) {
+        const relX = bp.x - pos.x;
+        const relZ = bp.z - pos.z;
+        const tCa = Math.max(0, -(relX * ball.vel.x + relZ * ball.vel.z) / sp2);
+        const closest = Math.hypot(relX + ball.vel.x * tCa, relZ + ball.vel.z * tCa);
+        if (closest > A.reach * 0.75) {
+          this.startDive(relX / dist, relZ / dist, bp.y);
+        }
       }
     }
 
@@ -977,14 +1058,25 @@ export class Player {
       const mul = spd < A.standSpeed ? A.standNoise : A.runNoise;
       nz *= mul;
       ny *= mul;
-      if (styleName === 'header') this.jumpT = A.jumpTime;
+      if (opts.dive) {
+        // В падении: бьёшь без опоры — слабее и шумнее; прыжка нет (ласточка)
+        power *= A.dive.powerFactor;
+        nz *= A.dive.noise;
+        ny *= A.dive.noise;
+      } else if (styleName === 'header') {
+        this.jumpT = A.jumpTime;
+      }
     }
     const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
     const dist = toGoal.length();
     const angle = f.angleTo(toGoal.normalize()) * (180 / Math.PI);
 
-    if (angle < S.assistAngle && dist < S.assistDist && dist > 3 && Math.abs(f.x) > 0.1) {
+    // Прицельная баллистика — только на ЧУЖИЕ ворота: лицом к своим удар
+    // остаётся свободным выносом, а не «ассистом в свой угол» (автогол)
+    const aimOk = !this.team || goalX === this.team.attackGoalX;
+
+    if (aimOk && angle < S.assistAngle && dist < S.assistDist && dist > 3 && Math.abs(f.x) > 0.1) {
       // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
       // Стрелки сдвигают её; за штангу — можно, промах реален.
       const baseZ = bp.z + (f.z / f.x) * (goalX - bp.x);
@@ -1038,6 +1130,92 @@ export class Player {
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.playOneShot(st.anim || 'kick', st.animTs, st.animAt); // клип и темп — от типа удара
+  }
+
+  // Бросок корпусом к мячу (удар в падении, просьба Олега 18.07.2026):
+  // рывок ~2 м + вытянутый корпус (ласточка). Контакт случится — или нет —
+  // в обычном цикле замыкания; после броска игрок лежит dive.recover сек.
+  // Реалистичная зона: reach + бросок, никаких «полётов на 10 метров»
+  startDive(dx, dz, contactY = 1.0) {
+    const DV = CONFIG.player.aerial.dive;
+    this.diveT = DV.time;
+    this.diveDir = { x: dx, z: dz };
+    this.vel.x = dx * DV.lunge;
+    this.vel.z = dz * DV.lunge;
+    this.rot = Math.atan2(dx, dz); // корпус — в сторону броска
+    this.playOneShot(contactY >= CONFIG.player.aerial.headerY ? 'header' : 'kick', 1.0, 0.05);
+  }
+
+  // Навал корпусом (ресёрч 12): кнопка паса, когда мяч не у нашей команды.
+  // Сбоку/спереди у владельца — оттеснение и сбитое касание (мяч отскакивает,
+  // окно отбора); под верховым мячом — оттеснение соперника от точки падения.
+  // Толчок В СПИНУ — нечестный: сам спотыкаешься. true = навал случился
+  // (кнопка потрачена), false = соперника рядом нет — обычный пас/подбор
+  tryChallenge(ball) {
+    const CH = CONFIG.player.challenge;
+    const P = CONFIG.player;
+    const team = this.team;
+    const m = team && team.match;
+    if (!m || this.challengeCd > 0 || this.isToucher) return false;
+    const owner = m.toucher;
+    if (owner && owner.team === team) return false; // мяч у своих — это пас
+    const pos = this.group.position;
+
+    // Цель навала: владелец в радиусе; мяч ничей и верхом — ближний соперник
+    let target = null;
+    if (owner) {
+      const op = owner.group.position;
+      if (Math.hypot(op.x - pos.x, op.z - pos.z) <= CH.range) target = owner;
+    } else if (ball.mesh.position.y > P.kickMaxBallY) {
+      let bd = Infinity;
+      for (const o of m.otherTeam(team).players) {
+        if (o.isKeeper) continue;
+        const op = o.group.position;
+        const d = Math.hypot(op.x - pos.x, op.z - pos.z);
+        if (d < bd) {
+          bd = d;
+          target = o;
+        }
+      }
+      if (bd > CH.range) target = null;
+    }
+    if (!target) return false;
+
+    const tp = target.group.position;
+    const dx = tp.x - pos.x;
+    const dz = tp.z - pos.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    const nx = dx / dl;
+    const nz = dz / dl;
+    this.challengeCd = CH.cooldown;
+
+    // Толчок по направлению взгляда цели = в спину: сам спотыкаешься
+    if (nx * target.facing.x + nz * target.facing.z > CH.backCos) {
+      this.vel.x *= 0.25;
+      this.vel.z *= 0.25;
+      this.challengeCd = CH.cooldown + CH.stumble;
+      this.playOneShot('trip', 1.5, 0.1);
+      return true;
+    }
+
+    // Честный навал: оттесняем цель, вкладываясь корпусом
+    target.vel.x += nx * CH.pushTarget;
+    target.vel.z += nz * CH.pushTarget;
+    this.vel.x += nx * CH.pushSelf;
+    this.vel.z += nz * CH.pushSelf;
+    if (target.isToucher) {
+      const bp = ball.mesh.position;
+      if (bp.y < P.kickMaxBallY &&
+          Math.hypot(bp.x - tp.x, bp.z - tp.z) < P.controlKeepRadius) {
+        // Сбитое касание: мяч отскакивает — ничей, окно отбора
+        ball.vel.x = nx * CH.looseBall + target.vel.x * 0.4 + (Math.random() - 0.5) * 2;
+        ball.vel.z = nz * CH.looseBall + target.vel.z * 0.4 + (Math.random() - 0.5) * 2;
+        target.kickCooldown = Math.max(target.kickCooldown, CH.targetLock);
+        target.controlling = false;
+        target.playOneShot('trip', 1.4, 0.12); // сбитый спотыкается
+      }
+    }
+    return true;
   }
 
   // Верховой мяч у AI: сыграть в одно касание — вынос, скидка или кивок

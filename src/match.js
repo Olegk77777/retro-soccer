@@ -67,6 +67,7 @@ export class Match {
     this.hud.home.textContent = teamsData[0].short;
     this.hud.away.textContent = teamsData[1].short;
     this._hudCache = '';
+    this._phase = ''; // фаза для контекстных тач-кнопок (атака/оборона)
 
     // Пас-ассист для игроков человека (AI пасует своим умом в team.js)
     for (const p of this.humanTeam.players) {
@@ -371,6 +372,14 @@ export class Match {
   }
 
   updateHUD() {
+    // Контекстные тач-кнопки (как в мобильных футсимах): владеем мячом —
+    // ПАС/УДАР, обороняемся — КОРПУС/ВЫНОС. CSS переключает по data-phase
+    const phase = this.possession === this.humanTeam ? 'attack' : 'defend';
+    if (phase !== this._phase) {
+      this._phase = phase;
+      document.body.dataset.phase = phase;
+    }
+
     const min = Math.min(90, Math.floor(this.clock / 60));
     const key = `${this.score[0]}:${this.score[1]}|${min}`;
     if (key === this._hudCache) return;

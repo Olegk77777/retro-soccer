@@ -32,17 +32,45 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // Лежим после броска — только встаём, никаких решений
+  if (p.downT > 0) {
+    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    return;
+  }
+
   // Второй этаж (ресёрч 11): верховой мяч в досягаемости — играем В ОДНО
   // КАСАНИЕ. Своя треть — вынос; у чужих ворот — замыкание в створ (сила
   // от разбега!); середина — скидка вперёд. Летящий вверх мяч не трогаем.
+  // В броске (ласточка) зона контакта — вытянутый корпус (dive.stretch)
   const AP = CONFIG.player.aerial;
-  if (p.kickCooldown <= 0 &&
-      bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY &&
-      myBallDist < AP.reach && ball.vel.y < 2 &&
+  const diving = p.diveT > 0;
+  const aerialOk = diving
+    ? (myBallDist < AP.reach + AP.dive.stretch &&
+        bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
+    : (myBallDist < AP.reach &&
+        bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY);
+  if (p.kickCooldown <= 0 && aerialOk && ball.vel.y < 2 &&
       Math.hypot(ball.vel.x, ball.vel.z) > 4) {
-    aerialPlay(p, ball);
+    aerialPlay(p, ball, diving);
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
     return;
+  }
+  // Бросок в падении (как у человека): назначенный замыкающий у чужих
+  // ворот не успевает на ноги, мяч пролетает мимо — ласточка
+  if (!diving && p.kickCooldown <= 0 && team.receiver === p &&
+      bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY &&
+      myBallDist >= AP.reach && myBallDist < AP.dive.reach &&
+      Math.hypot(team.attackGoalX - pos.x, pos.z) < AI.aerial.headerRange + 4) {
+    const sp2 = ball.vel.x * ball.vel.x + ball.vel.z * ball.vel.z;
+    if (sp2 > 9) {
+      const relX = bp.x - pos.x;
+      const relZ = bp.z - pos.z;
+      const tCa = Math.max(0, -(relX * ball.vel.x + relZ * ball.vel.z) / sp2);
+      const closest = Math.hypot(relX + ball.vel.x * tCa, relZ + ball.vel.z * tCa);
+      if (closest > AP.reach * 0.75) {
+        p.startDive(relX / myBallDist, relZ / myBallDist, bp.y);
+      }
+    }
   }
 
   if (p.isToucher) {
@@ -344,19 +372,22 @@ function aiCross(p, ball, oppD) {
 // ворот — удар головой/с лёта в створ, где сила растёт от разбега
 // (врывание бьёт сильнее, чем статичный прыжок — принцип PES); середина
 // поля — скидка вперёд (борьба за подбор после выносов).
-function aerialPlay(p, ball) {
+function aerialPlay(p, ball, diving = false) {
   const AIR = CONFIG.ai.aerial;
   const team = p.team;
   const pos = p.group.position;
   const bp = ball.mesh.position;
   const goalX = team.attackGoalX;
   const ownGoalX = team.ownGoalX;
+  // В падении бьёшь без опоры: слабее и шумнее (та же цена, что у человека)
+  const DF = diving ? CONFIG.player.aerial.dive.powerFactor : 1;
+  const DN = diving ? CONFIG.player.aerial.dive.noise : 1;
 
   const ownDepth = Math.hypot(pos.x - ownGoalX, pos.z);
   if (ownDepth < AIR.clearThird) {
     // Вынос: от своих ворот в сторону ближнего фланга
     const zs = pos.z !== 0 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
-    p.aiAerial(ball, { x: team.side, z: zs * 0.9 }, AIR.clearPower, AIR.clearLift);
+    p.aiAerial(ball, { x: team.side, z: zs * 0.9 }, AIR.clearPower * DF, AIR.clearLift);
     return;
   }
 
@@ -366,14 +397,14 @@ function aerialPlay(p, ball) {
     // «голы не дешевеют»), сила — от скорости разбега в момент контакта
     const G = CONFIG.goal;
     const spd = Math.hypot(p.vel.x, p.vel.z);
-    const noise = AIR.headerNoise * (0.6 + distGoal / AIR.headerRange);
+    const noise = AIR.headerNoise * (0.6 + distGoal / AIR.headerRange) * DN;
     const tz = (Math.random() * 2 - 1) * (G.width / 2 - 0.5) +
       (Math.random() * 2 - 1) * noise;
     const dx = goalX - pos.x;
     const dz = tz - pos.z;
     const d = Math.hypot(dx, dz) || 1;
     const power = Math.min(AIR.headerPowerMax,
-      AIR.headerPower + spd * AIR.headerPowerRun);
+      AIR.headerPower + spd * AIR.headerPowerRun) * DF;
     // Вертикаль: прийти к воротам на высоте headerTargetY (кивок вниз можно)
     const t = d / (power * 0.85);
     let vy = (AIR.headerTargetY - bp.y) / t - 0.5 * CONFIG.ball.gravity * t;
@@ -384,7 +415,7 @@ function aerialPlay(p, ball) {
 
   // Середина поля: скидка головой вперёд, к центру — партнёры подберут
   p.aiAerial(ball, { x: team.side, z: pos.z > 0 ? -0.3 : 0.3 },
-    AIR.flickPower, AIR.flickLift);
+    AIR.flickPower * DF, AIR.flickLift);
 }
 
 // Удар AI: случайная точка створа + шум промаха, растущий с дистанцией.

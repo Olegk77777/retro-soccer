@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { predictLanding } from './ai/steering.js';
 
 function createBallTexture() {
   const c = document.createElement('canvas');
@@ -45,9 +46,26 @@ export class Ball {
     this.afterTouch = 0; // остаток окна докрутки после удара
     this.spinAxis = new THREE.Vector3(1, 0, 0);
     this.goals = goals;
+
+    // Маркер точки падения: маленькое ненавязчивое кольцо на газоне, пока
+    // мяч летит верхом (ТВ-графика, помогает врываться под навес)
+    const LM = CONFIG.ball.landingMark;
+    this.mark = new THREE.Mesh(
+      new THREE.RingGeometry(LM.innerR, LM.outerR, 20),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: LM.opacity,
+        depthWrite: false,
+      }),
+    );
+    this.mark.rotation.x = -Math.PI / 2;
+    this.mark.position.y = 0.035;
+    this.mark.visible = false;
+    this._markT = 0; // фаза «дыхания» кольца
+
     this.reset();
     scene.add(this.mesh);
     scene.add(this.shadow);
+    scene.add(this.mark);
   }
 
   reset() {
@@ -57,6 +75,31 @@ export class Ball {
     this.afterTouch = 0;
     this.goalScored = false;
     this.netContact = null;
+    if (this.mark) this.mark.visible = false;
+  }
+
+  // Маркер точки падения: виден, только пока мяч достаточно высоко и лететь
+  // ему ещё заметное время; за пределами поля (аут/за лицевой) — гаснет
+  _updateMark(dt) {
+    const LM = CONFIG.ball.landingMark;
+    const F = CONFIG.field;
+    const p = this.mesh.position;
+    let show = false;
+    if (p.y > LM.minY) {
+      const land = predictLanding(this, CONFIG.ball.radius);
+      if (land && land.t > LM.minFlight &&
+          Math.abs(land.x) < F.length / 2 + 1 &&
+          Math.abs(land.z) < F.width / 2 + 1) {
+        show = true;
+        this.mark.position.x = land.x;
+        this.mark.position.z = land.z;
+        this._markT += dt;
+        const s = 1 + Math.sin(this._markT * 6) * LM.pulse;
+        this.mark.scale.set(s, s, 1);
+      }
+    }
+    this.mark.visible = show;
+    if (!show) this._markT = 0;
   }
 
   // Удар: направление (единичный вектор), сила (м/с), подъём и подкрутка.
@@ -138,6 +181,8 @@ export class Ball {
     const sc = Math.max(0.5, 1 - hgt / 12);
     this.shadow.scale.set(sc, sc, 1);
     this.shadow.material.opacity = 0.35 * Math.max(0.35, 1 - hgt / 15);
+
+    this._updateMark(dt);
 
     // Вращение мяча при движении — дёшево и очень «оживляет»
     const speed = Math.hypot(this.vel.x, this.vel.z);
