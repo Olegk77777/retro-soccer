@@ -103,6 +103,7 @@ export class Match {
       team.runnerTarget = null;
       team.bestSpot = null;
       team.boxRuns.clear();
+      team.crossAir = 0;
       team.defLineX = team.defLineTarget(this._centerBall); // линия сразу на месте
       for (const p of team.players) {
         const home = team.homeTarget(p, this._centerBall);

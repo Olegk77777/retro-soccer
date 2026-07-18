@@ -5,7 +5,7 @@
 // Решения — здесь, само движение исполняет player.aiUpdate («ноги»).
 
 import { CONFIG } from '../config.js';
-import { arrive, seek, pursuitBall, separation, distToBall, freeSpace } from './steering.js';
+import { arrive, seek, pursuitBall, separation, distToBall, freeSpace, predictLanding } from './steering.js';
 
 export function updateFieldPlayer(p, dt, ball) {
   const AI = CONFIG.ai;
@@ -32,17 +32,33 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // Второй этаж (ресёрч 11): верховой мяч в досягаемости — играем В ОДНО
+  // КАСАНИЕ. Своя треть — вынос; у чужих ворот — замыкание в створ (сила
+  // от разбега!); середина — скидка вперёд. Летящий вверх мяч не трогаем.
+  const AP = CONFIG.player.aerial;
+  if (p.kickCooldown <= 0 &&
+      bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY &&
+      myBallDist < AP.reach && ball.vel.y < 2 &&
+      Math.hypot(ball.vel.x, ball.vel.z) > 4) {
+    aerialPlay(p, ball);
+    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    return;
+  }
+
   if (p.isToucher) {
     move = withBall(p, ball);
   } else {
     p.ai.dribDir = null;
     if (team.receiver === p && team.receiveTarget) {
-      // Приём паса: бегу к точке адреса, у самой точки — навстречу мячу
+      // Приём паса: бегу к точке адреса, у самой точки — навстречу мячу.
+      // Верховой мяч (навес) — строго к точке прилёта: врывание на прилёт,
+      // погоня за тенью мяча увела бы с траектории
       const t = team.receiveTarget;
-      move = myBallDist < 6
+      move = myBallDist < 6 && bp.y < 1.2
         ? pursuitBall(pos.x, pos.z, ball, CONFIG.player.speed)
         : seek(pos.x, pos.z, t.x, t.z);
-      sprint = myBallDist > AI.sprintDist;
+      sprint = myBallDist > AI.sprintDist ||
+        (bp.y > 1.2 && Math.hypot(t.x - pos.x, t.z - pos.z) > 2);
     } else if (team.chaser === p && !mateHasBall) {
       // Первый защитник (pressure): свободный мяч догоняем, владеющего
       // соперника прессингуем по-PES — агрессивно в чужой половине,
@@ -134,8 +150,21 @@ function pressBall(p, ball, match) {
   const owner = match.toucher;
   const myBallDist = distToBall(p, ball);
 
-  // Мяч свободен или у своего (страховка) — обычная погоня
+  // Мяч свободен или у своего (страховка) — обычная погоня.
+  // Летящий верхом мяч (навес/вынос) — бежим к точке ПРИЗЕМЛЕНИЯ:
+  // защитник встречает подачу, а не бегает за тенью мяча
   if (!owner || owner.team === team) {
+    if (bp.y > 1.2) {
+      const land = predictLanding(ball, 0.4);
+      if (land) {
+        return {
+          move: seek(pos.x, pos.z, land.x, land.z),
+          sprint: Math.hypot(land.x - pos.x, land.z - pos.z) > 3,
+          face: null,
+          speedCap: null,
+        };
+      }
+    }
     return {
       move: pursuitBall(pos.x, pos.z, ball, P.speed),
       sprint: myBallDist > AI.sprintDist,
@@ -275,7 +304,6 @@ function aiCross(p, ball, oppD) {
   // Адресат: свой в штрафной соперника с максимально свободной зоной
   const boxX = F.length / 2 - 16.5;
   let target = null;
-  let mate = null;
   let bestSpace = -1;
   for (const m of team.players) {
     if (m === p || m.isKeeper) continue;
@@ -284,7 +312,6 @@ function aiCross(p, ball, oppD) {
     const space = freeSpace(mp.x, mp.z, team.opponents);
     if (space > bestSpace) {
       bestSpace = space;
-      mate = m;
       target = { x: mp.x + m.vel.x * 0.6, z: mp.z + m.vel.z * 0.6 };
     }
   }
@@ -307,10 +334,57 @@ function aiCross(p, ball, oppD) {
   const lift = power * Math.tan(theta);
   p.aiKick(ball, { x: dx / dist, z: dz / dist }, power, lift, 0,
     { name: 'kick', ts: 1.2, at: 0.16 }); // навес — с проводкой
-  if (mate) {
-    team.commitPass({ mate, target });
-  }
+  // Замыкающего назначает тренер по точке прилёта (врывание на прилёт)
+  team.onCrossStruck(ball);
   return true;
+}
+
+// Игра на втором этаже (ресёрч 11): верховой мяч в досягаемости играется
+// в одно касание. Контекст решает: своя треть — ВЫНОС на фланг; у чужих
+// ворот — удар головой/с лёта в створ, где сила растёт от разбега
+// (врывание бьёт сильнее, чем статичный прыжок — принцип PES); середина
+// поля — скидка вперёд (борьба за подбор после выносов).
+function aerialPlay(p, ball) {
+  const AIR = CONFIG.ai.aerial;
+  const team = p.team;
+  const pos = p.group.position;
+  const bp = ball.mesh.position;
+  const goalX = team.attackGoalX;
+  const ownGoalX = team.ownGoalX;
+
+  const ownDepth = Math.hypot(pos.x - ownGoalX, pos.z);
+  if (ownDepth < AIR.clearThird) {
+    // Вынос: от своих ворот в сторону ближнего фланга
+    const zs = pos.z !== 0 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
+    p.aiAerial(ball, { x: team.side, z: zs * 0.9 }, AIR.clearPower, AIR.clearLift);
+    return;
+  }
+
+  const distGoal = Math.hypot(goalX - pos.x, pos.z);
+  if (distGoal < AIR.headerRange && Math.abs(pos.z) < 16) {
+    // Замыкание в створ: прицел со случайной точкой и шумом (рычаг
+    // «голы не дешевеют»), сила — от скорости разбега в момент контакта
+    const G = CONFIG.goal;
+    const spd = Math.hypot(p.vel.x, p.vel.z);
+    const noise = AIR.headerNoise * (0.6 + distGoal / AIR.headerRange);
+    const tz = (Math.random() * 2 - 1) * (G.width / 2 - 0.5) +
+      (Math.random() * 2 - 1) * noise;
+    const dx = goalX - pos.x;
+    const dz = tz - pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const power = Math.min(AIR.headerPowerMax,
+      AIR.headerPower + spd * AIR.headerPowerRun);
+    // Вертикаль: прийти к воротам на высоте headerTargetY (кивок вниз можно)
+    const t = d / (power * 0.85);
+    let vy = (AIR.headerTargetY - bp.y) / t - 0.5 * CONFIG.ball.gravity * t;
+    vy = Math.max(-6, Math.min(5, vy));
+    p.aiAerial(ball, { x: dx / d, z: dz / d }, power, vy);
+    return;
+  }
+
+  // Середина поля: скидка головой вперёд, к центру — партнёры подберут
+  p.aiAerial(ball, { x: team.side, z: pos.z > 0 ? -0.3 : 0.3 },
+    AIR.flickPower, AIR.flickLift);
 }
 
 // Удар AI: случайная точка створа + шум промаха, растущий с дистанцией.

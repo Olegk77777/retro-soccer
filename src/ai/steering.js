@@ -76,6 +76,46 @@ export function distToBall(player, ball) {
   return distTo(player, bp.x, bp.z);
 }
 
+// Прогноз точки, где летящий мяч снизится до высоты h (ресёрч 11: замыкание
+// навесов). Мини-симуляция той же физики, что в ball.update — гравитация,
+// квадратичный drag, Магнус — поэтому прогноз честный, а не «идеальная
+// парабола». Возвращает { x, z, t } или null, если мяч уже внизу/не упадёт.
+export function predictLanding(ball, h = CONFIG.ball.radius, maxT = 4) {
+  const B = CONFIG.ball;
+  const p = ball.mesh.position;
+  if (p.y <= h && ball.vel.y <= 0) return null; // уже ниже — нечего предсказывать
+  let x = p.x;
+  let y = p.y;
+  let z = p.z;
+  let vx = ball.vel.x;
+  let vy = ball.vel.y;
+  let vz = ball.vel.z;
+  let spin = ball.spin;
+  const dt = 1 / 30;
+  for (let t = 0; t < maxT; t += dt) {
+    vy += B.gravity * dt;
+    const sp = Math.hypot(vx, vy, vz);
+    if (sp > 0.01) {
+      const d = Math.min(B.dragK * sp * dt, 0.5);
+      vx *= 1 - d;
+      vy *= 1 - d;
+      vz *= 1 - d;
+    }
+    if (Math.abs(spin) > 0.01) {
+      const ax = -vz * spin * B.magnus * dt;
+      const az = vx * spin * B.magnus * dt;
+      vx += ax;
+      vz += az;
+      spin *= Math.pow(B.spinDecay, dt * 60);
+    }
+    x += vx * dt;
+    y += vy * dt;
+    z += vz * dt;
+    if (vy < 0 && y <= h) return { x, z, t: t + dt };
+  }
+  return null;
+}
+
 // Свободная зона вокруг точки: 1 = пусто, 0 = толпа (ресёрч 10, формула
 // GameplayFootball AI_CalculateFreeSpace — 90% пользы pitch control за O(n)).
 // Соперники берутся с упреждением на их движение.

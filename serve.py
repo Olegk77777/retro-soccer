@@ -2,8 +2,11 @@
 # Локальный дев-сервер. То же, что `python3 -m http.server`, но с запретом кэширования:
 # браузер каждый раз берёт свежие файлы, и правки видны сразу без «жёсткого обновления».
 import http.server
+import os
 
-PORT = 8123
+# Порт можно задать переменной окружения PORT (нужно превью-панели Claude,
+# когда 8123 занят другим сервером); по умолчанию — прежний 8123
+PORT = int(os.environ.get('PORT', 8123))
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):

@@ -4,7 +4,7 @@
 // назначения, «головы» игроков (fieldplayer.js) их исполняют.
 
 import { CONFIG } from '../config.js';
-import { distToBall, passLaneClearance, freeSpace, isPassSafe } from './steering.js';
+import { distToBall, passLaneClearance, freeSpace, isPassSafe, predictLanding } from './steering.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -39,6 +39,7 @@ export class Team {
 
     // Врывания в штрафную под навес: игрок → точка рывка (ближняя/дальняя/11 м)
     this.boxRuns = new Map();
+    this.crossAir = 0; // сек: наша подача в полёте — рывки живут, врывание на прилёт
 
     // Support spots Бакленда: сетка точек на половине соперника
     const SP = CONFIG.ai.attack.spot;
@@ -104,6 +105,13 @@ export class Team {
     const dl = lt - this.defLineX;
     this.defLineX += Math.abs(dl) < step ? dl : Math.sign(dl) * step;
 
+    // Подача в полёте: таймер тает; мяч опустился — фланговый эпизод окончен
+    if (this.crossAir > 0) {
+      this.crossAir -= dt;
+      const bpA = ball.mesh.position;
+      if (bpA.y < 0.5 && ball.vel.y <= 0) this.crossAir = 0;
+    }
+
     // Раннер: рывок живёт durationSec или пока не потеряли мяч
     if (this.runner) {
       this.runnerTimer -= dt;
@@ -154,6 +162,10 @@ export class Team {
   updateBoxRuns(ball) {
     const AC = CONFIG.ai.attack.cross;
     const F = CONFIG.field;
+    // Подача уже в полёте: мяч покинул фланговый коридор, но рывки НЕ
+    // отменяем — штанги и подбор держатся до прилёта (иначе врывания
+    // умирали в момент удара по мячу — грабля 18.07.2026)
+    if (this.crossAir > 0) return;
     this.boxRuns.clear();
     if (!this.attacking) return;
     const bp = ball.mesh.position;
@@ -188,6 +200,45 @@ export class Team {
       this.boxRuns.set(pool[bi], t);
       pool.splice(bi, 1);
     }
+  }
+
+  // Подача исполнена (ресёрч 11): считаем точку приземления честной
+  // мини-симуляцией полёта и назначаем ЗАМЫКАЮЩЕГО — того, кто прибежит
+  // к точке ближе всего к моменту прилёта (врывание на скорости, а не
+  // ожидание под мячом). Он становится receiver и атакует прилёт.
+  // Возвращает замыкающего (человеку туда передаётся курсор, как в PES).
+  onCrossStruck(ball) {
+    const land = predictLanding(ball, CONFIG.player.aerial.contactY);
+    if (!land || land.t < 0.35) return null; // мгновенный прострел — не эпизод
+    this.crossAir = land.t + 0.4;
+
+    // Кандидаты: врывающиеся + вся атакующая шестёрка (позиции 5..10)
+    const pool = [...this.boxRuns.keys(), ...this.players.slice(5)]
+      .filter((p, i, arr) => arr.indexOf(p) === i &&
+        p !== this.match.toucher && !p.isKeeper);
+    if (!pool.length) return null;
+
+    // Лучший — минимальный «зазор» между временем добегания и полётом:
+    // прибежать К ПРИЛЁТУ (удар в движении) ценнее, чем стоять под мячом
+    const spd = CONFIG.player.speed * CONFIG.player.sprintFactor;
+    let best = null;
+    let bestCost = Infinity;
+    for (const p of pool) {
+      const pp = p.group.position;
+      const need = Math.hypot(land.x - pp.x, land.z - pp.z) / spd;
+      const slack = land.t - need;
+      // Опоздание штрафуем жёстко: лучше тот, кто успевает с небольшим запасом
+      const cost = slack >= 0 ? slack : 3 - slack * 6;
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = p;
+      }
+    }
+    if (!best) return null;
+    this.receiver = best;
+    this.receiveTarget = { x: land.x, z: land.z };
+    this.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, land.t + 0.8);
+    return best;
   }
 
   // Оценка support spots (веса Params.ini Бакленда + свободная зона):
