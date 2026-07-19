@@ -12,17 +12,23 @@ import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall } from './ai/steering.js';
 
 function createControlledMarker() {
-  const starShape = (outerRadius, innerRadius) => {
-    const shape = new THREE.Shape();
+  const starPath = (tipRadius, notchRadius, clockwise = false) => {
+    const path = clockwise ? new THREE.Path() : new THREE.Shape();
     for (let i = 0; i < 10; i++) {
-      const radius = i % 2 === 0 ? outerRadius : innerRadius;
-      const angle = Math.PI / 2 + i * Math.PI / 5;
+      const radius = i % 2 === 0 ? tipRadius : notchRadius;
+      const angle = Math.PI / 2 + (clockwise ? -1 : 1) * i * Math.PI / 5;
       const x = Math.cos(angle) * radius;
       const y = Math.sin(angle) * radius;
-      if (i === 0) shape.moveTo(x, y);
-      else shape.lineTo(x, y);
+      if (i === 0) path.moveTo(x, y);
+      else path.lineTo(x, y);
     }
-    shape.closePath();
+    path.closePath();
+    return path;
+  };
+
+  const hollowStar = (outerTip, outerNotch, innerTip, innerNotch) => {
+    const shape = starPath(outerTip, outerNotch);
+    shape.holes.push(starPath(innerTip, innerNotch, true));
     return shape;
   };
 
@@ -35,19 +41,20 @@ function createControlledMarker() {
     side: THREE.DoubleSide,
   });
 
-  // Тёмная печатная окантовка удерживает силуэт после 240p и CRT-размытия.
+  // Полый центр оставляет газон видимым. Тёмная печатная кайма удерживает
+  // огненно-жёлтый контур после 240p и CRT-размытия, особенно на белых линиях.
   const outline = new THREE.Mesh(
-    new THREE.ShapeGeometry(starShape(0.84, 0.40)),
-    material(0x5b260f, 0.82),
+    new THREE.ShapeGeometry(hollowStar(0.86, 0.41, 0.56, 0.265)),
+    material(0x6b3d00, 0.82),
   );
-  const fill = new THREE.Mesh(
-    new THREE.ShapeGeometry(starShape(0.72, 0.32)),
-    material(0xf28a24, 0.94),
+  const fire = new THREE.Mesh(
+    new THREE.ShapeGeometry(hollowStar(0.78, 0.37, 0.60, 0.285)),
+    material(0xffb800, 0.98),
   );
-  fill.position.z = 0.008;
+  fire.position.z = 0.008;
   outline.renderOrder = 3;
-  fill.renderOrder = 4;
-  marker.add(outline, fill);
+  fire.renderOrder = 4;
+  marker.add(outline, fire);
   marker.rotation.x = -Math.PI / 2;
   marker.position.y = 0.045;
   return marker;
@@ -89,7 +96,7 @@ export class Match {
       vel: new THREE.Vector3(),
     };
 
-    // Оранжевая звезда под управляемым игроком — как курсор в футсимах 90-х.
+    // Полая огненно-жёлтая звезда — как курсор в футсимах 90-х.
     this.controlledMarker = createControlledMarker();
     scene.add(this.controlledMarker);
 
