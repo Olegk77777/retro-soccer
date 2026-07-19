@@ -240,6 +240,7 @@ export class Match {
     this.controlled = p;
     this.switchCd = cd;
     p.pendingStrike = null;
+    p.strikeContactLock = false;
     p.chargeRun = false;
     if (p.ai) p.ai.dribDir = null;
     this.armControlledApproach(p);

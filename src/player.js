@@ -116,6 +116,7 @@ export class Player {
     this.hasBall = false;
     this.controlling = false; // гистерезис дриблинга: подобрал вплотную — ведёт до keepRadius
     this.pendingStrike = null; // буфер «удара с хода»: событие ждёт входа мяча в зону ноги
+    this.strikeContactLock = false; // замах на спринте: ноги держат контакт, стрелки целятся
     this.chargeRun = false;  // замах начат на бегу — бег продолжается (удар подъёмом)
     this.lastStrikeStyle = null; // для отладки/баланса: каким ударом бил последний раз
     this.lastKick = null;    // { foot: 'L'|'R', contact: 'inside'|'outside' } — нога и часть стопы
@@ -242,6 +243,7 @@ export class Player {
     this.hasBall = false;
     this.controlling = false;
     this.pendingStrike = null;
+    this.strikeContactLock = false;
     this.chargeRun = false;
     this.dribbleTouchCd = 0;
     this.dribbleDir = null;
@@ -516,7 +518,23 @@ export class Player {
     let sprinting = input.sprint && !brake;
     const bpEarly = ball.mesh.position;
     let approachMove = null;
+    let strikeMove = null;
     let approachIntentAtContact = null;
+
+    // На быстром беге кнопка действия превращает стрелки в ПРИЦЕЛ. Пока
+    // навес/пас/удар заряжается или ждёт окно дополнительных тапов, ноги
+    // сохраняют разбег к мячу и не принимают резкую смену прицела за поворот.
+    // В обороне это не включается: без владения S остаётся навалом корпусом.
+    const strikeCommitted = !!input.strikeCommitted;
+    const ownsBallForStrike = this.isToucher === true || this.hasBall || this.controlling;
+    if (strikeCommitted && ownsBallForStrike &&
+        (speedNow > P.sprintTouchMinSpeed || this.sprintBoost > 0.35)) {
+      this.strikeContactLock = true;
+    }
+    if (!strikeCommitted && !this.pendingStrike) this.strikeContactLock = false;
+    const strikeRunLock = this.strikeContactLock && !brake &&
+      !downed && this.diveT <= 0 && bpEarly.y <= P.kickMaxBallY &&
+      (speedNow > P.sprintTouchMinSpeed || this.sprintBoost > 0.35);
 
     // Обязательство завершить касание. Пока оно живо, стик запоминается как
     // будущий курс, но ноги каждый кадр пересчитывают погоню за движущимся мячом.
@@ -575,6 +593,24 @@ export class Player {
       maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
     }
 
+    if (strikeRunLock) {
+      const dd = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+      if (dd < APP.strikePursuitRange) {
+        if (dd > APP.strikeHoldRadius) {
+          strikeMove = pursuitBall(pos.x, pos.z, ball, P.speed * P.sprintFactor);
+        } else {
+          // Мяч прямо у бутсы: продолжаем прежний разбег. Использовать здесь
+          // input.move нельзя — это и есть направление будущего действия.
+          const runLen = Math.hypot(this.vel.x, this.vel.z);
+          strikeMove = runLen > 0.4
+            ? { x: this.vel.x / runLen, z: this.vel.z / runLen }
+            : { x: this.facing.x, z: this.facing.z };
+        }
+        mvx = strikeMove.x;
+        mvz = strikeMove.z;
+      }
+    }
+
     // Ожидание исполнения (пас/удар нажат, мяч ещё не в зоне ноги): игрок
     // ДОБЕГАЕТ до мяча сам, а стик в это время рулит НАПРАВЛЕНИЕМ паса,
     // не уводя бег — раньше смена направления в этот момент «убегала от
@@ -585,7 +621,7 @@ export class Player {
       // а к ТОЧКЕ ПРИЗЕМЛЕНИЯ (замыкание навеса: врывание на прилёт)
       let tx = bpEarly.x;
       let tz = bpEarly.z;
-      let range = 6;
+      let range = APP.strikePursuitRange;
       if (bpEarly.y > P.kickMaxBallY &&
           (this.pendingStrike.type === 'shot' || this.pendingStrike.type === 'swipe')) {
         const land = predictLanding(ball, P.aerial.contactY);
@@ -596,7 +632,7 @@ export class Player {
         }
       }
       const dd = Math.hypot(tx - pos.x, tz - pos.z);
-      if (dd < range && dd > 0.4) {
+      if (dd < range && dd > APP.strikeHoldRadius) {
         mvx = (tx - pos.x) / dd;
         mvz = (tz - pos.z) / dd;
       }
@@ -609,7 +645,7 @@ export class Player {
       mvz = approachMove.z;
     }
 
-    const k = Math.min(1, dt * (approachMove ? APP.accel : P.accel));
+    const k = Math.min(1, dt * ((approachMove || strikeMove) ? APP.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -687,7 +723,7 @@ export class Player {
     // Пока ноги ещё честно добегают до мяча, обычное липкое ведение не должно
     // параллельно тянуть тот же мяч. После завершения контакта latch уже снят,
     // и этот блок исполняется в том же кадре.
-    if (this.hasBall && !this.ballApproach) {
+    if (this.hasBall && !this.ballApproach && !strikeRunLock && !this.pendingStrike) {
       if ((sprinting || this.sprintBoost > 0.35) && speed > P.sprintTouchMinSpeed) {
         // Дриблинг на спринте — ТОЛЧКАМИ (фидбек Олега, 17.07.2026):
         // игрок пинает мяч вперёд, тот катится и тормозит (трение в ball.update),
@@ -790,6 +826,7 @@ export class Player {
     if (canKick && !diving && !downed && this.pendingStrike) {
       const s = this.pendingStrike;
       this.pendingStrike = null;
+      this.strikeContactLock = false;
       this.cancelBallApproach(); // после паса/удара не гонимся за собственным мячом
       const lerp = (a, b, t) => a + (b - a) * t;
       if (s.type === 'pass' || s.type === 'through') {

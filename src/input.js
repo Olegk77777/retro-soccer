@@ -417,6 +417,17 @@ export class Input {
     return v; // null или {charge: 0.15..1.3, taps: 1..3}
   }
 
+  // Кнопка действия уже обещает удар по мячу, даже если событие ещё не
+  // выпущено. Для навеса сюда входит и 0,3-секундное окно второго/третьего
+  // тапа: ноги не должны принять стрелки прицела за новый курс бега.
+  get strikeCommitted() {
+    return this.pass.held || this.pass.consumePeek() !== null ||
+      this.through.held || this.through.consumePeek() !== null ||
+      this.shot.held || this.shot.consumePeek() !== null ||
+      this._cross.state === 'charging' || this._cross.state === 'window' ||
+      this._crossEvent !== null;
+  }
+
   // Для шкалы силы в UI
   get charging() {
     return this.pass.held || this.through.held || this.shot.held || this._cross.state === 'charging';
