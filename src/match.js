@@ -11,6 +11,48 @@ import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall } from './ai/steering.js';
 
+function createControlledMarker() {
+  const starShape = (outerRadius, innerRadius) => {
+    const shape = new THREE.Shape();
+    for (let i = 0; i < 10; i++) {
+      const radius = i % 2 === 0 ? outerRadius : innerRadius;
+      const angle = Math.PI / 2 + i * Math.PI / 5;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      if (i === 0) shape.moveTo(x, y);
+      else shape.lineTo(x, y);
+    }
+    shape.closePath();
+    return shape;
+  };
+
+  const marker = new THREE.Group();
+  const material = (color, opacity) => new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+
+  // Тёмная печатная окантовка удерживает силуэт после 240p и CRT-размытия.
+  const outline = new THREE.Mesh(
+    new THREE.ShapeGeometry(starShape(0.84, 0.40)),
+    material(0x5b260f, 0.82),
+  );
+  const fill = new THREE.Mesh(
+    new THREE.ShapeGeometry(starShape(0.72, 0.32)),
+    material(0xf28a24, 0.94),
+  );
+  fill.position.z = 0.008;
+  outline.renderOrder = 3;
+  fill.renderOrder = 4;
+  marker.add(outline, fill);
+  marker.rotation.x = -Math.PI / 2;
+  marker.position.y = 0.045;
+  return marker;
+}
+
 export class Match {
   // teamsData: [home.json, away.json]. Человек — команда 0, атакует +X.
   constructor(scene, ball, goals, input, teamsData) {
@@ -47,14 +89,9 @@ export class Match {
       vel: new THREE.Vector3(),
     };
 
-    // Кольцо-маркер под управляемым игроком (жёлтое, читается с ТВ-камеры)
-    this.ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.55, 0.78, 24),
-      new THREE.MeshBasicMaterial({ color: 0xe8d44d, transparent: true, opacity: 0.85 }),
-    );
-    this.ring.rotation.x = -Math.PI / 2;
-    this.ring.position.y = 0.04;
-    scene.add(this.ring);
+    // Оранжевая звезда под управляемым игроком — как курсор в футсимах 90-х.
+    this.controlledMarker = createControlledMarker();
+    scene.add(this.controlledMarker);
 
     // Табло-телеграфика
     this.hud = {
@@ -270,11 +307,11 @@ export class Match {
       }
     }
 
-    // Кольцо следует за управляемым
+    // Звезда следует за управляемым
     if (this.controlled) {
       const cp = this.controlled.group.position;
-      this.ring.position.x = cp.x;
-      this.ring.position.z = cp.z;
+      this.controlledMarker.position.x = cp.x;
+      this.controlledMarker.position.z = cp.z;
     }
 
     this.updateHUD();
