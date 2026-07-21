@@ -393,6 +393,7 @@ export class Team {
   // назначаем — за него решает Олег (авто-переключение и так отдаст ему
   // ближнего). Вратарь гонится только по своей логике (goalkeeper.js).
   pickChaser(ball) {
+    if (this.match.state === 'restart') return null; // мёртвый мяч не догоняют
     let best = null;
     let bestD = Infinity;
     for (const p of this.fieldPlayers) {

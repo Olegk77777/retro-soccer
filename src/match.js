@@ -9,7 +9,7 @@ import { Player } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
-import { distToBall } from './ai/steering.js';
+import { distToBall, freeSpace } from './ai/steering.js';
 
 function createControlledMarker() {
   const starPath = (tipRadius, notchRadius, clockwise = false) => {
@@ -81,6 +81,8 @@ export class Match {
     this.controlled = null;   // игрок под управлением человека
     this.possession = this.teams[0];
     this.toucher = null;      // кто из 22 сейчас у мяча (арбитраж владения)
+    this.lastTouch = null;    // последнее касание — решает, чей аут/угловой
+    this.restart = null;      // активный стандарт: аут / угловой / удар от ворот
     this.score = [0, 0];
     this.clock = 0;           // игровые секунды (0..90×60)
     this.state = 'kickoff';   // kickoff | play | goalpause | fulltime
@@ -134,6 +136,8 @@ export class Match {
     this.state = 'kickoff';
     this.stateTimer = 0;
     this.kickoffTeam = kickingIdx;
+    this.restart = null;
+    this.lastTouch = null;
     this.ball.reset();
 
     for (const team of this.teams) {
@@ -257,8 +261,9 @@ export class Match {
       if (this.flashTimer <= 0) this.hud.flash.classList.remove('show');
     }
 
-    // Игровые часы: 90 минут сжаты в realMinutes реальных
-    if (this.state === 'kickoff' || this.state === 'play') {
+    // Игровые часы: 90 минут сжаты в realMinutes реальных.
+    // На стандартах время идёт — как в настоящей трансляции
+    if (this.state === 'kickoff' || this.state === 'play' || this.state === 'restart') {
       this.clock += dt * (M.gameMinutes / M.realMinutes);
       if (this.clock >= M.gameMinutes * 60) this.fullTime();
     }
@@ -296,11 +301,16 @@ export class Match {
       if (this.ball.vel.lengthSq() > 0.4) this.state = 'play';
     }
 
+    // Стандарты (Фаза 2): мяч полностью пересёк линию — аут/угловой/от ворот
+    if (this.state === 'play') this.checkOutOfPlay();
+    if (this.state === 'restart' && this.restart) this.updateRestart(dt);
+
     // На паузах AI строится к центру (настоящий мяч лежит в сетке)
     const paused = this.state === 'goalpause' || this.state === 'fulltime';
     const aiBall = paused ? this._centerBall : this.ball;
 
-    if (!paused) this.updateToucher();
+    // Мёртвый мяч стандарта арбитражу владения не принадлежит никому
+    if (!paused && this.state !== 'restart') this.updateToucher();
     this.validateControlledApproach();
 
     for (const team of this.teams) team.update(dt, aiBall);
@@ -309,10 +319,18 @@ export class Match {
 
     for (const team of this.teams) {
       for (const p of team.players) {
-        if (p === this.controlled) p.update(dt, this.input, this.ball);
+        if (this.restart && p === this.restart.taker) this.updateTaker(p, dt);
+        else if (p === this.controlled) p.update(dt, this.input, this.ball);
         else if (p.isKeeper) updateKeeper(p, dt, aiBall);
         else updateFieldPlayer(p, dt, aiBall);
       }
+    }
+
+    // Установленный мяч стандарта не сдвигают ни физика, ни чужие касания
+    if (this.state === 'restart' && this.restart && this.restart.phase !== 'dead') {
+      const r = this.restart;
+      this.ball.mesh.position.set(r.x, CONFIG.ball.radius, r.z);
+      this.ball.vel.set(0, 0, 0);
     }
 
     // Звезда следует за управляемым
@@ -334,24 +352,40 @@ export class Match {
     const bp = this.ball.mesh.position;
     let best = null;
     let bestD = Infinity;
-    if (bp.y < B.radius * 2.2) {
-      for (const p of this._all) {
-        const d = distToBall(p, this.ball);
+    let touch = null;
+    let touchD = Infinity;
+    const lowBall = bp.y < B.radius * 2.2;
+    // Последнее касание (для аутов/угловых) шире арбитража владения: удары
+    // исполняются из kickRadius, верховые сыгровки — из зоны замыкания.
+    // Линию почти всегда решает настоящий удар, а бьющий в тот кадр — ближний
+    const touchReach = bp.y < P.kickMaxBallY ? P.kickRadius : P.aerial.reach;
+    const touchable = bp.y < P.aerial.maxY;
+    for (const p of this._all) {
+      const d = distToBall(p, this.ball);
+      if (lowBall) {
         const reach = p.controlling ? P.controlKeepRadius : P.controlRadius;
         if (d < reach && d < bestD) {
           bestD = d;
           best = p;
         }
       }
+      if (touchable && d < touchReach && d < touchD) {
+        touchD = d;
+        touch = p;
+      }
     }
     // Кипер с мячом в руках — безусловный владелец (мяч на высоте рук,
     // обычный радиус-арбитраж его не видит)
     for (const team of this.teams) {
-      if (team.keeper.ai && team.keeper.ai.holdT > 0) best = team.keeper;
+      if (team.keeper.ai && team.keeper.ai.holdT > 0) {
+        best = team.keeper;
+        touch = team.keeper;
+      }
     }
     this.toucher = best;
     for (const p of this._all) p.isToucher = p === best;
     if (best) this.possession = best.team;
+    if (touch) this.lastTouch = touch;
   }
 
   // Переключение управляемого игрока: Q/LB — вручную (ближний к мячу),
@@ -360,6 +394,13 @@ export class Match {
   updateSwitching() {
     const SW = CONFIG.ai.switch;
     const team = this.humanTeam;
+
+    // Свой стандарт: курсор прибит к исполнителю до розыгрыша
+    if (this.state === 'restart' && this.restart &&
+        this.restart.team === team && this.restart.type !== 'goalkick') {
+      this.input.consumeSwitch();
+      return;
+    }
     const manual = this.input.consumeSwitch();
 
     if (manual) {
@@ -441,6 +482,392 @@ export class Match {
     return { dir: new THREE.Vector3((tx - pos.x) / d, 0, (tz - pos.z) / d), power: outPower };
   }
 
+  // ===== Стандарты: ауты, угловые, удары от ворот (Фаза 2, 21.07.2026) =====
+
+  // Мяч полностью пересёк линию (весь мяч за линией, как в правилах).
+  // Голы сюда не попадают: goal.js ловит их раньше и ставит goalpause.
+  checkOutOfPlay() {
+    const F = CONFIG.field;
+    const R = CONFIG.restart;
+    const bp = this.ball.mesh.position;
+    const rr = CONFIG.ball.radius;
+    if (this.ball.goalScored) return;
+    const halfL = F.length / 2;
+    const halfW = F.width / 2;
+    const lastTeam = this.lastTouch ? this.lastTouch.team : this.possession;
+
+    if (Math.abs(bp.z) > halfW + rr) {
+      // Боковая линия — вбрасывание команды, которая мяча НЕ касалась
+      const sz = Math.sign(bp.z);
+      const x = Math.max(-halfL + 1, Math.min(halfL - 1, bp.x));
+      this.beginRestart('throwin', this.otherTeam(lastTeam), x, sz * (halfW - R.lineInset));
+    } else if (Math.abs(bp.x) > halfL + rr) {
+      // Лицевая линия: от обороняющихся — угловой, от атакующих — от ворот
+      const sx = Math.sign(bp.x);
+      const sz = Math.sign(bp.z || 1);
+      const defTeam = this.teams.find((t) => Math.sign(t.ownGoalX) === sx);
+      if (lastTeam === defTeam) {
+        this.beginRestart('corner', this.otherTeam(defTeam),
+          sx * (halfL - R.lineInset), sz * (halfW - R.lineInset));
+      } else {
+        this.beginRestart('goalkick', defTeam,
+          sx * (halfL - R.goalKick.x), sz * R.goalKick.z);
+      }
+    }
+  }
+
+  nearestToPoint(players, x, z) {
+    let best = null;
+    let bestD = Infinity;
+    for (const p of players) {
+      const pp = p.group.position;
+      const d = Math.hypot(pp.x - x, pp.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  // Назначить стандарт: мяч мёртв, владение снято, исполнитель идёт к точке.
+  // Свой аут/угловой человек исполняет сам (курсор на исполнителе), удар
+  // от ворот всегда бьёт AI-кипер — как в старых футсимах.
+  beginRestart(type, team, x, z) {
+    this.state = 'restart';
+    this.stateTimer = 0;
+    const taker = type === 'goalkick'
+      ? team.keeper
+      : this.nearestToPoint(team.fieldPlayers, x, z);
+    this.restart = { type, team, x, z, taker, phase: 'dead', t: 0 };
+
+    this.toucher = null;
+    for (const p of this._all) p.isToucher = false;
+    this.possession = team; // тренеры строятся: одни в атаку, другие в оборону
+    for (const t of this.teams) {
+      t.receiver = null;
+      t.receiveTarget = null;
+      t.runner = null;
+      t.runnerTarget = null;
+      t.crossAir = 0;
+      t.boxRuns.clear();
+    }
+    if (this.controlled) {
+      this.controlled.pendingStrike = null;
+      this.controlled.strikeContactLock = false;
+      this.controlled.cancelBallApproach();
+    }
+    if (team === this.humanTeam && type !== 'goalkick') this.setControlled(taker, 1.0);
+
+    const label = { throwin: 'АУТ', corner: 'УГЛОВОЙ', goalkick: 'ОТ ВОРОТ' };
+    this.hud.flash.textContent = label[type];
+    this.hud.flash.classList.add('show');
+    this.flashTimer = CONFIG.restart.flashTime;
+  }
+
+  // Точка, где стоит исполнитель: чуть снаружи от мяча
+  _restartStand(r) {
+    if (r.type === 'throwin') {
+      const sz = Math.sign(r.z || 1);
+      return { x: r.x, z: r.z + sz * 0.9 };
+    }
+    if (r.type === 'corner') {
+      return { x: r.x + Math.sign(r.x || 1) * 0.8, z: r.z + Math.sign(r.z || 1) * 0.8 };
+    }
+    return { x: r.x - r.team.side, z: r.z }; // удар от ворот: за мячом
+  }
+
+  // Куда исполнитель смотрит, пока ждёт (человек может довернуть стиком)
+  _restartFaceTarget(r) {
+    const F = CONFIG.field;
+    if (r.type === 'corner') return { x: r.team.side * (F.length / 2 - 11), z: 0 };
+    if (r.type === 'goalkick') return { x: 0, z: 0 };
+    return { x: r.x + r.team.side * 12, z: r.z * 0.2 };
+  }
+
+  // Направление розыгрыша: стик человека, иначе разумный дефолт вперёд-внутрь
+  _restartAim(r) {
+    const im = this.input.move;
+    const l = Math.hypot(im.x, im.z);
+    if (r.team === this.humanTeam && l > 0.3) return { x: im.x / l, z: im.z / l };
+    if (r.type === 'throwin') {
+      const sz = Math.sign(r.z || 1);
+      const d = Math.hypot(r.team.side * 0.8, 0.6);
+      return { x: (r.team.side * 0.8) / d, z: (-sz * 0.6) / d };
+    }
+    const t = this._restartFaceTarget(r);
+    const dx = t.x - r.x;
+    const dz = t.z - r.z;
+    const d2 = Math.hypot(dx, dz) || 1;
+    return { x: dx / d2, z: dz / d2 };
+  }
+
+  // Установить мёртвый мяч на точку (сбрасывает и хвосты прошлой жизни мяча)
+  _placeBall(x, z) {
+    const b = this.ball;
+    b.mesh.position.set(x, CONFIG.ball.radius, z);
+    b.vel.set(0, 0, 0);
+    b.spin = 0;
+    b.afterTouch = 0;
+    b.goalScored = false;
+    b.netContact = null;
+    if (b.mark) b.mark.visible = false;
+  }
+
+  // Исполнитель: дойти до точки, встать, смотреть в поле (или по стику)
+  updateTaker(p, dt) {
+    const r = this.restart;
+    const stand = this._restartStand(r);
+    const pos = p.group.position;
+    const dx = stand.x - pos.x;
+    const dz = stand.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    let move = { x: 0, z: 0 };
+    if (d > 0.25) {
+      const k = Math.min(1, d / 2.5); // у точки — шагом, не юзом
+      move = { x: (dx / d) * k, z: (dz / d) * k };
+    }
+    let face = null;
+    if (d < 1.5) {
+      const ft = this._restartFaceTarget(r);
+      face = Math.atan2(ft.x - pos.x, ft.z - pos.z);
+      const im = this.input.move;
+      if (r.team === this.humanTeam && r.type !== 'goalkick' &&
+          Math.hypot(im.x, im.z) > 0.3) {
+        face = Math.atan2(im.x, im.z);
+      }
+    }
+    p.aiUpdate(dt, move, { face, sprint: d > 6 });
+  }
+
+  // Жизнь стандарта: свисток → установка мяча → подход → исполнение.
+  // Человек бьёт своими кнопками (та же полоска), AI — после короткой паузы
+  updateRestart(dt) {
+    const R = CONFIG.restart;
+    const r = this.restart;
+    r.t += dt;
+
+    // «Свисток»: мяч ещё докатывается за линией, потом встаёт на точку
+    if (r.phase === 'dead') {
+      if (r.t >= R.outDelay) {
+        r.phase = 'walk';
+        r.t = 0;
+        this._placeBall(r.x, r.z);
+        // ТВ-склейка: дальний исполнитель не бежит через полполя — после
+        // монтажной паузы он уже в кадре у точки (камера панорамирует туда)
+        const st = this._restartStand(r);
+        const tp = r.taker.group.position;
+        if (Math.hypot(st.x - tp.x, st.z - tp.z) > R.snapDist) {
+          const ft = this._restartFaceTarget(r);
+          r.taker.reset(st.x, st.z, Math.atan2(ft.x - st.x, ft.z - st.z));
+        }
+      }
+      return;
+    }
+
+    const stand = this._restartStand(r);
+    const tp = r.taker.group.position;
+    const d = Math.hypot(stand.x - tp.x, stand.z - tp.z);
+    if (r.phase === 'walk') {
+      if (d < 1.0 || r.t > R.walkTimeout) {
+        r.phase = 'ready';
+        r.t = 0;
+      } else return;
+    }
+
+    const humanTakes = r.team === this.humanTeam && r.type !== 'goalkick';
+    if (!humanTakes) {
+      if (r.t >= R.aiDelay) this.executeAIRestart(r);
+      return;
+    }
+
+    // Человек: снимаем ВСЕ события кнопок (несъеденное событие после
+    // розыгрыша выстрелило бы «ударом из ниоткуда») и исполняем нужное
+    const pass = this.input.pass.consume();
+    const through = this.input.through.consume();
+    const cross = this.input.consumeCross();
+    const shot = this.input.shot.consume();
+    const swipe = this.input.consumeSwipe();
+    const aim = this._restartAim(r);
+
+    if (r.type === 'corner') {
+      if (cross) this.executeCorner(r, cross);
+      else if (swipe) this.executeCornerSwipe(r, swipe);
+      else if (pass !== null) this.executeRestartPass(r, 'pass', pass, aim);
+      else if (through !== null) this.executeRestartPass(r, 'through', through, aim);
+      else if (shot !== null) this.executeCorner(r, { charge: shot, taps: 3 }); // УДАР = прострел
+    } else {
+      // Аут: любая кнопка — бросок; ПАС с ассистом на ближнего, НА ХОД /
+      // НАВЕС — сильнее и на ход, свайп — по нарисованному направлению
+      if (pass !== null) this.executeThrowIn(r, 'pass', pass, aim);
+      else if (through !== null) this.executeThrowIn(r, 'through', through, aim);
+      else if (cross) this.executeThrowIn(r, 'through', cross.charge, aim);
+      else if (shot !== null) this.executeThrowIn(r, 'pass', shot, aim);
+      else if (swipe) this.executeThrowSwipe(r, swipe);
+    }
+  }
+
+  _finishRestart() {
+    this.restart = null;
+    this.state = 'play';
+  }
+
+  // Физика броска руками: мяч из-за головы, лёгкая дуга, без подкрутки
+  _throwBall(taker, dir, power) {
+    const R = CONFIG.restart.throwIn;
+    const tp = taker.group.position;
+    const dl = Math.hypot(dir.x, dir.z) || 1;
+    const nd = { x: dir.x / dl, z: dir.z / dl };
+    this.ball.mesh.position.set(tp.x + nd.x * 0.35, R.releaseY, tp.z + nd.z * 0.35);
+    this.ball.strike(nd, power, R.lift);
+    this.ball.spin = 0;
+    this.ball.afterTouch = 0; // руками мяч в полёте не докручивают
+    taker.rot = Math.atan2(nd.x, nd.z);
+    taker.kickCooldown = CONFIG.player.kickCooldown;
+    taker.playOneShot('throwin', 1.25, 0.35);
+  }
+
+  executeThrowIn(r, type, charge, aim) {
+    const R = CONFIG.restart.throwIn;
+    let power = R.powerMin + (R.powerMax - R.powerMin) * charge; // >1 — передержка
+    let dir = aim;
+    const assist = this.resolvePass(r.taker, type, power, new THREE.Vector3(aim.x, 0, aim.z));
+    if (assist) {
+      dir = { x: assist.dir.x, z: assist.dir.z };
+      power = Math.min(assist.power, R.powerMax * 1.15); // руками сильнее не бросить
+    }
+    this._throwBall(r.taker, dir, power);
+    this._finishRestart();
+  }
+
+  // Планшет: бросок по нарисованному направлению, длина жеста = сила
+  executeThrowSwipe(r, swipe) {
+    const R = CONFIG.restart.throwIn;
+    const power = R.powerMin + (R.powerMax - R.powerMin) * Math.min(swipe.power, 1.3);
+    this._throwBall(r.taker, swipe.dir, power);
+    this._finishRestart();
+  }
+
+  // Угловой человека — обычная PES-машина навеса: полоска = адрес
+  // (ближняя → центр → дальняя), тапы = тип дуги, стрелки уточняют точку.
+  // Корпус ставим строго поперёк поля: crossSolution сам возьмёт нужные
+  // ворота по позиции (взгляд с угла «в поле» сбивал бы ему сторону атаки)
+  executeCorner(r, ev) {
+    r.taker.rot = Math.atan2(0, -Math.sign(r.z || 1));
+    r.taker.doCross(ev, this.input, this.ball);
+    this._finishRestart();
+  }
+
+  executeCornerSwipe(r, swipe) {
+    r.taker.rot = Math.atan2(0, -Math.sign(r.z || 1));
+    r.taker.swipeShot(swipe, this.input, this.ball);
+    this._finishRestart();
+  }
+
+  // Короткий розыгрыш углового пасом (с обычным пас-ассистом)
+  executeRestartPass(r, type, charge, aim) {
+    const P = CONFIG.player;
+    const cfg = type === 'through' ? P.through : P.pass;
+    let power = cfg.powerMin + (cfg.powerMax - cfg.powerMin) * charge;
+    const aimVec = new THREE.Vector3(aim.x, 0, aim.z);
+    const assist = this.resolvePass(r.taker, type, power, aimVec);
+    const dir = assist ? assist.dir : aimVec;
+    if (assist) power = assist.power;
+    this.ball.strike(dir, power, cfg.lift);
+    r.taker.rot = Math.atan2(dir.x, dir.z);
+    r.taker.kickCooldown = P.kickCooldown;
+    r.taker.playOneShot('kick', 1.6, 0.20);
+    this._finishRestart();
+  }
+
+  // AI-исполнение: вбрасывание ближнему, угловой на свободного в штрафной,
+  // удар от ворот — короткий розыгрыш или вынос на фланг
+  executeAIRestart(r) {
+    const F = CONFIG.field;
+    const team = r.team;
+    const taker = r.taker;
+
+    if (r.type === 'throwin') {
+      const R = CONFIG.restart.throwIn;
+      const pass = team.choosePass(taker, this.ball);
+      let dir;
+      let power;
+      if (pass) {
+        dir = pass.dir;
+        power = Math.min(pass.power, R.aiPowerMax);
+        team.commitPass(pass);
+      } else {
+        const sz = Math.sign(r.z || 1);
+        const dl = Math.hypot(team.side * 0.8, 0.6);
+        dir = { x: (team.side * 0.8) / dl, z: (-sz * 0.6) / dl };
+        power = 12;
+      }
+      this._throwBall(taker, dir, power);
+      this._finishRestart();
+      return;
+    }
+
+    if (r.type === 'corner') {
+      const RC = CONFIG.restart.corner;
+      const pos = taker.group.position;
+      const boxX = F.length / 2 - 16.5;
+      // Адресат — свой в штрафной с самой свободной зоной (как AI-навес)
+      let target = null;
+      let bestSpace = -1;
+      for (const m of team.players) {
+        if (m === taker || m.isKeeper) continue;
+        const mp = m.group.position;
+        if (team.side * mp.x < boxX - 3 || Math.abs(mp.z) > 20.16) continue;
+        const space = freeSpace(mp.x, mp.z, team.opponents);
+        if (space > bestSpace) {
+          bestSpace = space;
+          target = { x: mp.x + m.vel.x * 0.5, z: mp.z + m.vel.z * 0.5 };
+        }
+      }
+      if (!target) {
+        target = { x: team.side * (F.length / 2 - 8), z: -Math.sign(r.z || 1) * RC.farPostZ };
+      }
+      const dx = target.x - pos.x;
+      const dz = target.z - pos.z;
+      const dist = Math.hypot(dx, dz) || 1;
+      const theta = (RC.angle * Math.PI) / 180;
+      let power = Math.sqrt((-CONFIG.ball.gravity * dist) / (2 * Math.tan(theta))) * RC.powerFudge;
+      power = Math.max(RC.powerMin, Math.min(RC.powerMax, power));
+      taker.aiKick(this.ball, { x: dx / dist, z: dz / dist }, power, power * Math.tan(theta), 0,
+        { name: 'kick', ts: 1.2, at: 0.16 });
+      team.onCrossStruck(this.ball); // замыкающий врывается на прилёт
+      this._finishRestart();
+      return;
+    }
+
+    // Удар от ворот: разыграть коротко, если есть чистый адресат, иначе вынос
+    const K = CONFIG.ai.keeper;
+    const pass = team.choosePass(taker, this.ball);
+    if (pass) {
+      taker.aiKick(this.ball, pass.dir, pass.power, pass.lift, 0,
+        { name: 'kick', ts: 1.4, at: 0.18 });
+      team.commitPass(pass);
+    } else {
+      const zs = Math.sign(r.z || 1);
+      const dl = Math.hypot(team.side, zs * 0.5);
+      taker.aiKick(this.ball, { x: team.side / dl, z: (zs * 0.5) / dl },
+        K.clearPower, K.clearLift, 0, { name: 'kick', ts: 1.4, at: 0.18 });
+    }
+    this._finishRestart();
+  }
+
+  // Пауза = мяч мёртв: кипер не держит его в руках. Без этого его отложенный
+  // вынос по таймеру бил бы подставной _centerBall без метода strike (старый
+  // TypeError из аудита 18.07.2026)
+  _releaseKeeperHolds() {
+    for (const team of this.teams) {
+      if (team.keeper.ai) {
+        team.keeper.ai.holdT = 0;
+        team.keeper.ai.dropkickStarted = false;
+      }
+    }
+  }
+
   // Гол: определяем сторону по позиции мяча, счёт, пауза, потом розыгрыш
   onGoal() {
     if (this.state !== 'play' && this.state !== 'kickoff') return;
@@ -453,6 +880,7 @@ export class Match {
     // Мяч в сетке — владение снимается, никто не «ведёт» его сквозь ворота
     this.toucher = null;
     for (const p of this._all) p.isToucher = false;
+    this._releaseKeeperHolds();
     this.hud.flash.textContent = 'ГОЛ!';
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;
@@ -461,6 +889,8 @@ export class Match {
   fullTime() {
     this.state = 'fulltime';
     this.stateTimer = 0;
+    this.restart = null; // свисток мог застать стандарт — бросаем его
+    this._releaseKeeperHolds();
     this.hud.flash.textContent = `МАТЧ ОКОНЧЕН ${this.score[0]}:${this.score[1]}`;
     this.hud.flash.classList.add('show');
     this.flashTimer = CONFIG.match.fulltimePause;

@@ -38,6 +38,23 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // Стандарт (аут/угловой/от ворот): мяч мёртв. Соперники не давят точку —
+  // держат дистанцию (дух правила 9,15 м); расстановка обеих команд дальше
+  // живёт обычной логикой регионов, исполнителя ведёт Match
+  if (match.state === 'restart' && match.restart) {
+    const r = match.restart;
+    if (p.team !== r.team) {
+      const ddx = pos.x - r.x;
+      const ddz = pos.z - r.z;
+      const dd = Math.hypot(ddx, ddz) || 1;
+      if (dd < CONFIG.restart.keepAway) {
+        p.aiUpdate(dt, { x: ddx / dd, z: ddz / dd },
+          { face: Math.atan2(r.x - pos.x, r.z - pos.z) });
+        return;
+      }
+    }
+  }
+
   // Второй этаж (ресёрч 11): верховой мяч в досягаемости — играем В ОДНО
   // КАСАНИЕ. Своя треть — вынос; у чужих ворот — замыкание в створ (сила
   // от разбега!); середина — скидка вперёд. Летящий вверх мяч не трогаем.
@@ -49,7 +66,7 @@ export function updateFieldPlayer(p, dt, ball) {
         bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
     : (myBallDist < AP.reach &&
         bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY);
-  if (p.kickCooldown <= 0 && aerialOk && ball.vel.y < 2 &&
+  if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' && ball.vel.y < 2 &&
       Math.hypot(ball.vel.x, ball.vel.z) > 4) {
     aerialPlay(p, ball, diving);
     p.aiUpdate(dt, { x: 0, z: 0 }, {});

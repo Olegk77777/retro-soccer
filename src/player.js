@@ -1314,7 +1314,8 @@ export class Player {
     const P = CONFIG.player;
     const team = this.team;
     const m = team && team.match;
-    if (!m || this.challengeCd > 0 || this.isToucher) return false;
+    // На мёртвом мяче (стандарт) толкаться нельзя — свисток бы не дал
+    if (!m || m.state === 'restart' || this.challengeCd > 0 || this.isToucher) return false;
     const owner = m.toucher;
     if (owner && owner.team === team) return false; // мяч у своих — это пас
     const pos = this.group.position;
