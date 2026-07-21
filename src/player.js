@@ -1372,41 +1372,39 @@ export class Player {
 
   // ===== Подкат (ресёрч 09/12/13: ○ в PES 5/6 — high risk / high reward) =====
 
-  // Вход человека: кнопка НАВЕСА, когда мяч не у нашей команды.
-  // Направление — стик, без стика — на мяч. true = подкат пошёл
+  // Вход человека: кнопка ПОДКАТА в обороне. Срабатывает ТОЛЬКО когда мячом
+  // реально владеет соперник рядом (как ○ в PES: отбор — оборонительное
+  // действие, а не «падение в никуда»). Если мяч наш, летит между своими
+  // (пас/навес с ходу) или отпущен на спринте — возвращаем false, и кнопка
+  // остаётся навесом (фидбек Олега 21.07: подкат перебивал навес с ходу).
+  // Направление — стик, без стика целим в соперника-владельца (грубый подкат
+  // сзади возможен). true = подкат пошёл.
   tryTackle(ball, aimDir) {
     const m = this.team && this.team.match;
     if (this.tackleCd > 0 || this.tackleT > 0 || this.downT > 0 ||
         this.diveT > 0 || this.kickCooldown > 0) return false;
-    if (m && m.state === 'restart') return false; // мёртвый мяч — свисток бы не дал
-    const owner = m ? m.toucher : null;
-    if (this.isToucher === true || (owner && owner.team === this.team)) return false;
+    if (!m || m.state === 'restart') return false; // мёртвый мяч — свисток бы не дал
+    if (this.isToucher === true) return false;      // мяч у меня — это навес/удар
+    // Владение считаем по команде, а не по мгновенному касанию: пас в полёте
+    // (toucher = null) всё ещё «наш мяч», подкат тут не нужен
+    if (m.possession === this.team) return false;
+    const owner = m.toucher;
+    if (!owner || owner.team === this.team) return false; // никто/свой владеет — не отбор
     const TK = CONFIG.player.tackle;
     const pos = this.group.position;
-    const bp = ball.mesh.position;
-    // Прицел без стика: владелец-соперник рядом — слайд В НЕГО (упреждённо):
-    // прицел «на мяч» обходил корпус дриблёра стороной, и грубый подкат
-    // сзади был невозможен (фидбек Олега). Чисто или грубо — решат контакты.
-    // Мяч свободен — упреждение на время долёта слайда по курсу мяча
+    const op = owner.group.position;
+    // Соперник-владелец должен быть в досягаемости слайда, иначе — добегаем,
+    // а не бросаемся в подкат за тридевять земель («противник рядом», Олег)
+    if (Math.hypot(op.x - pos.x, op.z - pos.z) > TK.reachOwner) return false;
+
+    // Прицел: стик, иначе в соперника с упреждением на его бег (мяч сзади
+    // экранирован его корпусом — тогда подкат считается грубым)
     const run = Math.hypot(this.vel.x, this.vel.z);
     const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
-    let tx = bp.x;
-    let tz = bp.z;
-    let tvx = ball.vel.x;
-    let tvz = ball.vel.z;
-    if (owner && owner.team !== this.team) {
-      const opos = owner.group.position;
-      if (Math.hypot(opos.x - pos.x, opos.z - pos.z) < TK.victimAimDist) {
-        tx = opos.x;
-        tz = opos.z;
-        tvx = owner.vel.x;
-        tvz = owner.vel.z;
-      }
-    }
-    const d0 = Math.hypot(tx - pos.x, tz - pos.z);
+    const d0 = Math.hypot(op.x - pos.x, op.z - pos.z);
     const lead = Math.min(TK.aimLeadMax, d0 / Math.max(sld, 1));
-    let dx = aimDir ? aimDir.x : tx + tvx * lead - pos.x;
-    let dz = aimDir ? aimDir.z : tz + tvz * lead - pos.z;
+    let dx = aimDir ? aimDir.x : op.x + owner.vel.x * lead - pos.x;
+    let dz = aimDir ? aimDir.z : op.z + owner.vel.z * lead - pos.z;
     if (Math.hypot(dx, dz) < 0.01) {
       dx = this.facing.x;
       dz = this.facing.z;
