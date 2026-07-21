@@ -254,6 +254,7 @@ export class Player {
     this.diveDir = null;
     this.downT = 0;
     this.downDur = 0;
+    this.downTiltAmp = null;
     this._gotUp = false;
     this.challengeCd = 0;
     this.tackleT = 0;
@@ -356,16 +357,22 @@ export class Player {
       this.group.position.y = Math.sin(Math.PI * k) * A.jumpHeight;
       if (this.jumpT <= 0) this.group.position.y = 0;
     }
-    // Бросок корпусом (ласточка) и подъём: наклон фигуры вперёд по взгляду
-    // (порядок эйлера YXZ), после броска — лежим и встаём клипом getup
+    // Бросок корпусом (ласточка) и подъём: наклон фигуры по взгляду
+    // (порядок эйлера YXZ), после броска — лежим и встаём клипом getup.
+    // Подкат: клип Mixamo — стоячий выпад, поэтому скольжение рисуем сами —
+    // корпус откинут НАЗАД (ноги вперёд), после слайда сидим на газоне
     const DV = P.aerial.dive;
     let tilt = 0;
-    if (this.diveT > 0) {
+    if (this.tackleT > 0) {
+      const kIn = Math.min(1, (P.tackle.time - Math.max(0, this.tackleT)) / 0.15);
+      tilt = -P.tackle.slideTilt * kIn;
+    } else if (this.diveT > 0) {
       this.diveT -= dt;
       tilt = (1 - Math.max(0, this.diveT) / DV.time) * DV.tiltMax;
       if (this.diveT <= 0) {
         this.downT = DV.recover;
         this.downDur = DV.recover;
+        this.downTiltAmp = DV.tiltMax;
         this._gotUp = false;
       }
     } else if (this.downT > 0) {
@@ -375,7 +382,8 @@ export class Player {
         this._gotUp = true;
         this.playOneShot('getup', 1.4, 0);
       }
-      tilt = Math.min(1, k / 0.55) * DV.tiltMax; // поднимаемся вместе с getup
+      const amp = this.downTiltAmp != null ? this.downTiltAmp : DV.tiltMax;
+      tilt = Math.min(1, k / 0.55) * amp; // поднимаемся вместе с getup
     }
     this.group.rotation.x = tilt;
     if (this.mixer) {
@@ -1346,6 +1354,7 @@ export class Player {
   startFall(dur) {
     this.downT = dur;
     this.downDur = dur;
+    this.downTiltAmp = CONFIG.player.aerial.dive.tiltMax;
     this._gotUp = false;
     this.controlling = false;
     this.pendingStrike = null;
@@ -1368,14 +1377,29 @@ export class Player {
     const TK = CONFIG.player.tackle;
     const pos = this.group.position;
     const bp = ball.mesh.position;
-    // Без стика целимся с упреждением на время долёта слайда — по прямой
-    // в точку, где мяч БУДЕТ, а не где он был в момент нажатия
+    // Прицел без стика: владелец-соперник рядом — слайд В НЕГО (упреждённо):
+    // прицел «на мяч» обходил корпус дриблёра стороной, и грубый подкат
+    // сзади был невозможен (фидбек Олега). Чисто или грубо — решат контакты.
+    // Мяч свободен — упреждение на время долёта слайда по курсу мяча
     const run = Math.hypot(this.vel.x, this.vel.z);
     const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
-    const d0 = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    let tx = bp.x;
+    let tz = bp.z;
+    let tvx = ball.vel.x;
+    let tvz = ball.vel.z;
+    if (owner && owner.team !== this.team) {
+      const opos = owner.group.position;
+      if (Math.hypot(opos.x - pos.x, opos.z - pos.z) < TK.victimAimDist) {
+        tx = opos.x;
+        tz = opos.z;
+        tvx = owner.vel.x;
+        tvz = owner.vel.z;
+      }
+    }
+    const d0 = Math.hypot(tx - pos.x, tz - pos.z);
     const lead = Math.min(TK.aimLeadMax, d0 / Math.max(sld, 1));
-    let dx = aimDir ? aimDir.x : bp.x + ball.vel.x * lead - pos.x;
-    let dz = aimDir ? aimDir.z : bp.z + ball.vel.z * lead - pos.z;
+    let dx = aimDir ? aimDir.x : tx + tvx * lead - pos.x;
+    let dz = aimDir ? aimDir.z : tz + tvz * lead - pos.z;
     if (Math.hypot(dx, dz) < 0.01) {
       dx = this.facing.x;
       dz = this.facing.z;
@@ -1486,13 +1510,15 @@ export class Player {
       }
     }
 
-    // Слайд закончился: цена приёма — лежим (после чистого вскакиваем быстро)
+    // Слайд закончился: цена приёма — сидим на газоне (после чистого
+    // вскакиваем быстро). Наклон — назад, продолжение позы скольжения
     if (this.tackleT <= 0) {
       const rec = this.tackleFoul
         ? TK.recoverFoul
         : this.tackleHit ? TK.recoverHit : TK.recoverMiss;
       this.downT = rec;
       this.downDur = rec;
+      this.downTiltAmp = -TK.sitTilt;
       this._gotUp = false;
       this.tackleDir = null;
       this._tackleVictim = null;

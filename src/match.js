@@ -326,10 +326,20 @@ export class Match {
       }
     }
 
-    // Установленный мяч стандарта не сдвигают ни физика, ни чужие касания
+    // Установленный мяч стандарта не сдвигают ни физика, ни чужие касания.
+    // В замахе вбрасывания мяч живёт в руках над головой исполнителя
     if (this.state === 'restart' && this.restart && this.restart.phase !== 'dead') {
       const r = this.restart;
-      this.ball.mesh.position.set(r.x, CONFIG.ball.radius, r.z);
+      if (r.phase === 'throw' && r.pending) {
+        const tp = r.taker.group.position;
+        this.ball.mesh.position.set(
+          tp.x + r.pending.dir.x * 0.25,
+          CONFIG.restart.throwIn.releaseY,
+          tp.z + r.pending.dir.z * 0.25,
+        );
+      } else {
+        this.ball.mesh.position.set(r.x, CONFIG.ball.radius, r.z);
+      }
       this.ball.vel.set(0, 0, 0);
     }
 
@@ -617,6 +627,12 @@ export class Match {
   // Исполнитель: дойти до точки, встать, смотреть в поле (или по стику)
   updateTaker(p, dt) {
     const r = this.restart;
+    // Замах вбрасывания: стоим, корпус по направлению броска
+    if (r.phase === 'throw' && r.pending) {
+      p.aiUpdate(dt, { x: 0, z: 0 },
+        { face: Math.atan2(r.pending.dir.x, r.pending.dir.z) });
+      return;
+    }
     const stand = this._restartStand(r);
     const pos = p.group.position;
     const dx = stand.x - pos.x;
@@ -637,7 +653,7 @@ export class Match {
         face = Math.atan2(im.x, im.z);
       }
     }
-    p.aiUpdate(dt, move, { face, sprint: d > 6 });
+    p.aiUpdate(dt, move, { face, sprint: d > 2.5 }); // к точке — бегом, не прогулкой
   }
 
   // Жизнь стандарта: свисток → установка мяча → подход → исполнение.
@@ -646,6 +662,12 @@ export class Match {
     const R = CONFIG.restart;
     const r = this.restart;
     r.t += dt;
+
+    // Замах вбрасывания: клип уже идёт, мяч в руках — выпуск по таймеру
+    if (r.phase === 'throw') {
+      if (r.t >= R.throwIn.releaseDelay) this._releaseThrow(r);
+      return;
+    }
 
     // «Свисток»: мяч ещё докатывается за линией, потом встаёт на точку
     if (r.phase === 'dead') {
@@ -712,19 +734,29 @@ export class Match {
     this.state = 'play';
   }
 
-  // Физика броска руками: мяч из-за головы, лёгкая дуга, без подкрутки
-  _throwBall(taker, dir, power) {
-    const R = CONFIG.restart.throwIn;
-    const tp = taker.group.position;
+  // Замах вбрасывания: клип стартует СРАЗУ, мяч уходит из рук только через
+  // releaseDelay — раньше мяч вылетал до начала анимации (фидбек Олега)
+  _scheduleThrow(r, dir, power) {
     const dl = Math.hypot(dir.x, dir.z) || 1;
-    const nd = { x: dir.x / dl, z: dir.z / dl };
+    r.pending = { dir: { x: dir.x / dl, z: dir.z / dl }, power };
+    r.phase = 'throw';
+    r.t = 0;
+    r.taker.rot = Math.atan2(dir.x, dir.z);
+    r.taker.playOneShot('throwin', 1.15, 0.1);
+  }
+
+  // Выпуск мяча из рук (фаза throw по таймеру замаха)
+  _releaseThrow(r) {
+    const R = CONFIG.restart.throwIn;
+    const taker = r.taker;
+    const tp = taker.group.position;
+    const nd = r.pending.dir;
     this.ball.mesh.position.set(tp.x + nd.x * 0.35, R.releaseY, tp.z + nd.z * 0.35);
-    this.ball.strike(nd, power, R.lift);
+    this.ball.strike(nd, r.pending.power, R.lift);
     this.ball.spin = 0;
     this.ball.afterTouch = 0; // руками мяч в полёте не докручивают
-    taker.rot = Math.atan2(nd.x, nd.z);
     taker.kickCooldown = CONFIG.player.kickCooldown;
-    taker.playOneShot('throwin', 1.25, 0.35);
+    this._finishRestart();
   }
 
   executeThrowIn(r, type, charge, aim) {
@@ -736,16 +768,14 @@ export class Match {
       dir = { x: assist.dir.x, z: assist.dir.z };
       power = Math.min(assist.power, R.powerMax * 1.15); // руками сильнее не бросить
     }
-    this._throwBall(r.taker, dir, power);
-    this._finishRestart();
+    this._scheduleThrow(r, dir, power);
   }
 
   // Планшет: бросок по нарисованному направлению, длина жеста = сила
   executeThrowSwipe(r, swipe) {
     const R = CONFIG.restart.throwIn;
     const power = R.powerMin + (R.powerMax - R.powerMin) * Math.min(swipe.power, 1.3);
-    this._throwBall(r.taker, swipe.dir, power);
-    this._finishRestart();
+    this._scheduleThrow(r, swipe.dir, power);
   }
 
   // Угловой человека — обычная PES-машина навеса: полоска = адрес
@@ -789,21 +819,46 @@ export class Match {
 
     if (r.type === 'throwin') {
       const R = CONFIG.restart.throwIn;
-      const pass = team.choosePass(taker, this.ball);
+      const tp = taker.group.position;
+      // Адресный бросок ближнему СВОБОДНОМУ своему. choosePass не годится:
+      // он ценит продвижение вперёд и охотно бросал «в никуда» вдоль
+      // бровки (фидбек Олега) — руками важна точность, а не метры
+      let best = null;
+      let bestScore = -Infinity;
+      for (const mate of team.players) {
+        if (mate === taker || mate.isKeeper) continue;
+        const mp = mate.group.position;
+        const dist = Math.hypot(mp.x - tp.x, mp.z - tp.z);
+        if (dist < 3 || dist > R.aiMaxDist) continue;
+        if (Math.abs(mp.x) > F.length / 2 - 1 || Math.abs(mp.z) > F.width / 2 - 1) continue;
+        const score = freeSpace(mp.x, mp.z, team.opponents) * 3 +
+          team.side * (mp.x - tp.x) * 0.06 - dist * 0.1;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { mate, dist };
+        }
+      }
       let dir;
       let power;
-      if (pass) {
-        dir = pass.dir;
-        power = Math.min(pass.power, R.aiPowerMax);
-        team.commitPass(pass);
+      if (best) {
+        const mp = best.mate.group.position;
+        const t = best.dist / 10;
+        const txx = mp.x + best.mate.vel.x * t * 0.6;
+        const tzz = mp.z + best.mate.vel.z * t * 0.6;
+        const dl = Math.hypot(txx - tp.x, tzz - tp.z) || 1;
+        dir = { x: (txx - tp.x) / dl, z: (tzz - tp.z) / dl };
+        power = Math.max(R.powerMin, Math.min(R.aiPowerMax, best.dist * 0.85));
+        team.receiver = best.mate; // адресат бросается встречать
+        team.receiveTarget = { x: txx, z: tzz };
+        team.receiveTimer = CONFIG.ai.receiveGiveUp;
       } else {
+        // совсем никого в радиусе броска — коротко вперёд-внутрь
         const sz = Math.sign(r.z || 1);
         const dl = Math.hypot(team.side * 0.8, 0.6);
         dir = { x: (team.side * 0.8) / dl, z: (-sz * 0.6) / dl };
-        power = 12;
+        power = 10;
       }
-      this._throwBall(taker, dir, power);
-      this._finishRestart();
+      this._scheduleThrow(r, dir, power);
       return;
     }
 
