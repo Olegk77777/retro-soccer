@@ -1498,7 +1498,15 @@ export class Player {
         // Нога впереди корпуса — если мяч в досягаемости, она играет ПЕРВОЙ
         // (сзади мяч экранирован телом — туда нога не дотягивается)
         if (active && !this.tackleHit && !fromBehind &&
-            dBall < TK.ballReach * 1.15 && bp.y < TK.ballMaxY) {
+            dBall < TK.ballReach * 1.15 && bp.y < CONFIG.player.tackle.ballMaxY) {
+          knock();
+        }
+        // Мяч у ног сбитого соперника освобождается в сторону слайда — даже
+        // при сносе сзади (фидбек Олега: после отбора мяч оставался на месте).
+        // Соперник потерял контроль — мяч катится, куда шёл подкат
+        const opBall = Math.hypot(bp.x - op.x, bp.z - op.z);
+        if (!this.tackleHit && opBall < CONFIG.player.controlKeepRadius &&
+            bp.y < CONFIG.player.tackle.ballMaxY) {
           knock();
         }
         // Мяч заметно сбоку от корпуса жертвы — дотянуться можно и сзади-сбоку
