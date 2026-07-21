@@ -263,6 +263,7 @@ export class Player {
     this.tackleFoul = false;
     this.tackleCd = 0;
     this.tackleSpeed = 0;
+    this.slideRecover = false;
     this._tackleVictim = null;
     this.group.position.y = 0;
     this.group.rotation.x = 0;
@@ -363,9 +364,14 @@ export class Player {
     // корпус откинут НАЗАД (ноги вперёд), после слайда сидим на газоне
     const DV = P.aerial.dive;
     let tilt = 0;
-    if (this.tackleT > 0) {
-      const kIn = Math.min(1, (P.tackle.time - Math.max(0, this.tackleT)) / 0.15);
-      tilt = -P.tackle.slideTilt * kIn;
+    if (this.tackleT > 0 || this.slideRecover) {
+      // Подкат: наклон не трогаем — весь силуэт (скольжение + вставание)
+      // даёт сам клип `tackle`, который продолжает играть в фазе recover
+      tilt = 0;
+      if (this.tackleT <= 0 && this.downT > 0) {
+        this.downT -= dt;
+        if (this.downT <= 0) this.slideRecover = false;
+      }
     } else if (this.diveT > 0) {
       this.diveT -= dt;
       tilt = (1 - Math.max(0, this.diveT) / DV.time) * DV.tiltMax;
@@ -1355,6 +1361,7 @@ export class Player {
     this.downT = dur;
     this.downDur = dur;
     this.downTiltAmp = CONFIG.player.aerial.dive.tiltMax;
+    this.slideRecover = false;
     this._gotUp = false;
     this.controlling = false;
     this.pendingStrike = null;
@@ -1420,13 +1427,16 @@ export class Player {
     // Инерция: слайд с разгона летит дальше, с места — короткий (дух PES)
     const run = Math.hypot(this.vel.x, this.vel.z);
     this.tackleSpeed = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
+    this.slideRecover = false;
     this.rot = Math.atan2(dx, dz); // корпус — по слайду
     this.vel.x = this.tackleDir.x * this.tackleSpeed;
     this.vel.z = this.tackleDir.z * this.tackleSpeed;
     this.pendingStrike = null;
     this.strikeContactLock = false;
     this.cancelBallApproach();
-    this.playOneShot('tackle', 1.15, 0.1);
+    // Стартуем клип сразу с фазы скольжения (не с разбега) — иначе за
+    // короткий слайд виден только «выпад» стоя, а не сам подкат
+    this.playOneShot('tackle', TK.clipRate, TK.clipStart);
   }
 
   // Скольжение: контакт ноги с мячом выбивает его в 50/50 (владение НЕ
@@ -1510,16 +1520,15 @@ export class Player {
       }
     }
 
-    // Слайд закончился: цена приёма — сидим на газоне (после чистого
-    // вскакиваем быстро). Наклон — назад, продолжение позы скольжения
+    // Слайд закончился: игрок ещё «выключен» на recover, пока клип `tackle`
+    // доигрывает вставание (slideRecover — не путать с fallen-падением)
     if (this.tackleT <= 0) {
       const rec = this.tackleFoul
         ? TK.recoverFoul
         : this.tackleHit ? TK.recoverHit : TK.recoverMiss;
       this.downT = rec;
       this.downDur = rec;
-      this.downTiltAmp = -TK.sitTilt;
-      this._gotUp = false;
+      this.slideRecover = true;
       this.tackleDir = null;
       this._tackleVictim = null;
     }
