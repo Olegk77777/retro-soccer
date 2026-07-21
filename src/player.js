@@ -253,8 +253,16 @@ export class Player {
     this.diveT = 0;
     this.diveDir = null;
     this.downT = 0;
+    this.downDur = 0;
     this._gotUp = false;
     this.challengeCd = 0;
+    this.tackleT = 0;
+    this.tackleDir = null;
+    this.tackleHit = false;
+    this.tackleFoul = false;
+    this.tackleCd = 0;
+    this.tackleSpeed = 0;
+    this._tackleVictim = null;
     this.group.position.y = 0;
     this.group.rotation.x = 0;
     if (this.ai) {
@@ -357,11 +365,12 @@ export class Player {
       tilt = (1 - Math.max(0, this.diveT) / DV.time) * DV.tiltMax;
       if (this.diveT <= 0) {
         this.downT = DV.recover;
+        this.downDur = DV.recover;
         this._gotUp = false;
       }
     } else if (this.downT > 0) {
       this.downT -= dt;
-      const k = Math.max(0, this.downT) / DV.recover;
+      const k = Math.max(0, this.downT) / (this.downDur || DV.recover);
       if (k < 0.55 && !this._gotUp) {
         this._gotUp = true;
         this.playOneShot('getup', 1.4, 0);
@@ -411,10 +420,13 @@ export class Player {
 
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
     if (this.challengeCd > 0) this.challengeCd -= dt;
+    if (this.tackleCd > 0) this.tackleCd -= dt;
 
-    // Лежим после броска — не двигаемся; в броске — несёт по курсу ласточки
+    // Лежим после броска — не двигаемся; в броске — несёт по курсу ласточки;
+    // в подкате — скользим по слайду
     if (this.downT > 0) move = { x: 0, z: 0 };
     else if (this.diveT > 0 && this.diveDir) move = this.diveDir;
+    else if (this.tackleT > 0 && this.tackleDir) move = this.tackleDir;
 
     const sprinting = !!opts.sprint;
     const boostK = sprinting ? Math.min(1, dt * 12) : Math.min(1, dt / P.sprintInertia);
@@ -426,6 +438,11 @@ export class Player {
     // Кап скорости от мозга: сдерживающий защитник зеркалит темп владельца
     if (opts.speedCap != null) maxSpeed = Math.min(maxSpeed, opts.speedCap);
     if (this.diveT > 0) maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
+    if (this.tackleT > 0) {
+      const kT = Math.max(0, this.tackleT / P.tackle.time);
+      const sTop = this.tackleSpeed || P.tackle.speedMin;
+      maxSpeed = P.tackle.speedEnd + (sTop - P.tackle.speedEnd) * kT;
+    }
 
     let mvx = move.x;
     let mvz = move.z;
@@ -501,6 +518,8 @@ export class Player {
 
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
     if (this.challengeCd > 0) this.challengeCd -= dt;
+    if (this.tackleCd > 0) this.tackleCd -= dt;
+    this.updateTackle(dt, ball); // скольжение подката и его контакты
     const downed = this.downT > 0; // лежим после броска — ввод не работает
 
     // Замах удара, два режима (решение Олега, 17.07.2026):
@@ -591,6 +610,13 @@ export class Player {
       mvx = this.diveDir.x;
       mvz = this.diveDir.z;
       maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
+    } else if (this.tackleT > 0 && this.tackleDir) {
+      // Подкат: скользим по слайду с затуханием, руль отключён
+      mvx = this.tackleDir.x;
+      mvz = this.tackleDir.z;
+      const kT = Math.max(0, this.tackleT / P.tackle.time);
+      const sTop = this.tackleSpeed || P.tackle.speedMin;
+      maxSpeed = P.tackle.speedEnd + (sTop - P.tackle.speedEnd) * kT;
     }
 
     if (strikeRunLock) {
@@ -779,9 +805,20 @@ export class Player {
     // когда мяч войдёт в зону ноги (kickRadius). Так бьют с хода и с паса на ход.
     let pass = input.pass.consume();
     const through = input.through.consume();
-    const cross = input.consumeCross();
+    let cross = input.consumeCross();
     const shot = input.shot.consume();
     const swipe = input.consumeSwipe();
+
+    // Подкат (○ из PES, ресёрч 13): фронт нажатия НАВЕСА, когда мяч не у
+    // нашей команды. Полоска навеса гасится — лёжа не навешивают
+    if (input.consumeCrossPress() && !downed && this.diveT <= 0) {
+      const al = Math.hypot(input.move.x, input.move.z);
+      const aim = al > 0.3 ? { x: input.move.x / al, z: input.move.z / al } : null;
+      if (this.tryTackle(ball, aim)) {
+        input.cancelCross();
+        cross = null;
+      }
+    }
 
     // Борьба корпусом (ресёрч 12): кнопка ПАСА, когда мяч не у нас, —
     // навал плечом на владельца / оттеснение соперника под верховым мячом
@@ -794,7 +831,7 @@ export class Player {
     else if (shot !== null) strike = { type: 'shot', v: shot };
     else if (swipe !== null) strike = { type: 'swipe', v: swipe };
 
-    if (downed) strike = null; // лежим — замахи не копим
+    if (downed || this.tackleT > 0) strike = null; // лежим/в подкате — замахи не копим
 
     if (strike) {
       // Удар по летящему мячу живёт в буфере дольше обычного: жми D,
@@ -1304,6 +1341,165 @@ export class Player {
     this.playOneShot(contactY >= CONFIG.player.aerial.headerY ? 'header' : 'kick', 1.0, 0.05);
   }
 
+  // Снос: игрок сбит и лежит dur секунд (клип fallen), потом встаёт.
+  // Всё «горячее» гаснет — сбитый не доигрывает пас из положения лёжа
+  startFall(dur) {
+    this.downT = dur;
+    this.downDur = dur;
+    this._gotUp = false;
+    this.controlling = false;
+    this.pendingStrike = null;
+    this.strikeContactLock = false;
+    this.cancelBallApproach();
+    this.playOneShot('fallen', 1.2, 0.05);
+  }
+
+  // ===== Подкат (ресёрч 09/12/13: ○ в PES 5/6 — high risk / high reward) =====
+
+  // Вход человека: кнопка НАВЕСА, когда мяч не у нашей команды.
+  // Направление — стик, без стика — на мяч. true = подкат пошёл
+  tryTackle(ball, aimDir) {
+    const m = this.team && this.team.match;
+    if (this.tackleCd > 0 || this.tackleT > 0 || this.downT > 0 ||
+        this.diveT > 0 || this.kickCooldown > 0) return false;
+    if (m && m.state === 'restart') return false; // мёртвый мяч — свисток бы не дал
+    const owner = m ? m.toucher : null;
+    if (this.isToucher === true || (owner && owner.team === this.team)) return false;
+    const TK = CONFIG.player.tackle;
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+    // Без стика целимся с упреждением на время долёта слайда — по прямой
+    // в точку, где мяч БУДЕТ, а не где он был в момент нажатия
+    const run = Math.hypot(this.vel.x, this.vel.z);
+    const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
+    const d0 = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    const lead = Math.min(TK.aimLeadMax, d0 / Math.max(sld, 1));
+    let dx = aimDir ? aimDir.x : bp.x + ball.vel.x * lead - pos.x;
+    let dz = aimDir ? aimDir.z : bp.z + ball.vel.z * lead - pos.z;
+    if (Math.hypot(dx, dz) < 0.01) {
+      dx = this.facing.x;
+      dz = this.facing.z;
+    }
+    this.startTackle(dx, dz);
+    return true;
+  }
+
+  startTackle(dx, dz) {
+    const TK = CONFIG.player.tackle;
+    const dl = Math.hypot(dx, dz) || 1;
+    this.tackleT = TK.time;
+    this.tackleDir = { x: dx / dl, z: dz / dl };
+    this.tackleHit = false;
+    this.tackleFoul = false;
+    this.tackleCd = TK.cooldown;
+    this._tackleVictim = null;
+    // Инерция: слайд с разгона летит дальше, с места — короткий (дух PES)
+    const run = Math.hypot(this.vel.x, this.vel.z);
+    this.tackleSpeed = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
+    this.rot = Math.atan2(dx, dz); // корпус — по слайду
+    this.vel.x = this.tackleDir.x * this.tackleSpeed;
+    this.vel.z = this.tackleDir.z * this.tackleSpeed;
+    this.pendingStrike = null;
+    this.strikeContactLock = false;
+    this.cancelBallApproach();
+    this.playOneShot('tackle', 1.15, 0.1);
+  }
+
+  // Скольжение: контакт ноги с мячом выбивает его в 50/50 (владение НЕ
+  // телепортируется — принцип PES), контакт корпусом без выбитого мяча —
+  // грубый снос: жертва падает, сам потом лежишь дольше всех. Сзади мяч
+  // экранирован телом — чисто сыграть можно, только если он заметно сбоку.
+  // Вызывается раз в кадр (человек — из update, AI — из fieldplayer)
+  updateTackle(dt, ball) {
+    if (this.tackleT <= 0) return false;
+    const TK = CONFIG.player.tackle;
+    this.tackleT -= dt;
+
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+
+    // Активное окно ног (GFootball: кадры 5–28 слайда): в самом начале
+    // и на затухании ни отбора, ни сноса нет — только средняя фаза
+    const prog = 1 - Math.max(0, this.tackleT) / TK.time;
+    const active = prog >= TK.activeFrom && prog <= TK.activeTo;
+
+    // Выбивание: отскок с разбросом — подбор 50/50, владение не телепортируется
+    const knock = () => {
+      const spd = Math.hypot(this.vel.x, this.vel.z);
+      const a = ((Math.random() * 2 - 1) * TK.knockSpread * Math.PI) / 180;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      ball.strike(
+        {
+          x: this.tackleDir.x * ca - this.tackleDir.z * sa,
+          z: this.tackleDir.x * sa + this.tackleDir.z * ca,
+        },
+        TK.knockBase + spd * TK.knockRun,
+        TK.knockLift * (0.5 + Math.random()),
+      );
+      ball.afterTouch = 0; // выбитый мяч не докручивают
+      this.tackleHit = true;
+      this.kickCooldown = CONFIG.player.kickCooldown;
+    };
+
+    const dBall = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+
+    // Вытянутая нога достаёт мяч — выбить
+    if (active && !this.tackleHit && dBall < TK.ballReach && bp.y < TK.ballMaxY) knock();
+
+    // Столкновение с соперником (одна жертва за слайд)
+    const m = this.team && this.team.match;
+    if (m && active && !this._tackleVictim) {
+      for (const o of m.otherTeam(this.team).players) {
+        if (o.downT > 0) continue;
+        // Кипера с мячом в руках не сносим — это всегда свисток
+        if (o.isKeeper && o.ai && o.ai.holdT > 0) continue;
+        const op = o.group.position;
+        if (Math.hypot(op.x - pos.x, op.z - pos.z) > TK.bodyReach) continue;
+        this._tackleVictim = o;
+        o.vel.x += this.tackleDir.x * TK.victimPush;
+        o.vel.z += this.tackleDir.z * TK.victimPush;
+        const fromBehind =
+          this.tackleDir.x * o.facing.x + this.tackleDir.z * o.facing.z > TK.backCos;
+        // Мяч у ног владельца: пороги ноги и тела пересекаются в один кадр,
+        // и дискретность превращала бы честный подкат сбоку-в-мяч в снос.
+        // Нога впереди корпуса — если мяч в досягаемости, она играет ПЕРВОЙ
+        // (сзади мяч экранирован телом — туда нога не дотягивается)
+        if (active && !this.tackleHit && !fromBehind &&
+            dBall < TK.ballReach * 1.15 && bp.y < TK.ballMaxY) {
+          knock();
+        }
+        // Мяч заметно сбоку от корпуса жертвы — дотянуться можно и сзади-сбоку
+        const side = Math.abs(
+          o.facing.x * (bp.z - op.z) - o.facing.z * (bp.x - op.x));
+        if (this.tackleHit && (!fromBehind || side > TK.sideClear)) {
+          // Жёстко, но чисто: мяч уже выбит, соперник спотыкается об подкат
+          o.kickCooldown = Math.max(o.kickCooldown, TK.victimTrip);
+          o.controlling = false;
+          o.playOneShot('trip', 1.3, 0.1);
+        } else {
+          // Грубо: ноги вперёд в игрока (или сзади) — снос. Свисток — Фаза 5
+          o.startFall(TK.victimDown);
+          this.tackleFoul = true;
+        }
+        break;
+      }
+    }
+
+    // Слайд закончился: цена приёма — лежим (после чистого вскакиваем быстро)
+    if (this.tackleT <= 0) {
+      const rec = this.tackleFoul
+        ? TK.recoverFoul
+        : this.tackleHit ? TK.recoverHit : TK.recoverMiss;
+      this.downT = rec;
+      this.downDur = rec;
+      this._gotUp = false;
+      this.tackleDir = null;
+      this._tackleVictim = null;
+    }
+    return true;
+  }
+
   // Навал корпусом (ресёрч 12): кнопка паса, когда мяч не у нашей команды.
   // Сбоку/спереди у владельца — оттеснение и сбитое касание (мяч отскакивает,
   // окно отбора); под верховым мячом — оттеснение соперника от точки падения.
@@ -1314,8 +1510,10 @@ export class Player {
     const P = CONFIG.player;
     const team = this.team;
     const m = team && team.match;
-    // На мёртвом мяче (стандарт) толкаться нельзя — свисток бы не дал
-    if (!m || m.state === 'restart' || this.challengeCd > 0 || this.isToucher) return false;
+    // На мёртвом мяче (стандарт) толкаться нельзя — свисток бы не дал;
+    // в подкате руки заняты газоном
+    if (!m || m.state === 'restart' || this.challengeCd > 0 ||
+        this.tackleT > 0 || this.isToucher) return false;
     const owner = m.toucher;
     if (owner && owner.team === team) return false; // мяч у своих — это пас
     const pos = this.group.position;

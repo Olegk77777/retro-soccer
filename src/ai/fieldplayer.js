@@ -38,6 +38,13 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // В подкате: скольжение и контакты считает updateTackle, руль отключён
+  if (p.tackleT > 0) {
+    p.updateTackle(dt, ball);
+    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    return;
+  }
+
   // Стандарт (аут/угловой/от ворот): мяч мёртв. Соперники не давят точку —
   // держат дистанцию (дух правила 9,15 м); расстановка обеих команд дальше
   // живёт обычной логикой регионов, исполнителя ведёт Match
@@ -108,7 +115,7 @@ export function updateFieldPlayer(p, dt, ball) {
       // Первый защитник (pressure): свободный мяч догоняем, владеющего
       // соперника прессингуем по-PES — агрессивно в чужой половине,
       // сдерживанием (jockey) в своей
-      const r = pressBall(p, ball, match);
+      const r = pressBall(p, dt, ball, match);
       move = r.move;
       sprint = r.sprint;
       face = r.face;
@@ -185,7 +192,7 @@ export function updateFieldPlayer(p, dt, ball) {
 // (jockey): блок-точка между владельцем и воротами, скорость зеркалит
 // владельца, не выбрасываемся. Мяч отлетел от ноги (плохое касание) —
 // окно отбора: рывок в мяч. Отбор и случается на этой ошибке.
-function pressBall(p, ball, match) {
+function pressBall(p, dt, ball, match) {
   const AI = CONFIG.ai;
   const D = AI.defence;
   const P = CONFIG.player;
@@ -221,7 +228,26 @@ function pressBall(p, ball, match) {
   const op = owner.group.position;
   const badTouch = Math.hypot(bp.x - op.x, bp.z - op.z) > D.badTouchDist;
   if (badTouch) {
-    // Ошибка владельца — бросаемся в отбор
+    // Ошибка владельца — окно отбора. Из зоны досягаемости 90-е решают
+    // грубо: подкат в мяч (сбоку, никогда в спину — дух фолов PES)
+    const TKA = D.tackle;
+    if (p.tackleCd <= 0 && p.kickCooldown <= 0 && p.downT <= 0 && p.diveT <= 0 &&
+        bp.y < P.tackle.ballMaxY &&
+        myBallDist > TKA.rangeMin && myBallDist < TKA.range &&
+        Math.random() < TKA.ratePerSec * dt) {
+      // Упреждение на время долёта слайда — целим, где мяч БУДЕТ
+      const lead = Math.min(P.tackle.aimLeadMax, myBallDist / P.tackle.speedMin);
+      const dx = bp.x + ball.vel.x * lead - pos.x;
+      const dz = bp.z + ball.vel.z * lead - pos.z;
+      const dl = Math.hypot(dx, dz) || 1;
+      const behind =
+        (dx / dl) * owner.facing.x + (dz / dl) * owner.facing.z > P.tackle.backCos;
+      if (!behind) {
+        p.startTackle(dx, dz);
+        return { move: { x: 0, z: 0 }, sprint: false, face: null, speedCap: null };
+      }
+    }
+    // Иначе — обычный рывок в мяч
     return {
       move: pursuitBall(pos.x, pos.z, ball, P.speed),
       sprint: true,

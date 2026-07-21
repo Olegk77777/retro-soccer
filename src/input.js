@@ -70,6 +70,7 @@ export class Input {
     // окно «замаха ноги», где доп. тапы меняют тип навеса (×1 / ×2 / ×3)
     this._cross = { state: 'idle', charge: 0, taps: 0, timer: 0, prevHeld: false };
     this._crossEvent = null;
+    this._crossPressEdge = false; // фронт нажатия: в обороне это ПОДКАТ
 
     this.sprint = false; // E / ⚡ на таче / RB на геймпаде — мяч хуже контролируется
 
@@ -261,13 +262,21 @@ export class Input {
       }
       clearViz(); // жест закончен — след убираем сразу
       if (cancelled || (kind === 'shot' && !active)) return;
-      if (pts.length < 3) return;
+      if (pts.length < 2) {
+        // Тап без движения в правой зоне: в обороне это подкат (круг ПОДКАТ)
+        if (kind === 'cross') this._crossPressEdge = true;
+        return;
+      }
       const a = pts[0];
       const b = pts[pts.length - 1];
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
-      if (len < (kind === 'shot' ? 28 : 36)) return; // слишком короткий — не свайп
+      if (len < (kind === 'shot' ? 28 : 36)) {
+        // Короткий росчерк-тап — тоже подкат в обороне, не свайп
+        if (kind === 'cross') this._crossPressEdge = true;
+        return;
+      }
 
       // Сила: длина свайпа относительно трети экрана
       const power = Math.min(1.3, Math.max(0.2, len / (window.innerHeight * 0.35)));
@@ -377,6 +386,7 @@ export class Input {
     const c = this._cross;
     const justPressed = heldNow && !c.prevHeld;
     c.prevHeld = heldNow;
+    if (justPressed) this._crossPressEdge = true; // мгновенный смысл кнопки (подкат)
 
     const CT = CONFIG.player.chargeTime;
     const cap = CONFIG.player.chargeOverCap;
@@ -415,6 +425,24 @@ export class Input {
     const v = this._crossEvent;
     this._crossEvent = null;
     return v; // null или {charge: 0.15..1.3, taps: 1..3}
+  }
+
+  // Фронт нажатия кнопки навеса: в обороне это ПОДКАТ (исполняется по
+  // нажатию, как ○ в PES, — ждать отпускания полоски нельзя)
+  consumeCrossPress() {
+    const v = this._crossPressEdge;
+    this._crossPressEdge = false;
+    return v;
+  }
+
+  // Нажатие ушло в подкат — полоску навеса гасим, чтобы на отпускании
+  // не вылетел невольный навес из положения лёжа
+  cancelCross() {
+    const c = this._cross;
+    c.state = c.prevHeld ? 'blocked' : 'idle';
+    c.charge = 0;
+    c.taps = 0;
+    this._crossEvent = null;
   }
 
   // Кнопка действия уже обещает удар по мячу, даже если событие ещё не
