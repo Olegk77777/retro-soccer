@@ -327,8 +327,10 @@ export class Match {
     }
 
     // Установленный мяч стандарта не сдвигают ни физика, ни чужие касания.
-    // В замахе вбрасывания мяч живёт в руках над головой исполнителя
-    if (this.state === 'restart' && this.restart && this.restart.phase !== 'dead') {
+    // В замахе вбрасывания мяч живёт в руках над головой исполнителя.
+    // В фазе follow мяч уже выпущен и летит — его ведёт обычная физика
+    if (this.state === 'restart' && this.restart &&
+        this.restart.phase !== 'dead' && this.restart.phase !== 'follow') {
       const r = this.restart;
       if (r.phase === 'throw' && r.pending) {
         const tp = r.taker.group.position;
@@ -627,8 +629,8 @@ export class Match {
   // Исполнитель: дойти до точки, встать, смотреть в поле (или по стику)
   updateTaker(p, dt) {
     const r = this.restart;
-    // Замах вбрасывания: стоим, корпус по направлению броска
-    if (r.phase === 'throw' && r.pending) {
+    // Замах и follow-through вбрасывания: стоим, корпус по направлению броска
+    if ((r.phase === 'throw' || r.phase === 'follow') && r.pending) {
       p.aiUpdate(dt, { x: 0, z: 0 },
         { face: Math.atan2(r.pending.dir.x, r.pending.dir.z) });
       return;
@@ -666,6 +668,21 @@ export class Match {
     // Замах вбрасывания: клип уже идёт, мяч в руках — выпуск по таймеру
     if (r.phase === 'throw') {
       if (r.t >= R.throwIn.releaseDelay) this._releaseThrow(r);
+      return;
+    }
+
+    // Follow-through: мяч уже улетел, даём броску дойти, затем гасим клип
+    // (иначе играет хвост с шагами — «кидает невидимый мяч») и продолжаем игру
+    if (r.phase === 'follow') {
+      if (r.t >= R.throwIn.followTime) {
+        const taker = r.taker;
+        if (taker.oneShot) {
+          taker.oneShot.fadeOut(0.15);
+          taker.oneShot = null;
+          taker.currentName = null; // следующий кадр выберет run/idle
+        }
+        this._finishRestart();
+      }
       return;
     }
 
@@ -737,15 +754,18 @@ export class Match {
   // Замах вбрасывания: клип стартует СРАЗУ, мяч уходит из рук только через
   // releaseDelay — раньше мяч вылетал до начала анимации (фидбек Олега)
   _scheduleThrow(r, dir, power) {
+    const R = CONFIG.restart.throwIn;
     const dl = Math.hypot(dir.x, dir.z) || 1;
     r.pending = { dir: { x: dir.x / dl, z: dir.z / dl }, power };
     r.phase = 'throw';
     r.t = 0;
     r.taker.rot = Math.atan2(dir.x, dir.z);
-    r.taker.playOneShot('throwin', 1.15, 0.1);
+    // Клип стартует с фазы замаха — мяч уйдёт из рук ровно на броске (releaseDelay)
+    r.taker.playOneShot('throwin', R.clipRate, R.clipStart);
   }
 
-  // Выпуск мяча из рук (фаза throw по таймеру замаха)
+  // Выпуск мяча из рук (в момент броска в анимации). Не завершаем стандарт
+  // сразу — даём follow-through доиграть, потом гасим хвост клипа с шагами
   _releaseThrow(r) {
     const R = CONFIG.restart.throwIn;
     const taker = r.taker;
@@ -756,7 +776,8 @@ export class Match {
     this.ball.spin = 0;
     this.ball.afterTouch = 0; // руками мяч в полёте не докручивают
     taker.kickCooldown = CONFIG.player.kickCooldown;
-    this._finishRestart();
+    r.phase = 'follow';
+    r.t = 0;
   }
 
   executeThrowIn(r, type, charge, aim) {
