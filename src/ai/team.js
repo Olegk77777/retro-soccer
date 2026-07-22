@@ -37,6 +37,12 @@ export class Team {
     this.runnerTimer = 0;
     this._runCheckTimer = 0;
 
+    // Подключение крайнего защитника по бровке (overlap, ресёрч 14):
+    // отдельный слот — рывок снаружи, не конкурирует с runner
+    this.overlapper = null;
+    this.overlapTarget = null;
+    this.overlapTimer = 0;
+
     // Врывания в штрафную под навес: игрок → точка рывка (ближняя/дальняя/11 м)
     this.boxRuns = new Map();
     this.crossAir = 0; // сек: наша подача в полёте — рывки живут, врывание на прилёт
@@ -120,6 +126,15 @@ export class Team {
         this.runnerTarget = null;
       }
     }
+
+    // Подключение фулбека: живёт durationSec или пока не потеряли мяч
+    if (this.overlapper) {
+      this.overlapTimer -= dt;
+      if (this.overlapTimer <= 0 || !this.attacking) {
+        this.overlapper = null;
+        this.overlapTarget = null;
+      }
+    }
     if (this._runCheckTimer > 0) this._runCheckTimer -= dt;
     if (this._spotTimer > 0) this._spotTimer -= dt;
 
@@ -141,6 +156,8 @@ export class Team {
         this._runCheckTimer = CONFIG.ai.attack.runs.checkSec;
         this.tryStartRun(ball);
       }
+      // Мяч у широкого игрока — крайний защитник подключается по бровке
+      if (!this.overlapper) this.tryOverlap();
     }
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
@@ -208,8 +225,15 @@ export class Team {
   // ожидание под мячом). Он становится receiver и атакует прилёт.
   // Возвращает замыкающего (человеку туда передаётся курсор, как в PES).
   onCrossStruck(ball) {
-    const land = predictLanding(ball, CONFIG.player.aerial.contactY);
-    if (!land || land.t < 0.35) return null; // мгновенный прострел — не эпизод
+    // Точка прилёта: сперва на высоте замыкания; низовой прострел (мяч не
+    // поднимается до головы) считаем по колену — курсор нужен и там
+    // (фидбек Олега 22.07: на прострелах замыкающий не назначался вовсе)
+    let land = predictLanding(ball, CONFIG.player.aerial.contactY);
+    if (!land || land.t < 0.18) {
+      const low = predictLanding(ball, 0.4);
+      land = low && low.t >= 0.18 ? low : null;
+    }
+    if (!land) return null; // мгновенный тычок — не фланговый эпизод
     this.crossAir = land.t + 0.4;
 
     // Кандидаты: врывающиеся + вся атакующая шестёрка (позиции 5..10)
@@ -314,6 +338,61 @@ export class Team {
     this.runner = runner;
     this.runnerTarget = { x: tx, z: Math.max(-18, Math.min(18, rp.z * 0.6)) };
     this.runnerTimer = R.durationSec;
+  }
+
+  // Пас отдан — пасующий предлагает СТЕНОЧКУ (give-and-go, ресёрч 14):
+  // после короткого паса под прессингом рвануть за спину опекуну и получить
+  // мяч обратно на ход. Использует общий слот runner — choosePass уже умеет
+  // кормить бегущего с приоритетом (passBonus) и упреждением (leadRun),
+  // а человеку возврат кладёт пас на ход (W) с обычным ассистом.
+  tryFollowRun(passer, passDist) {
+    const C = CONFIG.ai.combo.oneTwo;
+    if (this.runner || !passer || passer.isKeeper) return;
+    if (passDist > C.maxPassDist) return;       // стеночка живёт на коротком пасе
+    const pp = passer.group.position;
+    if (this.side * pp.x < C.minX) return;      // не из своей глубины
+    // Рывок оправдан, когда пасующего встречали: прессер рядом
+    let oppD = Infinity;
+    for (const o of this.opponents) {
+      const op = o.group.position;
+      const d = Math.hypot(op.x - pp.x, op.z - pp.z);
+      if (d < oppD) oppD = d;
+    }
+    if (oppD > C.pressDist) return;
+    if (Math.random() > C.chance) return;       // не каждый пас — заготовка
+    const F = CONFIG.field;
+    let tx = pp.x + this.side * C.runDepth;
+    const maxDepth = F.length / 2 - 8;          // не в объятия вратаря
+    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
+    this.runner = passer;
+    this.runnerTarget = { x: tx, z: Math.max(-24, Math.min(24, pp.z * 0.85)) };
+    this.runnerTimer = C.ttl;
+  }
+
+  // Подключение крайнего защитника (overlap, ресёрч 14): мяч у широкого
+  // игрока на фланге в средней/чужой трети — фулбек того же фланга забегает
+  // СНАРУЖИ по бровке за линию мяча, растягивая оборону и открывая перевод
+  tryOverlap() {
+    const C = CONFIG.ai.combo.overlap;
+    const F = CONFIG.field;
+    const owner = this.match.toucher;
+    if (!owner || owner.team !== this || owner.isKeeper) return;
+    const op = owner.group.position;
+    if (Math.abs(op.z) < C.flankZ) return;      // мяч не на фланге
+    if (this.side * op.x < C.minX) return;      // рано подключаться
+    const fb = this.players[op.z < 0 ? 1 : 4];  // LB на левом (−z), RB на правом
+    if (!fb || fb === owner || fb === this.match.controlled ||
+        fb === this.runner || fb === this.receiver) return;
+    const fp = fb.group.position;
+    if (Math.hypot(fp.x - op.x, fp.z - op.z) > C.triggerDist) return;
+    if (this.side * (fp.x - op.x) > 2) return;  // фулбек уже глубже владельца
+    this.overlapper = fb;
+    this.overlapTarget = {
+      x: Math.max(-F.length / 2 + 6,
+        Math.min(F.length / 2 - 6, op.x + this.side * C.ahead)),
+      z: Math.sign(op.z) * (F.width / 2 - C.wideZ),
+    };
+    this.overlapTimer = C.durationSec;
   }
 
   // Высота линии защиты — считается ОТ МЯЧА (ресёрч 09: формула UvA/RoboCup):
@@ -508,9 +587,12 @@ export class Team {
       if (dist < AI.passMin || dist > AI.passMax) continue;
 
       // Упреждение: пас на ход бегущему, а не в точку, где он был.
-      // Раннеру за спину защиты мяч кладётся дальше в зону рывка (leadRun)
+      // Раннеру за спину защиты мяч кладётся дальше в зону рывка (leadRun),
+      // подключающемуся фулбеку — в коридор у бровки
       const isRunner = mate === this.runner;
-      const lead = isRunner ? CONFIG.ai.attack.runs.leadRun : 0.7;
+      const isOverlap = mate === this.overlapper;
+      const lead = isRunner ? CONFIG.ai.attack.runs.leadRun
+        : isOverlap ? CONFIG.ai.combo.overlap.leadRun : 0.7;
       const speed = Math.min(AI.passSpeedMax,
         Math.max(AI.passSpeedMin, dist * AI.passSpeedK + AI.passSpeedMin * 0.5));
       const t = dist / speed;
@@ -529,7 +611,8 @@ export class Team {
       const forward = this.side * (tx - fp.x);
       const score = forward + clearance * 1.5 +
         freeSpace(tx, tz, opponents) * 2 +
-        (isRunner ? CONFIG.ai.attack.runs.passBonus : 0) -
+        (isRunner ? CONFIG.ai.attack.runs.passBonus : 0) +
+        (isOverlap ? CONFIG.ai.combo.overlap.passBonus : 0) -
         dist * 0.08;
       if (score > bestScore) {
         bestScore = score;
@@ -546,8 +629,9 @@ export class Team {
     return best;
   }
 
-  // Зафиксировать пас: адресат бросается на мяч, тренер помнит назначение
-  commitPass(pass) {
+  // Зафиксировать пас: адресат бросается на мяч, тренер помнит назначение.
+  // from — пасующий: короткий пас под прессингом предлагает ему стеночку
+  commitPass(pass, from = null) {
     this.receiver = pass.mate;
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
@@ -555,6 +639,15 @@ export class Team {
       // Пас на рывок отдан — дальше раннер живёт как обычный приёмщик
       this.runner = null;
       this.runnerTarget = null;
+    }
+    if (this.overlapper === pass.mate) {
+      this.overlapper = null;
+      this.overlapTarget = null;
+    }
+    if (from) {
+      const fp = from.group.position;
+      this.tryFollowRun(from,
+        Math.hypot(pass.target.x - fp.x, pass.target.z - fp.z));
     }
   }
 }

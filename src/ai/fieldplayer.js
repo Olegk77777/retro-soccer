@@ -97,6 +97,15 @@ export function updateFieldPlayer(p, dt, ball) {
     }
   }
 
+  // Пас уже летит нашему адресату — остальные НЕ бросаются на мяч толпой:
+  // доверяем передаче (принцип PES), эпизод у мяча остаётся за receiver'ом.
+  // Соперники не в счёт — у них свой receiver (null) и погоня за перехватом
+  const passEnRoute = team.receiver && team.receiver !== p &&
+    team.receiveTimer > 0.3 &&
+    Math.hypot(ball.vel.x, ball.vel.z) > 3 &&
+    (ball.vel.x * (team.receiver.group.position.x - bp.x) +
+     ball.vel.z * (team.receiver.group.position.z - bp.z)) > 0;
+
   if (p.isToucher) {
     move = withBall(p, ball);
   } else {
@@ -104,14 +113,19 @@ export function updateFieldPlayer(p, dt, ball) {
     if (team.receiver === p && team.receiveTarget) {
       // Приём паса: бегу к точке адреса, у самой точки — навстречу мячу.
       // Верховой мяч (навес) — строго к точке прилёта: врывание на прилёт,
-      // погоня за тенью мяча увела бы с траектории
+      // погоня за тенью мяча увела бы с траектории.
+      // У точки — arrive вместо seek и стойка лицом к мячу: seek без радиуса
+      // прибытия дрожал на месте (фидбек Олега 22.07 «адресат дёргается»)
       const t = team.receiveTarget;
-      move = myBallDist < 6 && bp.y < 1.2
-        ? pursuitBall(pos.x, pos.z, ball, CONFIG.player.speed)
-        : seek(pos.x, pos.z, t.x, t.z);
-      sprint = myBallDist > AI.sprintDist ||
-        (bp.y > 1.2 && Math.hypot(t.x - pos.x, t.z - pos.z) > 2);
-    } else if (team.chaser === p && !mateHasBall) {
+      const dT = Math.hypot(t.x - pos.x, t.z - pos.z);
+      if (myBallDist < 6 && bp.y < 1.2) {
+        move = pursuitBall(pos.x, pos.z, ball, CONFIG.player.speed);
+      } else {
+        move = arrive(pos.x, pos.z, t.x, t.z, 1.6);
+        if (dT < 0.5) face = Math.atan2(bp.x - pos.x, bp.z - pos.z);
+      }
+      sprint = myBallDist > AI.sprintDist || (bp.y > 1.2 && dT > 2);
+    } else if (team.chaser === p && !mateHasBall && !passEnRoute) {
       // Первый защитник (pressure): свободный мяч догоняем, владеющего
       // соперника прессингуем по-PES — агрессивно в чужой половине,
       // сдерживанием (jockey) в своей
@@ -122,8 +136,14 @@ export function updateFieldPlayer(p, dt, ball) {
       speedCap = r.speedCap;
     } else if (team.runner === p && team.runnerTarget) {
       // Забегание за спину: спринт в зону за линией защиты — владелец
-      // увидит рывок и положит мяч на ход (приоритет в choosePass)
+      // увидит рывок и положит мяч на ход (приоритет в choosePass).
+      // Сюда же попадает стеночка: пасующий рвёт вперёд за возвратом
       move = seek(pos.x, pos.z, team.runnerTarget.x, team.runnerTarget.z);
+      sprint = true;
+    } else if (team.overlapper === p && team.overlapTarget) {
+      // Подключение по бровке (overlap): фулбек спринтует снаружи за линию
+      // мяча — растяжка обороны, адресат для паса в коридор (ресёрч 14)
+      move = seek(pos.x, pos.z, team.overlapTarget.x, team.overlapTarget.z);
       sprint = true;
     } else if (team.boxRuns.get(p)) {
       // Врывание в штрафную под навес: рывком на штангу / 11 метров
@@ -330,7 +350,7 @@ function withBall(p, ball) {
       const pass = team.choosePass(p, ball);
       if (pass) {
         p.aiKick(ball, pass.dir, pass.power, pass.lift);
-        team.commitPass(pass);
+        team.commitPass(pass, p); // короткий пас под прессингом → стеночка
         p.ai.dribDir = null;
         return { x: 0, z: 0 };
       }

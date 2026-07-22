@@ -10,6 +10,13 @@ import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace } from './ai/steering.js';
+import { playWhistle } from './sfx.js';
+
+// Плавная кривая 0..1 (smoothstep): кино-движение камеры интро без рывков
+function smooth01(t) {
+  const k = Math.max(0, Math.min(1, t));
+  return k * k * (3 - 2 * k);
+}
 
 function createControlledMarker() {
   const starPath = (tipRadius, notchRadius, clockwise = false) => {
@@ -115,6 +122,12 @@ export class Match {
     this.hud.away.textContent = teamsData[1].short;
     this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';
     this._keeperHintShown = false;
+    this._tempHint = false;
+
+    // ТВ-заставка: параметрическая камера интро ({pos, look, mix, fading})
+    this.introCam = null;
+    this.introPhase = null;
+    this.introT = 0;
     this._hudCache = '';
     this._phase = ''; // фаза для контекстных тач-кнопок (атака/оборона)
 
@@ -124,6 +137,7 @@ export class Match {
     }
 
     this.kickoff(0);
+    this.startIntro(); // премьера матча — ТВ-заставка с крупного плана мяча
   }
 
   get allPlayers() {
@@ -153,6 +167,8 @@ export class Match {
       team.marks.clear();
       team.runner = null;
       team.runnerTarget = null;
+      team.overlapper = null;
+      team.overlapTarget = null;
       team.bestSpot = null;
       team.boxRuns.clear();
       team.crossAir = 0;
@@ -178,6 +194,128 @@ export class Match {
 
     // Человеку — ближнего к мячу полевого игрока
     this.setControlled(this.nearestFieldPlayer(this.humanTeam), 0);
+  }
+
+  // ===== ТВ-заставка перед матчем (22.07.2026) =====
+  // Крупный план Tricolore на центральной точке → свисток → камера медленно
+  // отлетает и показывает пару нападающих → ПАС (любая кнопка действия)
+  // разыгрывает с центра, камера доезжает в игровое положение уже по живой
+  // игре. Кадры и тайминги — CONFIG.intro; расстановка уже сделана kickoff().
+  startIntro() {
+    this.state = 'intro';
+    this.stateTimer = 0;
+    this.introPhase = 'ball';
+    this.introT = 0;
+    this._introWhistled = false;
+    this.introCam = {
+      pos: new THREE.Vector3(),
+      look: new THREE.Vector3(),
+      mix: 1,
+      fading: false,
+    };
+    this.controlledMarker.visible = false; // звезда не мельтешит в кино-кадре
+    this._setTempHint('');
+  }
+
+  updateIntro(dt) {
+    const I = CONFIG.intro;
+    this.introT += dt;
+    const s = this.teams[this.kickoffTeam].side; // кадры зеркалятся под сторону
+
+    // Игроки стоят по местам и «дышат» (idle, вратарь — своей стойкой),
+    // мяч мёртв на центральной точке
+    for (const p of this._all) p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    this.ball.mesh.position.set(0, CONFIG.ball.radius, 0);
+    this.ball.vel.set(0, 0, 0);
+
+    // Гасим шальные события ввода; любая кнопка действия = «начали!»
+    this.input.consumeSwitch();
+    const start =
+      this.input.pass.consume() !== null ||
+      this.input.through.consume() !== null ||
+      this.input.shot.consume() !== null ||
+      !!this.input.consumeCross() ||
+      !!this.input.consumeSwipe();
+    if (start) {
+      this.beginIntroKickoff();
+      return;
+    }
+
+    const cam = this.introCam;
+    const A = I.closeA;
+    const B = I.closeB;
+    if (this.introPhase === 'ball') {
+      // Крупный план: медленный облёт вокруг Tricolore-98
+      const k = smooth01(this.introT / I.ballTime);
+      cam.pos.set(
+        (A.x + (B.x - A.x) * k) * s,
+        A.y + (B.y - A.y) * k,
+        A.z + (B.z - A.z) * k,
+      );
+      cam.look.set(0, I.closeLookY, 0);
+      if (this.introT >= I.ballTime) {
+        this.introPhase = 'pull';
+        this.introT = 0;
+        this._introWhistled = playWhistle(); // свисток — и камера пошла назад
+      }
+    } else if (this.introPhase === 'pull') {
+      // Отлёт: от мяча к общему плану с парой нападающих у центра
+      const k = smooth01(this.introT / I.pullTime);
+      cam.pos.set(
+        (B.x + (I.mid.x - B.x) * k) * s,
+        B.y + (I.mid.y - B.y) * k,
+        B.z + (I.mid.z - B.z) * k,
+      );
+      cam.look.set(
+        I.midLook.x * s * k,
+        I.closeLookY + (I.midLook.y - I.closeLookY) * k,
+        I.midLook.z * k,
+      );
+      if (this.introT >= I.pullTime) {
+        this.introPhase = 'wait';
+        this.introT = 0;
+        if (this.teams[this.kickoffTeam] === this.humanTeam) {
+          this._setTempHint('ПАС (S / кнопка ПАС) — разыграть с центра');
+        }
+      }
+    } else {
+      // Ожидание розыгрыша: лёгкое «дыхание» камеры, как у живого оператора
+      const b = Math.sin(this.introT * 0.7) * I.breath;
+      cam.pos.set(I.mid.x * s + b * 0.6, I.mid.y + b * 0.35, I.mid.z);
+      cam.look.set(I.midLook.x * s, I.midLook.y, I.midLook.z);
+      const humanKick = this.teams[this.kickoffTeam] === this.humanTeam;
+      if (!humanKick && this.introT >= I.aiWait) this.beginIntroKickoff();
+    }
+  }
+
+  // Розыгрыш из заставки: первый нападающий катит второму, камера доезжает
+  // в игровую позицию плавным вытеснением (introCam.mix тает в update)
+  beginIntroKickoff() {
+    this._restoreHint();
+    this.controlledMarker.visible = true;
+    this.introCam.fading = true;
+    // Свисток мог молчать до первого жеста (автоплей) — добираем его сейчас
+    if (!this._introWhistled) this._introWhistled = playWhistle(0.55);
+    const kt = this.teams[this.kickoffTeam];
+    if (kt === this.humanTeam) {
+      const st1 = kt.players[9];
+      const st2 = kt.players[10];
+      const p1 = st1.group.position;
+      const p2 = st2.group.position;
+      const d = Math.hypot(p2.x - p1.x, p2.z - p1.z) || 1;
+      const dir = { x: (p2.x - p1.x) / d, z: (p2.z - p1.z) / d };
+      st1.aiKick(this.ball, dir, Math.max(8, d * 1.35), 0, 0,
+        { name: 'kick', ts: 1.5, at: 0.2 });
+      kt.receiver = st2;
+      kt.receiveTarget = { x: p2.x, z: p2.z };
+      kt.receiveTimer = CONFIG.ai.receiveGiveUp;
+      this.setControlled(st2, 0.5);
+      this.state = 'play';
+    } else {
+      // Чужой розыгрыш: обычная логика кикоффа, AI пасанёт на ближайшем такте
+      this.state = 'kickoff';
+      this.stateTimer = CONFIG.match.kickoffDelay + 0.01;
+    }
   }
 
   nearestFieldPlayer(team, except = null) {
@@ -264,6 +402,18 @@ export class Match {
       if (this.flashTimer <= 0) this.hud.flash.classList.remove('show');
     }
 
+    // Хвост ТВ-заставки: интро-камера дотаивает уже по живой игре (mix 1→0),
+    // затем руль полностью у обычной ТВ-логики в main.js
+    if (this.introCam && this.introCam.fading) {
+      this.introCam.mix -= dt / CONFIG.intro.goTime;
+      if (this.introCam.mix <= 0) this.introCam = null;
+    }
+    if (this.state === 'intro') {
+      this.updateIntro(dt);
+      this.updateHUD();
+      return;
+    }
+
     // Игровые часы: 90 минут сжаты в realMinutes реальных.
     // На стандартах время идёт — как в настоящей трансляции
     if (this.state === 'kickoff' || this.state === 'play' || this.state === 'restart') {
@@ -284,6 +434,7 @@ export class Match {
       this.flashTimer = 0;
       this.goals.reset();
       this.kickoff(1 - this.kickoffTeam);
+      this.startIntro(); // новый матч — снова ТВ-заставка
     }
 
     // Розыгрыш AI с центра: выдержал паузу — отдал пас
@@ -294,7 +445,7 @@ export class Match {
         const pass = kt.choosePass(st, this.ball);
         if (pass) {
           st.aiKick(this.ball, pass.dir, pass.power, pass.lift);
-          kt.commitPass(pass);
+          kt.commitPass(pass, st);
         } else {
           st.aiKick(this.ball, { x: -kt.side * 0.5, z: 0.86 }, 12, 0.5);
         }
@@ -425,6 +576,11 @@ export class Match {
     }
     if (this.switchCd > 0) return;
 
+    // Пас или подача летит выбранному адресату (в т.ч. замыкающему навеса),
+    // а мяча ещё никто не коснулся — курсор НЕ крадём: «ближний к тени мяча»
+    // в полёте не главный (фидбек Олега 22.07: терялся курсор замыкающего)
+    if (team.receiver === this.controlled && team.receiveTimer > 0 && !this.toucher) return;
+
     // Партнёр взял мяч — управление к нему (как после паса в PES)
     if (this.toucher && this.toucher.team === team &&
         !this.toucher.isKeeper && this.toucher !== this.controlled) {
@@ -494,6 +650,9 @@ export class Match {
     team.receiver = best.mate;
     team.receiveTarget = { x: tx, z: tz };
     team.receiveTimer = CONFIG.ai.receiveGiveUp;
+    // Пас под прессингом — пасующий предлагает стеночку: сам рвёт вперёд,
+    // возврат на ход (W) завершает «раз-два» (ресёрч 14)
+    team.tryFollowRun(player, best.dist);
 
     return { dir: new THREE.Vector3((tx - pos.x) / d, 0, (tz - pos.z) / d), power: outPower };
   }
@@ -565,6 +724,8 @@ export class Match {
       t.receiveTarget = null;
       t.runner = null;
       t.runnerTarget = null;
+      t.overlapper = null;
+      t.overlapTarget = null;
       t.crossAir = 0;
       t.boxRuns.clear();
     }
@@ -928,7 +1089,7 @@ export class Match {
     if (pass) {
       taker.aiKick(this.ball, pass.dir, pass.power, pass.lift, 0,
         { name: 'kick', ts: 1.4, at: 0.18 });
-      team.commitPass(pass);
+      team.commitPass(pass, taker);
     } else {
       const zs = Math.sign(r.z || 1);
       const dl = Math.hypot(team.side, zs * 0.5);
@@ -973,9 +1134,8 @@ export class Match {
     if (human) {
       // Пока мяч в руках — управление на вратаре: человек целится и выбирает
       if (this.controlled !== p) this.setControlled(p, 0);
-      if (!this._keeperHintShown && this.hud.hint) {
-        this.hud.hint.textContent =
-          'ВРАТАРЬ ЗАБРАЛ МЯЧ: УДАР — ВЫБИТЬ НОГОЙ · ПАС — БРОСОК РУКОЙ · сам вынесет через 6 сек';
+      if (!this._keeperHintShown) {
+        this._setTempHint('ВРАТАРЬ ЗАБРАЛ МЯЧ: УДАР — ВЫБИТЬ НОГОЙ · ПАС — БРОСОК РУКОЙ · сам вынесет через 6 сек');
         this._keeperHintShown = true;
       }
       const pass = this.input.pass.consume();
@@ -1075,11 +1235,15 @@ export class Match {
     }
   }
 
-  // Вернуть постоянную строку-подсказку после временной подмены на вратарскую
+  // Временная строка-подсказка (вратарь с мячом, интро) вместо постоянной
+  _setTempHint(text) {
+    if (this.hud.hint) this.hud.hint.textContent = text;
+    this._tempHint = true;
+  }
+
   _restoreHint() {
-    if (this._keeperHintShown && this.hud.hint) {
-      this.hud.hint.innerHTML = this._hintHTML;
-    }
+    if (this._tempHint && this.hud.hint) this.hud.hint.innerHTML = this._hintHTML;
+    this._tempHint = false;
     this._keeperHintShown = false;
   }
 

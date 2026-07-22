@@ -139,7 +139,14 @@ canvas.addEventListener('webglcontextlost', (e) => {
 // --- Игровой цикл ---
 const camPos = new THREE.Vector3();
 const camLook = new THREE.Vector3(0, 1, 0);
+const camLookTarget = new THREE.Vector3();
 const clock = new THREE.Clock();
+
+// Плавная кривая 0..1 для выхода из ТВ-заставки (копия smooth01 из match.js)
+function smooth01(t) {
+  const k = Math.max(0, Math.min(1, t));
+  return k * k * (3 - 2 * k);
+}
 
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 30); // защита от рывка после сворачивания вкладки
@@ -174,8 +181,18 @@ function frame() {
     C.height - C.farLower * far01,
     C.distance - C.farApproach * far01,
   );
-  camera.position.lerp(camPos, C.lerp * 60 * dt);
-  camLook.lerp(new THREE.Vector3(bx * 0.8, C.lookHeight, bz * C.followZ), C.lerp * 60 * dt);
+  camLookTarget.set(bx * 0.8, C.lookHeight, bz * C.followZ);
+  const ic = match && match.introCam;
+  if (ic) {
+    // ТВ-заставка: камеру ведёт параметрический путь интро; на выходе
+    // (mix 1→0) кадр плавно перетекает в живую игровую ТВ-камеру
+    const k = smooth01(ic.mix);
+    camera.position.lerpVectors(camPos, ic.pos, k);
+    camLook.lerpVectors(camLookTarget, ic.look, k);
+  } else {
+    camera.position.lerp(camPos, C.lerp * 60 * dt);
+    camLook.lerp(camLookTarget, C.lerp * 60 * dt);
+  }
   camera.lookAt(camLook);
 
   if (NO_CRT) renderer.render(scene, camera);
