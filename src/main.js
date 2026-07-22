@@ -142,6 +142,13 @@ const camLook = new THREE.Vector3(0, 1, 0);
 const camLookTarget = new THREE.Vector3();
 const clock = new THREE.Clock();
 
+// Сглаженные позиция и скорость мяча ДЛЯ КАМЕРЫ (фидбек Олега 22.07: «дёрганная»).
+// Сырые ball.pos/ball.vel скачут на каждом касании/отскоке — камера рвала кадр.
+// Низкочастотный фильтр даёт плавную цель слежения и упреждения.
+const camBallPos = new THREE.Vector3();
+const camBallVel = new THREE.Vector3();
+let camInit = false;
+
 // Плавная кривая 0..1 для выхода из ТВ-заставки (копия smooth01 из match.js)
 function smooth01(t) {
   const k = Math.max(0, Math.min(1, t));
@@ -174,12 +181,27 @@ function frame() {
   // бровке (дальний игрок не мельчает) и в финальную треть (атака крупнее).
   const C = CONFIG.camera;
   const F = CONFIG.field;
-  const bx = ball.mesh.position.x;
-  const bz = ball.mesh.position.z;
-  const ballSpeed = Math.hypot(ball.vel.x, ball.vel.z);
-  // Упреждение: фокус-точка смещена туда, куда мяч летит (панорама дышит)
-  const leadX = Math.max(-C.leadMax, Math.min(C.leadMax, ball.vel.x * C.lead));
-  const leadZ = Math.max(-C.leadMax * 0.6, Math.min(C.leadMax * 0.6, ball.vel.z * C.lead * 0.6));
+
+  // Низкочастотный фильтр позиции и скорости мяча: убирает дрожь от касаний
+  // и отскоков, из-за которой камера дёргалась (фидбек Олега 22.07).
+  if (!camInit) {
+    camBallPos.copy(ball.mesh.position);
+    camBallVel.copy(ball.vel);
+    camInit = true;
+  } else {
+    const posK = Math.min(1, C.followSmooth * dt);
+    const velK = Math.min(1, C.leadSmooth * dt);
+    camBallPos.x += (ball.mesh.position.x - camBallPos.x) * posK;
+    camBallPos.z += (ball.mesh.position.z - camBallPos.z) * posK;
+    camBallVel.x += (ball.vel.x - camBallVel.x) * velK;
+    camBallVel.z += (ball.vel.z - camBallVel.z) * velK;
+  }
+  const bx = camBallPos.x;
+  const bz = camBallPos.z;
+  const ballSpeed = Math.hypot(camBallVel.x, camBallVel.z);
+  // Упреждение: фокус-точка смещена туда, куда мяч летит (по сглаженной скорости)
+  const leadX = Math.max(-C.leadMax, Math.min(C.leadMax, camBallVel.x * C.lead));
+  const leadZ = Math.max(-C.leadMax * 0.6, Math.min(C.leadMax * 0.6, camBallVel.z * C.lead * 0.6));
   const fx = bx + leadX;
   const fz = bz + leadZ;
   const far01 = Math.min(1, Math.max(0, -bz / (F.width / 2)));
