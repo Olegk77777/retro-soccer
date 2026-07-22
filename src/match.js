@@ -549,6 +549,26 @@ export class Match {
         touch = p;
       }
     }
+    // Мяч, оттолкнутый на спринте своим ведущим, не «свободен»: пока жив
+    // эпизод владения и ведущий остаётся ближайшим к мячу в пределах
+    // dribbleReclaim, он сохраняет владение. Иначе авто-переключение отдавало
+    // курсор партнёру, ближе к оттолкнутому мячу, а ведущий «убегал» без
+    // курсора (фидбек Олега 22.07: убегание при ведении по диагонали)
+    if (!best && lowBall) {
+      let epi = null;
+      let epiD = Infinity;
+      let anyD = Infinity;
+      for (const p of this._all) {
+        const d = distToBall(p, this.ball);
+        if (d < anyD) anyD = d;
+        if (p.ownEpisodeT > 0 && d < epiD) {
+          epiD = d;
+          epi = p;
+        }
+      }
+      if (epi && epiD < P.dribbleReclaim && epiD <= anyD + 0.15) best = epi;
+    }
+
     // Кипер с мячом в руках — безусловный владелец (мяч на высоте рук,
     // обычный радиус-арбитраж его не видит)
     for (const team of this.teams) {
