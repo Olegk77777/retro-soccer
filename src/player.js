@@ -638,6 +638,29 @@ export class Player {
       }
     }
 
+    // Врывание на прилёт навеса (человек-замыкающий): игра назначила этого
+    // игрока замыкающим под ЛЕТЯЩУЮ подачу — ноги сами бегут к точке прилёта,
+    // а стик до удара работает прицелом и НЕ уводит от мяча. Так это в PES:
+    // курсор на врывающемся, человек доправляет позицию и жмёт замыкание
+    // (фидбек Олега 22.07: замыкающий убегал по стику при выборе направления).
+    let crossReceiveMove = null;
+    const rcvTeam = this.team;
+    if (rcvTeam && rcvTeam.receiver === this && rcvTeam.crossAir > 0 &&
+        !this.pendingStrike && !downed && this.diveT <= 0 && !brake &&
+        this.kickCooldown <= 0) {
+      const land = predictLanding(ball, P.aerial.contactY);
+      const tgt = land || rcvTeam.receiveTarget;
+      if (tgt) {
+        const dcx = tgt.x - pos.x;
+        const dcz = tgt.z - pos.z;
+        const dc = Math.hypot(dcx, dcz);
+        if (dc > APP.strikeHoldRadius) {
+          crossReceiveMove = { x: dcx / dc, z: dcz / dc };
+          if (dc > 2) sprinting = true; // ещё далеко от точки — врываемся на скорости
+        }
+      }
+    }
+
     // Инерция спринта (фидбек Олега): включается быстро, спадает плавно.
     // Отпустил ⚡/E — темп ещё живёт ~секунду: можно отпустить спринт
     // и тут же пробить с лёта на скорости
@@ -716,7 +739,14 @@ export class Player {
       mvz = approachMove.z;
     }
 
-    const k = Math.min(1, dt * ((approachMove || strikeMove) ? APP.accel : P.accel));
+    // Врывание замыкающего под навес — ниже latch/удара по приоритету, но
+    // выше бокового стика: пока удар не нажат, ноги идут к точке прилёта
+    if (crossReceiveMove && !this.pendingStrike && !approachMove && !strikeMove) {
+      mvx = crossReceiveMove.x;
+      mvz = crossReceiveMove.z;
+    }
+
+    const k = Math.min(1, dt * ((approachMove || strikeMove || crossReceiveMove) ? APP.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
