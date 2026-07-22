@@ -1288,17 +1288,32 @@ export class Player {
     if (!team) return false;
     const pos = this.group.position;
 
-    // Направление намерения: стик/жест в момент исполнения, иначе взгляд
-    let fx = this.facing.x;
-    let fz = this.facing.z;
+    // Направление намерения: стик/жест в момент исполнения. БЕЗ стика — не
+    // взгляд (вингер вдоль бровки смотрит по линии и не видит центр штрафной,
+    // фидбек Олега 22.07: «нужна помощь в направлении»), а ВПЕРЁД к чужим
+    // воротам — туда, где обычно ждут адресаты заброса.
+    let fx;
+    let fz;
     const il = aimMove ? Math.hypot(aimMove.x, aimMove.z) : 0;
     if (il > 0.3) {
       fx = aimMove.x / il;
       fz = aimMove.z / il;
+    } else {
+      const atk = team.attackGoalX >= 0 ? 1 : -1;
+      // Смешиваем «вперёд к воротам» с текущим взглядом — заброс идёт в атаку,
+      // но с уклоном в сторону, куда развёрнут корпус
+      let bx = atk * 0.85 + this.facing.x * 0.15;
+      let bz = this.facing.z * 0.15;
+      const bl = Math.hypot(bx, bz) || 1;
+      fx = bx / bl;
+      fz = bz / bl;
     }
 
     // Полоска = дальность адресата: короткий замах — ближний, полный — дальний
     const want = LP.wantNear + (LP.wantFar - LP.wantNear) * Math.min(charge, 1);
+    // Помощь в направлении: конус расширяется слайдером «Помощь в пасах»
+    const passAssist = CONFIG.ai.humanPass.assist;
+    const coneCos = LP.coneCos - passAssist.level * LP.coneWiden;
     let best = null;
     let bestScore = -Infinity;
     for (const mate of team.players) {
@@ -1309,8 +1324,10 @@ export class Player {
       const d = Math.hypot(ddx, ddz);
       if (d < LP.minDist || d > LP.maxDist) continue;
       const cos = (ddx * fx + ddz * fz) / d;
-      if (cos < LP.coneCos) continue;
-      const score = cos * 20 - Math.abs(d - want) * 0.55;
+      if (cos < coneCos) continue;
+      // Ценим направление, близость к заказанной дальности и продвижение вперёд
+      const fwd = (team.attackGoalX >= 0 ? 1 : -1) * ddx;
+      const score = cos * 20 - Math.abs(d - want) * 0.55 + fwd * 0.15;
       if (score > bestScore) {
         bestScore = score;
         best = { mate, dist: d };
@@ -1549,7 +1566,13 @@ export class Player {
         this.jumpT = A.jumpTime;
       }
     }
-    const goalX = (f.x >= 0 ? 1 : -1) * (F.length / 2);
+    // Замыкание (голова / с лёта) ВСЕГДА наводится на ЧУЖИЕ ворота, а не летит
+    // по корпусу: врывающийся под прострел встречает мяч боком/спиной к воротам,
+    // и удар «по взгляду» уходил в сторону или назад (фидбек Олега 22.07:
+    // «отскочило в другую сторону от ворот»). Ворота берём от команды.
+    const goalX = (opts.aerial && this.team)
+      ? this.team.attackGoalX
+      : (f.x >= 0 ? 1 : -1) * (F.length / 2);
     const toGoal = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
     const dist = toGoal.length();
     const angle = f.angleTo(toGoal.normalize()) * (180 / Math.PI);
@@ -1558,10 +1581,19 @@ export class Player {
     // остаётся свободным выносом, а не «ассистом в свой угол» (автогол)
     const aimOk = !this.team || goalX === this.team.attackGoalX;
 
-    if (aimOk && angle < S.assistAngle && dist < S.assistDist && dist > 3 && Math.abs(f.x) > 0.1) {
+    // Замыкание идёт по прицельной ветке ВСЕГДА (наводится на ворота), даже
+    // если корпус смотрит вбок — иначе кивок/удар с лёта улетал «в поле».
+    // Обычный удар (не aerial) прицеливается только в конусе к воротам.
+    const useAim = aimOk && dist > 2.5 &&
+      (opts.aerial || (angle < S.assistAngle && dist < S.assistDist && Math.abs(f.x) > 0.1));
+
+    if (useAim) {
       // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
-      // Стрелки сдвигают её; за штангу — можно, промах реален.
-      const baseZ = bp.z + (f.z / f.x) * (goalX - bp.x);
+      // Стрелки сдвигают её; за штангу — можно, промах реален. Замыкание боком
+      // к воротам взгляда не имеет — целим в центр створа, стрелки уводят в угол.
+      const baseZ = opts.aerial
+        ? 0
+        : bp.z + (f.z / f.x) * (goalX - bp.x);
       const aimZ = gesture ? 0 : (input.shotAim ? input.shotAim.z : 0);
       const maxZ = G.width / 2 + S.aimSlack;
       let targetZ = Math.max(-maxZ, Math.min(maxZ, baseZ)) + aimZ * S.aimRange;
@@ -1605,6 +1637,14 @@ export class Player {
       ball.vel.set(dir.x * power, vy, dir.z * power);
       ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
       ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
+    } else if (opts.aerial && this.team) {
+      // Замыкание у самой линии (dist ≤ 2.5): всё равно бьём В ВОРОТА, а не
+      // по корпусу — иначе кивок в упор улетал мимо (фидбек Олега 22.07)
+      const lift = (S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * effCharge) * st.liftFactor;
+      const d = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
+      if (d.lengthSq() < 0.01) d.set(Math.sign(goalX) || 1, 0, 0);
+      d.normalize();
+      ball.strike(d, power, lift, curl);
     } else {
       // Обычный удар по направлению взгляда, высота растёт с замахом
       const lift = (S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * effCharge) * st.liftFactor;
@@ -1889,15 +1929,23 @@ export class Player {
     return true;
   }
 
-  // Приём верхового мяча корпусом (грудь/бедро): мяч гасится и мягко
-  // опускается в ноги — дальше обычное владение. Общий для человека и AI
-  // (фидбек Олега 22.07.2026: мяч не должен «отскакивать от деревянного»)
+  // Приём верхового мяча корпусом (грудь/бедро): мяч гасится и опускается
+  // ПОД НОГИ — дальше обычное владение. Общий для человека и AI (фидбек
+  // Олега 22.07.2026: мяч не должен «отскакивать от деревянного»).
+  // Горизонталь капается жёстко (maxOut) и мяч идёт вниз (dropSpeed) —
+  // после приёма он медленный и низкий, поэтому приём НЕ триггерится
+  // повторно и анимация `receive` не перезапускается («колбасит»).
   trapBall(ball) {
     const T = CONFIG.player.trap;
     const f = this.facing;
-    ball.vel.x = this.vel.x + f.x * T.push;
-    ball.vel.z = this.vel.z + f.z * T.push;
-    ball.vel.y = Math.min(ball.vel.y, 0) * T.keepVy;
+    let vx = this.vel.x * 0.35 + f.x * T.push;
+    let vz = this.vel.z * 0.35 + f.z * T.push;
+    const sp = Math.hypot(vx, vz);
+    if (sp > T.maxOut) {
+      vx = (vx / sp) * T.maxOut;
+      vz = (vz / sp) * T.maxOut;
+    }
+    ball.vel.set(vx, -T.dropSpeed, vz); // мяч сходит с груди вниз, под ноги
     ball.spin = 0;
     ball.afterTouch = 0;
     this.kickCooldown = T.settle; // мяч опускается с груди — нога ждёт
