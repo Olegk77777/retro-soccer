@@ -131,6 +131,7 @@ export class Player {
     this._gotUp = false;     // клип подъёма уже запущен
     this.challengeCd = 0;    // откат между навалами корпусом
     this.kickCooldown = 0;
+    this.ownEpisodeT = 0;    // сек «эпизода владения»: недавно касался мяча (см. update)
     this.bobT = 0;
     // Порядок эйлера YXZ: сначала разворот (Y), потом наклон ласточки (X)
     // — наклон идёт вперёд по взгляду, а не вокруг мировой оси
@@ -248,6 +249,7 @@ export class Player {
     this.dribbleTouchCd = 0;
     this.dribbleDir = null;
     this.ballApproach = null;
+    this.ownEpisodeT = 0;
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.diveT = 0;
@@ -561,7 +563,18 @@ export class Player {
     // сохраняют разбег к мячу и не принимают резкую смену прицела за поворот.
     // В обороне это не включается: без владения S остаётся навалом корпусом.
     const strikeCommitted = !!input.strikeCommitted;
-    const ownsBallForStrike = this.isToucher === true || this.hasBall || this.controlling;
+    // «Эпизод владения» покрывает случай, когда спринтерский толчок только что
+    // вынес мяч вперёд из зоны контроля (hasBall/isToucher на миг false): игрок
+    // ещё хозяин, если мяч рядом, низом и НЕ у соперника (фидбек Олега 22.07:
+    // при навесе/ударе на бегу со стиком вбок игрок убегал от мяча).
+    const mmatch = this.team && this.team.match;
+    const oppHasBall = mmatch && mmatch.toucher &&
+      mmatch.toucher !== this && mmatch.toucher.team !== this.team;
+    const inEpisode = this.ownEpisodeT > 0 && !oppHasBall &&
+      bpEarly.y <= P.kickMaxBallY &&
+      Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) < APP.strikePursuitRange;
+    const ownsBallForStrike =
+      this.isToucher === true || this.hasBall || this.controlling || inEpisode;
     if (strikeCommitted && ownsBallForStrike &&
         (speedNow > P.sprintTouchMinSpeed || this.sprintBoost > 0.35)) {
       this.strikeContactLock = true;
@@ -570,6 +583,20 @@ export class Player {
     const strikeRunLock = this.strikeContactLock && !brake &&
       !downed && this.diveT <= 0 && bpEarly.y <= P.kickMaxBallY &&
       (speedNow > P.sprintTouchMinSpeed || this.sprintBoost > 0.35);
+
+    // Замах навеса/удара/паса на бегу, но спринтерский толчок вынес мяч вперёд
+    // из зоны контроля: поднимаем ТО ЖЕ обязательство добежать, что и при
+    // обычном ведении (безлимитная погоня), — ноги гонятся за своим мячом, а
+    // стик работает прицелом и не уводит вбок. strikeRunLock один держал мяч
+    // лишь в strikePursuitRange, и сильный толчок вырывался за него, унося
+    // игрока по стику (фидбек Олега 22.07: «убегает от мяча при навесе/беге»).
+    if (this.strikeContactLock && !this.ballApproach && !this.pendingStrike &&
+        !brake && !downed && this.diveT <= 0 && bpEarly.y <= P.kickMaxBallY) {
+      const ddLock = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+      if (ddLock > APP.contactRadius && ddLock < APP.maxSwitchDist) {
+        this.beginBallApproach('dribble', ball);
+      }
+    }
 
     // Обязательство завершить касание. Пока оно живо, стик запоминается как
     // будущий курс, но ноги каждый кадр пересчитывают погоню за движущимся мячом.
@@ -637,7 +664,9 @@ export class Player {
 
     if (strikeRunLock) {
       const dd = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
-      if (dd < APP.strikePursuitRange) {
+      // Свой мяч на замахе догоняем на всей дистанции эпизода (не только
+      // strikePursuitRange): сильный спринт-толчок вырывался за неё
+      if (dd < APP.maxSwitchDist) {
         if (dd > APP.strikeHoldRadius) {
           strikeMove = pursuitBall(pos.x, pos.z, ball, P.speed * P.sprintFactor);
         } else {
@@ -756,6 +785,11 @@ export class Player {
       dist < reach &&
       bp.y < CONFIG.ball.radius * 2.2;
     this.controlling = this.hasBall;
+    // «Эпизод владения»: держим окно живым, пока мяч у ног; после толчка на
+    // спринте (hasBall на миг false) окно тает — контактный ассист замаха
+    // навеса/удара опирается на него, а не на строгое владение этим кадром
+    if (this.hasBall) this.ownEpisodeT = P.approach.episodeGrace;
+    else if (this.ownEpisodeT > 0) this.ownEpisodeT = Math.max(0, this.ownEpisodeT - dt);
     const canKick = this.kickCooldown <= 0 &&
       dist < P.kickRadius &&
       bp.y < P.kickMaxBallY;
