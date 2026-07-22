@@ -39,13 +39,11 @@ export function updateKeeper(p, dt, ball) {
     p.ai.holdAge = 0;
     p.ai.act = null;
     p.ai.dropkickStarted = false;
-    // Гасим мяч в руках уже в кадр ловли — без отскока «как от дерева»
-    const f = p.facing;
-    bp.set(pos.x + f.x * 0.5, AI.holdY, pos.z + f.z * 0.5);
-    ball.vel.set(0, 0, 0);
-    ball.spin = 0;
     p.rot = Math.atan2(team.side, 0); // разворачивается с мячом в поле
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    // Мяч гасится В КИСТЯХ уже в кадр ловли (следует за анимацией — бросок,
+    // падение, подъём; без отскока «как от дерева» и без «мяча в центре»)
+    p.holdBallInHands(ball, AI.holdY);
     return;
   }
 

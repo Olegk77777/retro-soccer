@@ -69,6 +69,10 @@ function getKitTexture(gltf, colorHex) {
   return tex;
 }
 
+// Временные вектора для handsWorldPoint — без аллокаций в кадре
+const _handA = new THREE.Vector3();
+const _handB = new THREE.Vector3();
+
 // Какие клипы играются один раз (удары, падения), остальные — циклы
 const ONE_SHOT = new Set([
   'kick', 'kick_run', 'penalty', 'header', 'tackle', 'trip', 'getup',
@@ -285,6 +289,38 @@ export class Player {
     return new THREE.Vector3(Math.sin(this.rot), 0, Math.cos(this.rot));
   }
 
+  // Середина кистей скелета в мировых координатах — точка «мяч в руках».
+  // null, пока модель не загрузилась (остаёмся на капсуле-фолбэке)
+  handsWorldPoint(out) {
+    if (!this.model) return null;
+    if (this._handL === undefined) {
+      this._handL = this.model.getObjectByName('mixamorigLeftHand') || null;
+      this._handR = this.model.getObjectByName('mixamorigRightHand') || null;
+    }
+    if (!this._handL || !this._handR) return null;
+    this._handL.getWorldPosition(_handA);
+    this._handR.getWorldPosition(_handB);
+    return out.copy(_handA).add(_handB).multiplyScalar(0.5);
+  }
+
+  // Мяч живёт в руках: каждый кадр следует за кистями по всей анимации —
+  // ловля в прыжке, падение, подъём, замах выброса (фидбек Олега 22.07:
+  // «мяч висел в центре, пока вратарь падал»). Вызывать ПОСЛЕ aiUpdate,
+  // когда микшер уже продвинул позу кадра. Фолбэк — перед грудью.
+  holdBallInHands(ball, fallbackY = 1.05) {
+    const bp = ball.mesh.position;
+    const mid = this.handsWorldPoint(_handA);
+    if (mid) {
+      bp.set(mid.x, Math.max(CONFIG.ball.radius, mid.y), mid.z);
+    } else {
+      const f = this.facing;
+      const pos = this.group.position;
+      bp.set(pos.x + f.x * 0.5, fallbackY, pos.z + f.z * 0.5);
+    }
+    ball.vel.set(0, 0, 0);
+    ball.spin = 0;
+  }
+
   // Передача управления не должна обрывать AI-погоню, а резкий поворот после
   // спринтерского толчка не должен уводить футболиста мимо мяча. Оба случая
   // используют один короткий latch: ноги добегают, стик хранит будущий курс.
@@ -439,6 +475,9 @@ export class Player {
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
     if (this.challengeCd > 0) this.challengeCd -= dt;
     if (this.tackleCd > 0) this.tackleCd -= dt;
+    // Эпизод владения тает и у AI: updateToucher смотрит его у всех 22,
+    // иначе бывший управляемый «зависал» вечным хозяином оттолкнутого мяча
+    if (this.ownEpisodeT > 0) this.ownEpisodeT -= dt;
 
     // Лежим после броска — не двигаемся; в броске — несёт по курсу ласточки;
     // в подкате — скользим по слайду
@@ -524,6 +563,7 @@ export class Player {
     ball.strike(ndir, power, lift, curl);
     this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
     this.kickCooldown = CONFIG.player.kickCooldown;
+    this.ownEpisodeT = 0; // передача закрывает эпизод владения
     const a = anim || { name: 'kick', ts: 1.6, at: 0.20 };
     this.playOneShot(a.name, a.ts, a.at);
   }
@@ -638,25 +678,36 @@ export class Player {
       }
     }
 
-    // Врывание на прилёт навеса (человек-замыкающий): игра назначила этого
-    // игрока замыкающим под ЛЕТЯЩУЮ подачу — ноги сами бегут к точке прилёта,
-    // а стик до удара работает прицелом и НЕ уводит от мяча. Так это в PES:
-    // курсор на врывающемся, человек доправляет позицию и жмёт замыкание
-    // (фидбек Олега 22.07: замыкающий убегал по стику при выборе направления).
-    let crossReceiveMove = null;
+    // Пас или подача адресованы ЭТОМУ игроку (курсор уже на нём): до касания
+    // мяча ноги бегут ТОЛЬКО на мяч/точку прилёта — стрелки в это время
+    // выбирают направление будущего удара, а не курс бега (фидбек Олега
+    // 22.07: замыкающий убегал по стику; теперь правило живёт весь эпизод —
+    // и пока подача летит, и когда мяч уже опустился и катится в штрафной).
+    // Нажатый удар (pendingStrike) ведёт своей веткой ниже — цель та же.
+    let receiverMove = null;
     const rcvTeam = this.team;
-    if (rcvTeam && rcvTeam.receiver === this && rcvTeam.crossAir > 0 &&
-        !this.pendingStrike && !downed && this.diveT <= 0 && !brake &&
+    if (rcvTeam && rcvTeam.receiver === this && rcvTeam.receiveTimer > 0 &&
+        !this.hasBall && !downed && this.diveT <= 0 && !brake &&
         this.kickCooldown <= 0) {
-      const land = predictLanding(ball, P.aerial.contactY);
-      const tgt = land || rcvTeam.receiveTarget;
+      let tgt = null;
+      if (bpEarly.y > P.kickMaxBallY) {
+        // Верховой мяч: к точке прилёта (не за тенью мяча)
+        tgt = predictLanding(ball, P.aerial.contactY) || rcvTeam.receiveTarget;
+      }
       if (tgt) {
         const dcx = tgt.x - pos.x;
         const dcz = tgt.z - pos.z;
         const dc = Math.hypot(dcx, dcz);
         if (dc > APP.strikeHoldRadius) {
-          crossReceiveMove = { x: dcx / dc, z: dcz / dc };
-          if (dc > 2) sprinting = true; // ещё далеко от точки — врываемся на скорости
+          receiverMove = { x: dcx / dc, z: dcz / dc };
+          if (dc > 2) sprinting = true; // далеко от точки — врываемся на скорости
+        }
+      } else {
+        // Мяч низом (пас в ноги / опустившаяся подача): навстречу мячу
+        const dBall = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+        if (dBall > APP.strikeHoldRadius) {
+          receiverMove = pursuitBall(pos.x, pos.z, ball, P.speed * P.sprintFactor);
+          if (dBall > 2) sprinting = true;
         }
       }
     }
@@ -666,7 +717,12 @@ export class Player {
     // и тут же пробить с лёта на скорости
     const boostK = sprinting ? Math.min(1, dt * 12) : Math.min(1, dt / P.sprintInertia);
     this.sprintBoost += ((sprinting ? 1 : 0) - this.sprintBoost) * boostK;
-    let maxSpeed = P.speed * (this.hasBall ? P.dribbleSpeedFactor : 1);
+    // Кап скорости дриблинга — только когда мяч РЕАЛЬНО у ноги: за своим
+    // оттолкнутым мячом бежим в полный спринт. Иначе на развороте 180° мяч
+    // после толчка (×1.5 скорости) был быстрее закапанного игрока (гистерезис
+    // hasBall тянется до 2.4 м) — вечный отрыв (фидбек Олега 22.07)
+    const ballAtFoot = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) < P.stickyRadius;
+    let maxSpeed = P.speed * (this.hasBall && ballAtFoot ? P.dribbleSpeedFactor : 1);
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     let mvx = (brake || downed) ? 0 : input.move.x;
     let mvz = (brake || downed) ? 0 : input.move.z;
@@ -739,14 +795,14 @@ export class Player {
       mvz = approachMove.z;
     }
 
-    // Врывание замыкающего под навес — ниже latch/удара по приоритету, но
-    // выше бокового стика: пока удар не нажат, ноги идут к точке прилёта
-    if (crossReceiveMove && !this.pendingStrike && !approachMove && !strikeMove) {
-      mvx = crossReceiveMove.x;
-      mvz = crossReceiveMove.z;
+    // Бег адресата на мяч — ниже latch/удара по приоритету, но выше
+    // бокового стика: пока удар не нажат, ноги идут к мячу/точке прилёта
+    if (receiverMove && !this.pendingStrike && !approachMove && !strikeMove) {
+      mvx = receiverMove.x;
+      mvz = receiverMove.z;
     }
 
-    const k = Math.min(1, dt * ((approachMove || strikeMove || crossReceiveMove) ? APP.accel : P.accel));
+    const k = Math.min(1, dt * ((approachMove || strikeMove || receiverMove) ? APP.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -820,6 +876,19 @@ export class Player {
     // навеса/удара опирается на него, а не на строгое владение этим кадром
     if (this.hasBall) this.ownEpisodeT = P.approach.episodeGrace;
     else if (this.ownEpisodeT > 0) this.ownEpisodeT = Math.max(0, this.ownEpisodeT - dt);
+
+    // Эпизод жив, а мяч не у ноги (разворот сорвал липучку, толчок прокатился
+    // мимо, мяч на миг «ничей») — ноги ОБЯЗАНЫ сначала вернуться к мячу,
+    // стик хранится как будущий поворот (правило контактного ассиста;
+    // фидбек Олега 22.07: «при смене направления убегает от мяча»).
+    // После паса/удара не включается: kickCooldown и обнулённый эпизод
+    if (this.ownEpisodeT > 0 && !this.hasBall && !this.ballApproach &&
+        !this.pendingStrike && this.kickCooldown <= 0 && this.downT <= 0 &&
+        this.diveT <= 0 && !brake && bp.y <= APP.maxBallY &&
+        dist < P.dribbleReclaim) {
+      const ownerNow = this.team && this.team.match ? this.team.match.toucher : null;
+      if (!ownerNow || ownerNow === this) this.beginBallApproach('dribble', ball);
+    }
     const canKick = this.kickCooldown <= 0 &&
       dist < P.kickRadius &&
       bp.y < P.kickMaxBallY;
@@ -858,7 +927,16 @@ export class Player {
             pdx = approachIntentAtContact.x;
             pdz = approachIntentAtContact.z;
           }
-          const push = speed * P.sprintTouchPush;
+          // Резкий разворот ГАСИТ толчок: мяч «притормаживается под
+          // разворот», а не улетает вбок на полной скорости — иначе новый
+          // курс 90°+ на спринте отправлял мяч на 13 м/с в сторону и игрок
+          // физически не успевал (фидбек Олега 22.07)
+          const runL = Math.hypot(this.vel.x, this.vel.z);
+          let turnDot = 1;
+          if (runL > 0.5) turnDot = (this.vel.x / runL) * pdx + (this.vel.z / runL) * pdz;
+          const pushK = P.sprintTurnPushMin +
+            (1 - P.sprintTurnPushMin) * Math.max(0, turnDot);
+          const push = speed * P.sprintTouchPush * pushK;
           ball.vel.x = pdx * push;
           ball.vel.z = pdz * push;
           this.dribbleDir = { x: pdx, z: pdz };
@@ -945,6 +1023,7 @@ export class Player {
       this.pendingStrike = null;
       this.strikeContactLock = false;
       this.cancelBallApproach(); // после паса/удара не гонимся за собственным мячом
+      this.ownEpisodeT = 0;      // передача закрывает эпизод владения
       const lerp = (a, b, t) => a + (b - a) * t;
       if (s.type === 'pass' || s.type === 'through') {
         // S — пас низом; W — пас на ход (настильный). Сила — от замаха.

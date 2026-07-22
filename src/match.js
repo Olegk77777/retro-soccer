@@ -974,6 +974,7 @@ export class Match {
     this.ball.spin = 0;
     this.ball.afterTouch = 0; // руками мяч в полёте не докручивают
     taker.kickCooldown = CONFIG.player.kickCooldown;
+    taker.ownEpisodeT = 0; // бросок закрывает эпизод владения
     r.phase = 'follow';
     r.t = 0;
   }
@@ -1137,30 +1138,24 @@ export class Match {
   // выбрал за holdMaxHuman — выносим сами. Вылет мяча синхронён с кадром клипа.
   updateKeeperHold(p, dt) {
     const K = CONFIG.ai.keeper;
-    const pos = p.group.position;
-    const bp = this.ball.mesh.position;
     const human = p.team === this.humanTeam;
     const ai = p.ai;
     ai.holdAge = (ai.holdAge || 0) + dt;
 
-    // Выбор сделан: клип идёт, мяч уходит из рук / с ноги в нужном кадре клипа
+    // Выбор сделан: клип идёт, мяч остаётся в кистях до кадра выпуска
     if (ai.act) {
       const os = p.oneShot;
-      const f = p.facing;
-      const h = ai.act.type === 'throw' ? K.holdY + 0.45 : K.holdY;
-      bp.set(pos.x + f.x * 0.4, h, pos.z + f.z * 0.4);
-      this.ball.vel.set(0, 0, 0);
-      this.ball.spin = 0;
-      if (!os || os.time >= ai.act.release) this._keeperRelease(p);
-      else p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(ai.act.dir.x, ai.act.dir.z) });
+      if (!os || os.time >= ai.act.release) {
+        this._keeperRelease(p);
+        return;
+      }
+      p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(ai.act.dir.x, ai.act.dir.z) });
+      p.holdBallInHands(this.ball, K.holdY);
       return;
     }
 
-    // Мяч живёт в руках перед грудью — соперник не дотянется
-    const f = p.facing;
-    bp.set(pos.x + f.x * 0.5, K.holdY, pos.z + f.z * 0.5);
-    this.ball.vel.set(0, 0, 0);
-    this.ball.spin = 0;
+    // Мяч живёт В РУКАХ: каждый кадр следует за кистями скелета по всей
+    // анимации ловли/падения/подъёма (holdBallInHands после aiUpdate ниже)
 
     if (human) {
       // Пока мяч в руках — управление на вратаре: человек целится и выбирает
@@ -1193,12 +1188,14 @@ export class Match {
       const im = this.input.move;
       if (Math.hypot(im.x, im.z) > 0.3) face = Math.atan2(im.x, im.z);
       p.aiUpdate(dt, { x: 0, z: 0 }, { face });
+      p.holdBallInHands(this.ball, K.holdY);
       return;
     }
 
     // AI-вратарь: подержал пару секунд — выносит с ноги на фланг
-    if (ai.holdAge >= K.holdTime) this._keeperPunt(p, null, 1);
-    else p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(p.team.side, 0) });
+    if (ai.holdAge >= K.holdTime && !ai.act) this._keeperPunt(p, null, 1);
+    p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(p.team.side, 0) });
+    p.holdBallInHands(this.ball, K.holdY);
   }
 
   // Прицел вратаря: стик человека, иначе прямо в поле от своих ворот
@@ -1275,6 +1272,7 @@ export class Match {
     this.ball.spin = 0;
     this.ball.afterTouch = 0;
     p.kickCooldown = CONFIG.player.kickCooldown * 2; // свой же вынос не ловим сразу
+    p.ownEpisodeT = 0; // выброс закрывает эпизод владения
     // Соперники рядом не играют мяч короткое окно — иначе прилипший в упор
     // отбивал бы выброс в наши ворота (фидбек Олега 22.07). Мяч успевает уйти.
     for (const o of this.otherTeam(p.team).players) {
