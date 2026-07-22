@@ -18,34 +18,12 @@ export function updateKeeper(p, dt, ball) {
 
   const ballDist = distToBall(p, ball);
 
-  // === Мяч в руках: держим holdTime, затем вынос с маха (фидбек Олега:
-  // мяч больше не отскакивает «как от дерева» в тот же кадр) ===
-  if (p.ai.holdT > 0) {
-    p.ai.holdT -= dt;
-    // Мяч живёт в руках: перед грудью, без скорости — полевые не дотянутся
-    const f = p.facing;
-    bp.set(pos.x + f.x * 0.5, AI.holdY, pos.z + f.z * 0.5);
-    ball.vel.set(0, 0, 0);
-    ball.spin = 0;
-    if (p.ai.holdT <= AI.dropkickLead && !p.ai.dropkickStarted) {
-      // Мах начинается заранее — нога встретит мяч в момент вылета
-      p.ai.dropkickStarted = true;
-      p.playOneShot('gk_dropkick', 1.6, 1.15);
-    }
-    if (p.ai.holdT <= 0) {
-      // Вынос: сильным ударом на фланг своей атаки
-      const zSign = Math.abs(pos.z) > 2 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
-      const d = Math.hypot(team.side, zSign * 0.55) || 1;
-      ball.strike({ x: team.side / d, z: (zSign * 0.55) / d }, AI.clearPower, AI.clearLift);
-      p.kickCooldown = P.kickCooldown * 2; // выбитый мяч не ловим тут же обратно
-      p.ai.dropkickStarted = false;
-    }
-    p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(team.side, 0) });
-    return;
-  }
+  // Мяч в руках ведёт Match.updateKeeperHold (держит/выбивает/бросает рукой) —
+  // сюда кипер попадает, только пока мяч в игре и ещё не пойман.
 
   // Мяч досягаем — ЛОВЛЯ: гасим его в руках, клип по характеру мяча
-  // (пушка — бросок, верховой — корпусом, низовой — подбор)
+  // (пушка — в броске, верховой — корпусом, низовой — подбор). Что делать с
+  // пойманным мячом дальше — решает Match.updateKeeperHold
   const reachable =
     (ballDist < AI.catchRadius && bp.y < AI.catchMaxY) ||
     (ballDist < P.kickRadius && bp.y < P.kickMaxBallY);
@@ -57,8 +35,15 @@ export function updateKeeper(p, dt, ball) {
         ? { name: 'gk_catch', ts: 1.4, at: 0.45 }
         : { name: 'gk_scoop', ts: 1.4, at: 0.35 };
     p.playOneShot(clip.name, clip.ts, clip.at);
-    p.ai.holdT = AI.holdTime;
+    p.ai.holding = true;   // мяч в руках — дальше ведёт Match.updateKeeperHold
+    p.ai.holdAge = 0;
+    p.ai.act = null;
     p.ai.dropkickStarted = false;
+    // Гасим мяч в руках уже в кадр ловли — без отскока «как от дерева»
+    const f = p.facing;
+    bp.set(pos.x + f.x * 0.5, AI.holdY, pos.z + f.z * 0.5);
+    ball.vel.set(0, 0, 0);
+    ball.spin = 0;
     p.rot = Math.atan2(team.side, 0); // разворачивается с мячом в поле
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
     return;

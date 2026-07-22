@@ -109,9 +109,12 @@ export class Match {
       score: document.getElementById('sb-score'),
       time: document.getElementById('sb-time'),
       flash: document.getElementById('goal-flash'),
+      hint: document.getElementById('hint'),
     };
     this.hud.home.textContent = teamsData[0].short;
     this.hud.away.textContent = teamsData[1].short;
+    this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';
+    this._keeperHintShown = false;
     this._hudCache = '';
     this._phase = ''; // фаза для контекстных тач-кнопок (атака/оборона)
 
@@ -320,6 +323,7 @@ export class Match {
     for (const team of this.teams) {
       for (const p of team.players) {
         if (this.restart && p === this.restart.taker) this.updateTaker(p, dt);
+        else if (p.isKeeper && p.ai && p.ai.holding) this.updateKeeperHold(p, dt);
         else if (p === this.controlled) p.update(dt, this.input, this.ball);
         else if (p.isKeeper) updateKeeper(p, dt, aiBall);
         else updateFieldPlayer(p, dt, aiBall);
@@ -389,7 +393,7 @@ export class Match {
     // Кипер с мячом в руках — безусловный владелец (мяч на высоте рук,
     // обычный радиус-арбитраж его не видит)
     for (const team of this.teams) {
-      if (team.keeper.ai && team.keeper.ai.holdT > 0) {
+      if (team.keeper.ai && team.keeper.ai.holding) {
         best = team.keeper;
         touch = team.keeper;
       }
@@ -665,9 +669,11 @@ export class Match {
     const r = this.restart;
     r.t += dt;
 
-    // Замах вбрасывания: клип уже идёт, мяч в руках — выпуск по таймеру
+    // Замах вбрасывания: клип идёт, мяч в руках — выпуск ровно в кадре броска
+    // (руки и мяч синхронны; не по таймеру, чтобы не зависеть от длины клипа)
     if (r.phase === 'throw') {
-      if (r.t >= R.throwIn.releaseDelay) this._releaseThrow(r);
+      const os = r.taker.oneShot;
+      if (!os || os.time >= R.throwIn.releaseClip) this._releaseThrow(r);
       return;
     }
 
@@ -751,8 +757,8 @@ export class Match {
     this.state = 'play';
   }
 
-  // Замах вбрасывания: клип стартует СРАЗУ, мяч уходит из рук только через
-  // releaseDelay — раньше мяч вылетал до начала анимации (фидбек Олега)
+  // Замах вбрасывания: клип стартует СРАЗУ, мяч уходит из рук в кадре броска
+  // (releaseClip) — updateRestart следит за временем клипа (фидбек Олега)
   _scheduleThrow(r, dir, power) {
     const R = CONFIG.restart.throwIn;
     const dl = Math.hypot(dir.x, dir.z) || 1;
@@ -760,7 +766,7 @@ export class Match {
     r.phase = 'throw';
     r.t = 0;
     r.taker.rot = Math.atan2(dir.x, dir.z);
-    // Клип стартует с фазы замаха — мяч уйдёт из рук ровно на броске (releaseDelay)
+    // Клип стартует с фазы замаха — мяч уйдёт из рук ровно на броске (releaseClip)
     r.taker.playOneShot('throwin', R.clipRate, R.clipStart);
   }
 
@@ -932,16 +938,164 @@ export class Match {
     this._finishRestart();
   }
 
+  // ===== Вратарь с мячом в руках (Фаза 2, 22.07.2026) =====
+  // AI держит мяч holdTime и выносит с ноги. Вратарь ЧЕЛОВЕКА получает
+  // управление и сам решает: УДАР — выбить ногой (сильно, на фланг/по стику),
+  // ПАС / НА ХОД — бросить рукой (настильно и точно, в ноги партнёру). Не
+  // выбрал за holdMaxHuman — выносим сами. Вылет мяча синхронён с кадром клипа.
+  updateKeeperHold(p, dt) {
+    const K = CONFIG.ai.keeper;
+    const pos = p.group.position;
+    const bp = this.ball.mesh.position;
+    const human = p.team === this.humanTeam;
+    const ai = p.ai;
+    ai.holdAge = (ai.holdAge || 0) + dt;
+
+    // Выбор сделан: клип идёт, мяч уходит из рук / с ноги в нужном кадре клипа
+    if (ai.act) {
+      const os = p.oneShot;
+      const f = p.facing;
+      const h = ai.act.type === 'throw' ? K.holdY + 0.45 : K.holdY;
+      bp.set(pos.x + f.x * 0.4, h, pos.z + f.z * 0.4);
+      this.ball.vel.set(0, 0, 0);
+      this.ball.spin = 0;
+      if (!os || os.time >= ai.act.release) this._keeperRelease(p);
+      else p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(ai.act.dir.x, ai.act.dir.z) });
+      return;
+    }
+
+    // Мяч живёт в руках перед грудью — соперник не дотянется
+    const f = p.facing;
+    bp.set(pos.x + f.x * 0.5, K.holdY, pos.z + f.z * 0.5);
+    this.ball.vel.set(0, 0, 0);
+    this.ball.spin = 0;
+
+    if (human) {
+      // Пока мяч в руках — управление на вратаре: человек целится и выбирает
+      if (this.controlled !== p) this.setControlled(p, 0);
+      if (!this._keeperHintShown && this.hud.hint) {
+        this.hud.hint.textContent =
+          'ВРАТАРЬ ЗАБРАЛ МЯЧ: УДАР — ВЫБИТЬ НОГОЙ · ПАС — БРОСОК РУКОЙ · сам вынесет через 6 сек';
+        this._keeperHintShown = true;
+      }
+      const pass = this.input.pass.consume();
+      const through = this.input.through.consume();
+      const shot = this.input.shot.consume();
+      const cross = this.input.consumeCross();
+      const swipe = this.input.consumeSwipe();
+      const aim = this._keeperAim(p);
+
+      if (shot !== null || cross) {
+        this._keeperPunt(p, aim, shot !== null ? shot : cross.charge); // выбить ногой
+      } else if (pass !== null || through !== null) {
+        const t = through !== null ? 'through' : 'pass';
+        this._keeperThrow(p, t, through !== null ? through : pass, aim); // бросок рукой
+      } else if (swipe) {
+        if (swipe.kind === 'cross') this._keeperPunt(p, swipe.dir, swipe.power);
+        else this._keeperThrow(p, 'pass', swipe.power, swipe.dir);
+      } else if (ai.holdAge >= K.holdMaxHuman) {
+        this._keeperPunt(p, aim, 1); // время вышло — выносим автоматически
+      }
+
+      // Ждёт решения — стоит лицом в поле (или доворачивается по стику-прицелу)
+      let face = Math.atan2(p.team.side, 0);
+      const im = this.input.move;
+      if (Math.hypot(im.x, im.z) > 0.3) face = Math.atan2(im.x, im.z);
+      p.aiUpdate(dt, { x: 0, z: 0 }, { face });
+      return;
+    }
+
+    // AI-вратарь: подержал пару секунд — выносит с ноги на фланг
+    if (ai.holdAge >= K.holdTime) this._keeperPunt(p, null, 1);
+    else p.aiUpdate(dt, { x: 0, z: 0 }, { face: Math.atan2(p.team.side, 0) });
+  }
+
+  // Прицел вратаря: стик человека, иначе прямо в поле от своих ворот
+  _keeperAim(p) {
+    const im = this.input.move;
+    if (Math.hypot(im.x, im.z) > 0.3) return { x: im.x, z: im.z };
+    return { x: p.team.side, z: 0 };
+  }
+
+  // Выбить ногой: сильный высокий вынос. dir=null (AI) — на свободный фланг
+  _keeperPunt(p, dir, charge = 1) {
+    const K = CONFIG.ai.keeper;
+    const pos = p.group.position;
+    let d;
+    if (dir) {
+      const l = Math.hypot(dir.x, dir.z) || 1;
+      d = { x: dir.x / l, z: dir.z / l };
+    } else {
+      const zs = Math.abs(pos.z) > 2 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
+      const dl = Math.hypot(p.team.side, zs * 0.55) || 1;
+      d = { x: p.team.side / dl, z: (zs * 0.55) / dl };
+    }
+    const power = K.clearPower * (0.85 + 0.15 * Math.min(1, charge));
+    p.ai.act = { type: 'punt', dir: d, power, lift: K.clearLift, release: K.puntClip.release };
+    p.rot = Math.atan2(d.x, d.z);
+    p.playOneShot('gk_dropkick', K.puntClip.rate, K.puntClip.start);
+  }
+
+  // Бросить рукой: настильно и точно, с пас-ассистом в ноги партнёру
+  _keeperThrow(p, type, charge, aim) {
+    const K = CONFIG.ai.keeper;
+    const l = Math.hypot(aim.x, aim.z) || 1;
+    let dir = { x: aim.x / l, z: aim.z / l };
+    let power = K.throwPower * (0.6 + 0.6 * Math.min(1, charge));
+    const assist = this.resolvePass(p, type, power, new THREE.Vector3(dir.x, 0, dir.z));
+    if (assist) {
+      dir = { x: assist.dir.x, z: assist.dir.z };
+      power = Math.min(assist.power, K.throwPower * 1.6); // рукой сильнее не бросить
+    }
+    p.ai.act = { type: 'throw', dir, power, lift: K.throwLift, release: K.throwClip.release };
+    p.rot = Math.atan2(dir.x, dir.z);
+    p.playOneShot('gk_throw', K.throwClip.rate, K.throwClip.start);
+  }
+
+  // Мяч покидает руки / ногу в нужном кадре клипа — вратарь снова обычный игрок
+  _keeperRelease(p) {
+    const K = CONFIG.ai.keeper;
+    const act = p.ai.act;
+    const pos = p.group.position;
+    const h = act.type === 'throw' ? K.holdY + 0.45 : CONFIG.ball.radius + 0.35;
+    this.ball.mesh.position.set(pos.x + act.dir.x * 0.45, h, pos.z + act.dir.z * 0.45);
+    this.ball.strike(act.dir, act.power, act.lift);
+    this.ball.spin = 0;
+    this.ball.afterTouch = 0;
+    p.kickCooldown = CONFIG.player.kickCooldown * 2; // свой же вынос не ловим сразу
+    p.ai.act = null;
+    p.ai.holding = false;
+    p.ai.holdAge = 0;
+    p.ai.dropkickStarted = false;
+    this._restoreHint();
+    // Управление человека — на адресата броска (или ближнего к мячу)
+    if (this.controlled === p) {
+      const next = p.team.receiver || this.nearestFieldPlayer(p.team);
+      if (next) this.setControlled(next, 0.4);
+    }
+  }
+
+  // Вернуть постоянную строку-подсказку после временной подмены на вратарскую
+  _restoreHint() {
+    if (this._keeperHintShown && this.hud.hint) {
+      this.hud.hint.innerHTML = this._hintHTML;
+    }
+    this._keeperHintShown = false;
+  }
+
   // Пауза = мяч мёртв: кипер не держит его в руках. Без этого его отложенный
   // вынос по таймеру бил бы подставной _centerBall без метода strike (старый
   // TypeError из аудита 18.07.2026)
   _releaseKeeperHolds() {
     for (const team of this.teams) {
       if (team.keeper.ai) {
-        team.keeper.ai.holdT = 0;
+        team.keeper.ai.holding = false;
+        team.keeper.ai.holdAge = 0;
+        team.keeper.ai.act = null;
         team.keeper.ai.dropkickStarted = false;
       }
     }
+    this._restoreHint();
   }
 
   // Гол: определяем сторону по позиции мяча, счёт, пауза, потом розыгрыш

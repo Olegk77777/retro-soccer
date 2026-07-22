@@ -268,8 +268,10 @@ export class Player {
     this.group.position.y = 0;
     this.group.rotation.x = 0;
     if (this.ai) {
-      this.ai.dribDir = null; // мозг AI начинает с чистого листа
-      this.ai.holdT = 0;      // кипер не «держит» несуществующий мяч
+      this.ai.dribDir = null;  // мозг AI начинает с чистого листа
+      this.ai.holding = false; // кипер не «держит» несуществующий мяч
+      this.ai.holdAge = 0;
+      this.ai.act = null;
       this.ai.dropkickStarted = false;
     }
     this.group.rotation.y = rot;
@@ -1485,7 +1487,7 @@ export class Player {
       for (const o of m.otherTeam(this.team).players) {
         if (o.downT > 0) continue;
         // Кипера с мячом в руках не сносим — это всегда свисток
-        if (o.isKeeper && o.ai && o.ai.holdT > 0) continue;
+        if (o.isKeeper && o.ai && o.ai.holding) continue;
         const op = o.group.position;
         if (Math.hypot(op.x - pos.x, op.z - pos.z) > TK.bodyReach) continue;
         this._tackleVictim = o;
