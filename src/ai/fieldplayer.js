@@ -62,6 +62,31 @@ export function updateFieldPlayer(p, dt, ball) {
     }
   }
 
+  // Вратарь соперника держит мяч в руках: не мешаем вводу (правило + фикс
+  // рикошета вратарского выброса от прилипшего соперника в свои ворота,
+  // фидбек Олега 22.07). Отходим на keeper.oppKeepAway и ждём ввода —
+  // как только вратарь выбросил/выбил, обычная логика возобновится.
+  const oppKeeper = match.toucher;
+  if (oppKeeper && oppKeeper.isKeeper && oppKeeper !== p &&
+      oppKeeper.ai && oppKeeper.ai.holding && oppKeeper.team !== team) {
+    const kp = oppKeeper.group.position;
+    const dxk = pos.x - kp.x;
+    const dzk = pos.z - kp.z;
+    const dk = Math.hypot(dxk, dzk) || 1;
+    const KA = CONFIG.ai.keeper.oppKeepAway;
+    let mv;
+    if (dk < KA) {
+      mv = { x: dxk / dk, z: dzk / dk }; // отступаем от вратаря
+    } else {
+      const home = team.homeTarget(p, ball); // ждём ввода на своей позиции
+      mv = arrive(pos.x, pos.z, home.x, home.z, AI.homeSlow);
+    }
+    const sepK = separation(p, match.allPlayers, AI.separationRadius, AI.separationPush);
+    p.aiUpdate(dt, { x: mv.x + sepK.x, z: mv.z + sepK.z },
+      { face: Math.atan2(kp.x - pos.x, kp.z - pos.z) });
+    return;
+  }
+
   // Второй этаж (ресёрч 11): верховой мяч в досягаемости — играем В ОДНО
   // КАСАНИЕ. Своя треть — вынос; у чужих ворот — замыкание в створ (сила
   // от разбега!); середина — скидка вперёд. Летящий вверх мяч не трогаем.

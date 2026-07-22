@@ -300,16 +300,24 @@ export class Match {
     if (kt === this.humanTeam) {
       const st1 = kt.players[9];
       const st2 = kt.players[10];
-      const p1 = st1.group.position;
+      const bp = this.ball.mesh.position;   // мяч на центральной точке
       const p2 = st2.group.position;
-      const d = Math.hypot(p2.x - p1.x, p2.z - p1.z) || 1;
-      const dir = { x: (p2.x - p1.x) / d, z: (p2.z - p1.z) / d };
-      st1.aiKick(this.ball, dir, Math.max(8, d * 1.35), 0, 0,
+      // Пас катится ИЗ мяча в ноги второго нападающего (раньше направление
+      // считалось между игроками — мяч летел мимо; фидбек Олега 22.07)
+      const dx = p2.x - bp.x;
+      const dz = p2.z - bp.z;
+      const d = Math.hypot(dx, dz) || 1;
+      const power = Math.max(6, Math.min(11, d * 1.25)); // мягко, чтоб не проскочил
+      st1.rot = Math.atan2(dx, dz);
+      st1.aiKick(this.ball, { x: dx / d, z: dz / d }, power, 0, 0,
         { name: 'kick', ts: 1.5, at: 0.2 });
       kt.receiver = st2;
       kt.receiveTarget = { x: p2.x, z: p2.z };
       kt.receiveTimer = CONFIG.ai.receiveGiveUp;
-      this.setControlled(st2, 0.5);
+      // Курсор — на ПАСУЮЩЕМ: адресат остаётся AI-приёмщиком, сам добежит и
+      // примет (не «убегает»). cd=0, чтобы курсор перешёл к нему СРАЗУ при
+      // приёме — пока мяч летит, курсор держит защита receiver в updateSwitching
+      this.setControlled(st1, 0);
       this.state = 'play';
     } else {
       // Чужой розыгрыш: обычная логика кикоффа, AI пасанёт на ближайшем такте
@@ -576,10 +584,13 @@ export class Match {
     }
     if (this.switchCd > 0) return;
 
-    // Пас или подача летит выбранному адресату (в т.ч. замыкающему навеса),
-    // а мяча ещё никто не коснулся — курсор НЕ крадём: «ближний к тени мяча»
-    // в полёте не главный (фидбек Олега 22.07: терялся курсор замыкающего)
-    if (team.receiver === this.controlled && team.receiveTimer > 0 && !this.toucher) return;
+    // Пока наш пас/подача летит выбранному адресату (в т.ч. замыкающему
+    // навеса или адресату розыгрыша) и мяча ещё никто не коснулся — авто-
+    // переключение курсор НЕ трогает: адресат-AI сам добежит и примет, потом
+    // курсор перейдёт к нему («партнёр взял мяч»). Иначе, став controlled
+    // заранее, он терял автоприём и убегал от мяча (фидбек Олега 22.07)
+    if (team.receiver && team.receiveTimer > 0 && !this.toucher &&
+        Math.hypot(this.ball.vel.x, this.ball.vel.z) > 2) return;
 
     // Партнёр взял мяч — управление к нему (как после паса в PES)
     if (this.toucher && this.toucher.team === team &&
@@ -1212,17 +1223,46 @@ export class Match {
     p.playOneShot('gk_throw', K.throwClip.rate, K.throwClip.start);
   }
 
+  // Соперник в упор по курсу выброса? (чтобы не бить в него — рикошет в
+  // свои ворота). Проверяем узкий коридор длиной dist перед вратарём.
+  _laneBlocked(p, dir, dist) {
+    const pos = p.group.position;
+    for (const o of this.otherTeam(p.team).players) {
+      const ox = o.group.position.x - pos.x;
+      const oz = o.group.position.z - pos.z;
+      const along = ox * dir.x + oz * dir.z;
+      if (along < 0.3 || along > dist) continue;
+      const perp = Math.abs(ox * dir.z - oz * dir.x);
+      if (perp < 1.3) return true;
+    }
+    return false;
+  }
+
   // Мяч покидает руки / ногу в нужном кадре клипа — вратарь снова обычный игрок
   _keeperRelease(p) {
     const K = CONFIG.ai.keeper;
     const act = p.ai.act;
     const pos = p.group.position;
+    // Соперник прилип и стоит на курсе — перебрасываем через него навесом,
+    // а не бьём в упор (иначе рикошет в свои ворота, фидбек Олега 22.07)
+    let lift = act.lift;
+    if (this._laneBlocked(p, act.dir, 3.2)) {
+      lift = Math.max(lift, act.type === 'throw' ? 6.5 : lift + 4);
+    }
     const h = act.type === 'throw' ? K.holdY + 0.45 : CONFIG.ball.radius + 0.35;
     this.ball.mesh.position.set(pos.x + act.dir.x * 0.45, h, pos.z + act.dir.z * 0.45);
-    this.ball.strike(act.dir, act.power, act.lift);
+    this.ball.strike(act.dir, act.power, lift);
     this.ball.spin = 0;
     this.ball.afterTouch = 0;
     p.kickCooldown = CONFIG.player.kickCooldown * 2; // свой же вынос не ловим сразу
+    // Соперники рядом не играют мяч короткое окно — иначе прилипший в упор
+    // отбивал бы выброс в наши ворота (фидбек Олега 22.07). Мяч успевает уйти.
+    for (const o of this.otherTeam(p.team).players) {
+      const op = o.group.position;
+      if (Math.hypot(op.x - pos.x, op.z - pos.z) < K.releaseGuard) {
+        o.kickCooldown = Math.max(o.kickCooldown, K.releaseGuardTime);
+      }
+    }
     p.ai.act = null;
     p.ai.holding = false;
     p.ai.holdAge = 0;
