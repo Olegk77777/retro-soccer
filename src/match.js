@@ -698,6 +698,12 @@ export class Match {
     const bp = this.ball.mesh.position;
     const rr = CONFIG.ball.radius;
     if (this.ball.goalScored) return;
+    // Мяч в руках вратаря МЁРТВ для арбитража линий: кисти в падении заносят
+    // его за лицевую (сейв у линии), и без этого гейта тут же свистели
+    // угловой/«гол» из ничего (фидбек Олега 22.07: «вместо гола угловой»)
+    for (const t of this.teams) {
+      if (t.keeper.ai && t.keeper.ai.holding) return;
+    }
     const halfL = F.length / 2;
     const halfW = F.width / 2;
     const lastTeam = this.lastTouch ? this.lastTouch.team : this.possession;
