@@ -599,6 +599,9 @@ export class Match {
     const manual = this.input.consumeSwitch();
 
     if (manual) {
+      // С мячом Q/LB курсор НЕ переключает: это модификатор СТЕНОЧКИ (Q+ПАС),
+      // и курсор никогда не убегает с владеющего мячом (дух PES: L1 в атаке)
+      if (this.controlled && (this.controlled.isToucher || this.controlled.hasBall)) return;
       this.setControlled(this.nearestFieldPlayer(team, this.controlled), 0.25);
       return;
     }
@@ -714,6 +717,18 @@ export class Match {
       const x = Math.max(-halfL + 1, Math.min(halfL - 1, bp.x));
       this.beginRestart('throwin', this.otherTeam(lastTeam), x, sz * (halfW - R.lineInset));
     } else if (Math.abs(bp.x) > halfL + rr) {
+      // Мяч фактически В СЕТКЕ (за линией, между штангами, ниже перекладины) —
+      // это ГОЛ, даже если непрерывная проверка пересечения его проглядела
+      // (рикошет от штанги/сутолока с вратарём на последней итерации кадра).
+      // Страховка от «мяч в воротах, а свистят угловой» (фидбек Олега 22.07)
+      const G = CONFIG.goal;
+      if (Math.abs(bp.z) <= G.width / 2 + G.postRadius &&
+          bp.y <= G.height + G.postRadius &&
+          Math.abs(bp.x) <= halfL + G.depth + 0.5) {
+        this.ball.goalScored = true;
+        this.onGoal();
+        return;
+      }
       // Лицевая линия: от обороняющихся — угловой, от атакующих — от ворот
       const sx = Math.sign(bp.x);
       const sz = Math.sign(bp.z || 1);

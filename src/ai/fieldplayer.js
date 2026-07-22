@@ -122,6 +122,21 @@ export function updateFieldPlayer(p, dt, ball) {
     }
   }
 
+  // Прострел/скидка пришла назначенному под подачу у чужих ворот — замыкание
+  // НОГОЙ в ОДНО касание, без такта решений: низовые подачи завершаются
+  // ударом с ходу, а не «отскакивают от деревянного» (фидбек Олега 22.07)
+  const FT = AI.firstTouch;
+  if (team.receiver === p && p.kickCooldown <= 0 && match.state !== 'restart' &&
+      myBallDist < CONFIG.player.kickRadius && bp.y < CONFIG.player.kickMaxBallY) {
+    const relV = Math.hypot(ball.vel.x - p.vel.x, ball.vel.z - p.vel.z);
+    const dg = Math.hypot(team.attackGoalX - pos.x, pos.z);
+    if (relV > FT.minRel && dg < FT.shotRange && Math.abs(pos.z) < AI.shootMaxZ) {
+      aiShoot(p, ball, team.attackGoalX, dg);
+      p.aiUpdate(dt, { x: 0, z: 0 }, {});
+      return;
+    }
+  }
+
   // Пас уже летит нашему адресату — остальные НЕ бросаются на мяч толпой:
   // доверяем передаче (принцип PES), эпизод у мяча остаётся за receiver'ом.
   // Соперники не в счёт — у них свой receiver (null) и погоня за перехватом
@@ -442,8 +457,11 @@ function aiCross(p, ball, oppD) {
   const dist = Math.hypot(dx, dz);
   if (dist < AC.minDist) return false;
 
-  // Баллистика под адрес (как crossSolution): скорость из угла дуги
-  const theta = (AC.angle * Math.PI) / 180;
+  // Баллистика под адрес (как crossSolution): скорость из угла дуги.
+  // Разнообразие подач: продавился к самой лицевой — режет низом (прострел),
+  // подаёт из глубины фланга — обычная дуга под голову
+  const nearByline = team.side * pos.x > F.length / 2 - AC.deepX;
+  const theta = ((nearByline ? AC.lowAngle : AC.angle) * Math.PI) / 180;
   const g = -B.gravity;
   let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * 1.15;
   power = Math.max(14, Math.min(30, power));
@@ -471,15 +489,27 @@ function aerialPlay(p, ball, diving = false) {
   const DF = diving ? CONFIG.player.aerial.dive.powerFactor : 1;
   const DN = diving ? CONFIG.player.aerial.dive.noise : 1;
 
+  const isReceiver = team.receiver === p;
+  const distGoal = Math.hypot(goalX - pos.x, pos.z);
+
+  // Приём корпусом (фидбек Олега 22.07.2026): адресат нашей верховой передачи
+  // гасит опускающийся мяч грудью/бедром себе в ноги — а не сбрасывает его
+  // куда попало. У чужих ворот приём не включается: там подачу ЗАМЫКАЮТ.
+  if (!diving && isReceiver && bp.y <= CONFIG.player.trap.maxY &&
+      distGoal >= AIR.headerRange) {
+    p.trapBall(ball);
+    return;
+  }
+
   const ownDepth = Math.hypot(pos.x - ownGoalX, pos.z);
-  if (ownDepth < AIR.clearThird) {
-    // Вынос: от своих ворот в сторону ближнего фланга
+  if (ownDepth < AIR.clearThird && !isReceiver) {
+    // Вынос: от своих ворот в сторону ближнего фланга (свой адресат паса
+    // вратаря/защитника мяч не выносит — он его принимает выше или ждёт)
     const zs = pos.z !== 0 ? Math.sign(pos.z) : (Math.random() < 0.5 ? -1 : 1);
     p.aiAerial(ball, { x: team.side, z: zs * 0.9 }, AIR.clearPower * DF, AIR.clearLift);
     return;
   }
 
-  const distGoal = Math.hypot(goalX - pos.x, pos.z);
   if (distGoal < AIR.headerRange && Math.abs(pos.z) < 16) {
     // Замыкание в створ: прицел со случайной точкой и шумом (рычаг
     // «голы не дешевеют»), сила — от скорости разбега в момент контакта

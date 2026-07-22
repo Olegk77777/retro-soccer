@@ -369,6 +369,26 @@ export class Team {
     this.runnerTimer = C.ttl;
   }
 
+  // Ручная СТЕНОЧКА (Q/LB + ПАС, фидбек Олега 22.07.2026): игрок сам заказал
+  // «отдал — и рванул». Никаких проверок прессинга/дистанции — намерение уже
+  // высказано кнопкой. Курсор сразу переходит на адресата (как L1+пас в PES):
+  // он встречает мяч, а пасующий-AI рвёт вперёд слотом runner — возврат W.
+  startManualOneTwo(passer) {
+    const C = CONFIG.ai.combo.oneTwo;
+    const F = CONFIG.field;
+    const pp = passer.group.position;
+    let tx = pp.x + this.side * C.manualDepth;
+    const maxDepth = F.length / 2 - 8; // не в объятия вратаря
+    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
+    this.runner = passer;
+    this.runnerTarget = { x: tx, z: Math.max(-24, Math.min(24, pp.z * 0.85)) };
+    this.runnerTimer = C.manualTtl;
+    const m = this.match;
+    if (m && this === m.humanTeam && this.receiver && this.receiver !== m.controlled) {
+      m.setControlled(this.receiver, 0.3);
+    }
+  }
+
   // Подключение крайнего защитника (overlap, ресёрч 14): мяч у широкого
   // игрока на фланге в средней/чужой трети — фулбек того же фланга забегает
   // СНАРУЖИ по бровке за линию мяча, растягивая оборону и открывая перевод

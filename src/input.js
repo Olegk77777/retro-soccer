@@ -79,9 +79,11 @@ export class Input {
     this._touch = { pass: false, shot: false, sprint: false, cross: false, through: false };
     this._swipeEvent = null; // свайп-удар с тача: {dir, power, curl}
 
-    // Смена управляемого игрока (Фаза 2): Q / LB — событие-«фронт», не удержание
+    // Смена управляемого игрока (Фаза 2): Q / LB — событие-«фронт», не удержание.
+    // Та же кнопка УДЕРЖАНИЕМ работает модификатором СТЕНОЧКИ (Q+ПАС)
     this._switchQueued = false;
     this._padSwitchPrev = false;
+    this._padSwitchHeld = false;
 
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -316,6 +318,7 @@ export class Input {
     this._padMove.x = 0;
     this._padMove.z = 0;
     this._pad.pass = this._pad.shot = this._pad.cross = this._pad.through = false;
+    this._padSwitchHeld = false;
     if (!p) return;
     const ax = p.axes[0] || 0;
     const ay = p.axes[1] || 0;
@@ -329,10 +332,18 @@ export class Input {
     this._pad.cross = btn(2);   // X / квадрат — навес (поменян местами с ударом)
     this._pad.through = btn(3); // Y / треугольник — пас на ход
     this._pad.sprint = trig(7); // RT / R2 (дальний правый курок) — спринт, перенесён с бампера RB
-    // LB / L1 — смена управляемого игрока (по фронту нажатия, как Q)
+    // LB / L1 — смена управляемого игрока (по фронту нажатия, как Q);
+    // удержание LB — модификатор стеночки (LB+пас)
     const sw = btn(4);
     if (sw && !this._padSwitchPrev) this._switchQueued = true;
     this._padSwitchPrev = sw;
+    this._padSwitchHeld = sw;
+  }
+
+  // Модификатор комбо: Q (клавиатура) или LB/L1 (геймпад) удерживается.
+  // С мячом Q+ПАС / LB+ПАС = СТЕНОЧКА: отдал — и рванул вперёд
+  get comboHeld() {
+    return this.keys.has('KeyQ') || this._padSwitchHeld;
   }
 
   // Смена игрока: одноразовое событие (Q / LB); на планшете — только авто

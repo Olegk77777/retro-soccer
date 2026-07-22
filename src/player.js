@@ -1001,10 +1001,21 @@ export class Player {
         ...strike,
         ttl: airborne ? P.aerial.buffer : P.strikeBufferTime,
         aim: null,
+        combo: input.comboHeld, // Q/LB в момент нажатия — заявка на стеночку
       };
     } else if (this.pendingStrike) {
-      this.pendingStrike.ttl -= dt;
-      if (this.pendingStrike.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+      const ps = this.pendingStrike;
+      const psAirShot = bp.y > P.kickMaxBallY &&
+        (ps.type === 'shot' || (ps.type === 'swipe' && ps.v && ps.v.kind === 'shot'));
+      if (psAirShot) {
+        // Подача ещё в полёте — заказ замыкания НЕ сгорает: жми D в любой
+        // момент полёта, удар исполнится на прилёте (фидбек Олега 22.07:
+        // завершение после навеса должно ощущаться ударом, а не отскоком)
+        ps.ttl = Math.max(ps.ttl, P.aerial.buffer);
+      } else {
+        ps.ttl -= dt;
+        if (ps.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+      }
     }
 
     // Пока пас ждёт мяча, стик пишет НАПРАВЛЕНИЕ будущей передачи:
@@ -1046,6 +1057,13 @@ export class Player {
         );
         this.kickCooldown = P.kickCooldown;
         this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
+        // СТЕНОЧКА (Q/LB + пас, 22.07.2026): пас ушёл партнёру — пасующий сам
+        // рвёт вперёд за спину опекуну, курсор переходит на адресата (как
+        // L1+пас в PES 5/6). Возврат мяча на ход — W
+        if (assist && (s.combo || input.comboHeld) &&
+            this.team && this.team.startManualOneTwo) {
+          this.team.startManualOneTwo(this);
+        }
       } else if (s.type === 'cross') {
         this.doCross(s.v, input, ball);
       } else if (s.type === 'shot') {
@@ -1097,6 +1115,25 @@ export class Player {
           this.startDive(relX / dist, relZ / dist, bp.y);
         }
       }
+    }
+
+    // Приём верхового мяча корпусом (фидбек Олега 22.07.2026): наш пас или
+    // перевод опускается на игрока, удар не заказан — грудь/бедро гасят мяч
+    // в ноги, как обычный приём паса, а не дают ему отскочить. В финишной
+    // зоне у чужих ворот авто-приём молчит: там подачу замыкают (D).
+    const TR = P.trap;
+    if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
+        !wantShot && bp.y > P.kickMaxBallY && bp.y <= TR.maxY &&
+        dist < A.reach && ball.vel.y < 1 &&
+        Math.hypot(ball.vel.x, ball.vel.z) >= TR.minSpeed) {
+      const mt = this.team ? this.team.match : null;
+      const oursIncoming = !mt || mt.possession === this.team;
+      let inFinish = false;
+      if (this.team) {
+        const dg = Math.hypot(this.team.attackGoalX - pos.x, pos.z);
+        inFinish = dg < CONFIG.ai.aerial.headerRange;
+      }
+      if (oursIncoming && !inFinish) this.trapBall(ball);
     }
 
     // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
@@ -1214,7 +1251,12 @@ export class Player {
       return;
     }
 
-    // Вне коридора: длинный заброс по направлению взгляда
+    // Вне коридора: сперва АДРЕСНЫЙ верховой мяч (фидбек Олега 22.07.2026) —
+    // короткий замах кладёт мягкий заброс на ближнего в конусе, полный
+    // переводит игру на дальний фланг; адресат встречает мяч, как обычный пас
+    if (this.loftedPass(t, ev.charge, input.move, ball)) return;
+
+    // Совсем некому отдать — прежний длинный заброс по направлению взгляда
     const power = t.powerMin + (t.powerMax - t.powerMin) * ev.charge; // >1 = передержка
     const lift = power * Math.tan((t.angle * Math.PI) / 180);
 
@@ -1231,6 +1273,89 @@ export class Player {
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.playOneShot('kick', 1.2, 0.16);
     this.afterCross(ball);
+  }
+
+  // Адресный верховой мяч (фидбек Олега 22.07.2026): навес вне флангового
+  // коридора ищет адресата в конусе стика/взгляда. Полоска выбирает дальность:
+  // короткая — мягкий заброс на ближнего (примет грудью/ногой), полная —
+  // перевод на дальний фланг. Адресат назначается приёмщиком и встречает мяч,
+  // как обычный пас. true = заброс исполнен; false = в конусе никого.
+  loftedPass(type, charge, aimMove, ball) {
+    const LP = CONFIG.cross.longPass;
+    const C = CONFIG.cross;
+    const B = CONFIG.ball;
+    const team = this.team;
+    if (!team) return false;
+    const pos = this.group.position;
+
+    // Направление намерения: стик/жест в момент исполнения, иначе взгляд
+    let fx = this.facing.x;
+    let fz = this.facing.z;
+    const il = aimMove ? Math.hypot(aimMove.x, aimMove.z) : 0;
+    if (il > 0.3) {
+      fx = aimMove.x / il;
+      fz = aimMove.z / il;
+    }
+
+    // Полоска = дальность адресата: короткий замах — ближний, полный — дальний
+    const want = LP.wantNear + (LP.wantFar - LP.wantNear) * Math.min(charge, 1);
+    let best = null;
+    let bestScore = -Infinity;
+    for (const mate of team.players) {
+      if (mate === this || mate.isKeeper) continue;
+      const mp = mate.group.position;
+      const ddx = mp.x - pos.x;
+      const ddz = mp.z - pos.z;
+      const d = Math.hypot(ddx, ddz);
+      if (d < LP.minDist || d > LP.maxDist) continue;
+      const cos = (ddx * fx + ddz * fz) / d;
+      if (cos < LP.coneCos) continue;
+      const score = cos * 20 - Math.abs(d - want) * 0.55;
+      if (score > bestScore) {
+        bestScore = score;
+        best = { mate, dist: d };
+      }
+    }
+    if (!best) return false;
+
+    // Баллистика под адресата с упреждением на его бег (угол дуги — от типа)
+    const theta = (type.angle * Math.PI) / 180;
+    const g = -B.gravity;
+    const t0 = Math.sqrt((2 * best.dist * Math.tan(theta)) / g); // грубое время полёта
+    const mp = best.mate.group.position;
+    const tx = mp.x + best.mate.vel.x * t0 * LP.lead;
+    const tz = mp.z + best.mate.vel.z * t0 * LP.lead;
+    const dx = tx - pos.x;
+    const dz = tz - pos.z;
+    const dist = Math.hypot(dx, dz) || 1;
+    let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * LP.fudge;
+    power = Math.max(type.powerMin, Math.min(type.powerMax, power));
+    if (charge > 1) power *= 1 + (charge - 1) * C.overPower; // передержка — перелёт
+    const lift = power * Math.tan(theta);
+
+    // Природная крутка ноги (ослабленная) с упреждением прицела под Магнус
+    const foot = this.kickFoot(ball);
+    const spin = (foot === 'R' ? -1 : 1) * type.curl * LP.curlK;
+    const flight = (2 * lift) / g;
+    const comp = -C.curlComp * spin * B.magnus * flight;
+    const ca = Math.cos(comp);
+    const sa = Math.sin(comp);
+    const nx = dx / dist;
+    const nz = dz / dist;
+    const dir = new THREE.Vector3(nx * ca - nz * sa, 0, nx * sa + nz * ca);
+
+    ball.strike(dir, power, lift, spin);
+    this.lastKick = { foot, contact: 'inside' };
+    this.rot = Math.atan2(dir.x, dir.z);
+    this.kickCooldown = CONFIG.player.kickCooldown;
+    this.ownEpisodeT = 0; // передача закрывает эпизод владения
+    this.playOneShot('kick', 1.2, 0.16);
+
+    // Адресат встречает мяч, как обычный пас (выйдет под точку и примет)
+    team.receiver = best.mate;
+    team.receiveTarget = { x: tx, z: tz };
+    team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, flight + 0.8);
+    return true;
   }
 
   // После подачи (ресёрч 11, принцип PES «курсор на принимающего»):
@@ -1289,6 +1414,9 @@ export class Player {
         this.afterCross(ball);
         return;
       }
+      // Вне коридора: адресный верховой мяч по нарисованному направлению
+      // (мягкий заброс / перевод на фланг — как с клавиатуры)
+      if (this.loftedPass(type, charge, { x: dir.x, z: dir.z }, ball)) return;
       const fw = this.applyFootwork(curl, ball);
       const power = (type.powerMin + (type.powerMax - type.powerMin) * charge) * fw.powerF;
       const lift = power * Math.tan((type.angle * Math.PI) / 180);
@@ -1759,6 +1887,23 @@ export class Player {
       }
     }
     return true;
+  }
+
+  // Приём верхового мяча корпусом (грудь/бедро): мяч гасится и мягко
+  // опускается в ноги — дальше обычное владение. Общий для человека и AI
+  // (фидбек Олега 22.07.2026: мяч не должен «отскакивать от деревянного»)
+  trapBall(ball) {
+    const T = CONFIG.player.trap;
+    const f = this.facing;
+    ball.vel.x = this.vel.x + f.x * T.push;
+    ball.vel.z = this.vel.z + f.z * T.push;
+    ball.vel.y = Math.min(ball.vel.y, 0) * T.keepVy;
+    ball.spin = 0;
+    ball.afterTouch = 0;
+    this.kickCooldown = T.settle; // мяч опускается с груди — нога ждёт
+    this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
+    this.cancelBallApproach();
+    this.playOneShot('receive', 1.3, 0.1);
   }
 
   // Верховой мяч у AI: сыграть в одно касание — вынос, скидка или кивок

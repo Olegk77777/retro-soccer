@@ -618,7 +618,14 @@ export class GoalSystem {
       remaining -= epsilonTime;
     }
 
-    if (remaining > 1e-6) p.addScaledVector(ball.vel, remaining);
+    if (remaining > 1e-6) {
+      // Финальный доводочный сдвиг кадра тоже обязан проверять линию ворот:
+      // без этого мяч, исчерпавший итерации столкновений (рикошет у штанги),
+      // пересекал линию «незамеченным» — и вместо гола свистели угловой
+      const before = p.clone();
+      p.addScaledVector(ball.vel, remaining);
+      if (this.recordGoalCrossing(ball, before, p)) event = 'goal';
+    }
     return event;
   }
 }

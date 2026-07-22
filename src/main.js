@@ -168,20 +168,29 @@ function frame() {
     powerEl.style.display = 'none';
   }
 
-  // ТВ-камера: стоит на боковой линии, плавно провожает мяч по X и по глубине.
-  // followZ важен: без слежения по Z игрок у ближней бровки выпадал за нижний край.
-  // Подлёт к дальней бровке (принцип FIFA/FC 26): мяч уходит вглубь — камера
-  // плавно приближается и чуть снижается, чтобы дальний игрок не «мельчал».
+  // ТВ-камера «живой оператор» (дух «Как обычно» из FC 25/26, 22.07.2026):
+  // стоит на боковой линии, провожает мяч по X и глубине, панорама УПРЕЖДАЕТ
+  // полёт мяча, а скорость доводки растёт с темпом эпизода. Подлёты: к дальней
+  // бровке (дальний игрок не мельчает) и в финальную треть (атака крупнее).
   const C = CONFIG.camera;
+  const F = CONFIG.field;
   const bx = ball.mesh.position.x;
   const bz = ball.mesh.position.z;
-  const far01 = Math.min(1, Math.max(0, -bz / (CONFIG.field.width / 2)));
+  const ballSpeed = Math.hypot(ball.vel.x, ball.vel.z);
+  // Упреждение: фокус-точка смещена туда, куда мяч летит (панорама дышит)
+  const leadX = Math.max(-C.leadMax, Math.min(C.leadMax, ball.vel.x * C.lead));
+  const leadZ = Math.max(-C.leadMax * 0.6, Math.min(C.leadMax * 0.6, ball.vel.z * C.lead * 0.6));
+  const fx = bx + leadX;
+  const fz = bz + leadZ;
+  const far01 = Math.min(1, Math.max(0, -bz / (F.width / 2)));
+  const atk01 = Math.min(1, Math.max(0,
+    (Math.abs(bx) - F.length * C.attackFrom) / (F.length * C.attackSpan)));
   camPos.set(
-    bx * C.followFactor,
-    C.height - C.farLower * far01,
-    C.distance - C.farApproach * far01,
+    fx * C.followFactor,
+    C.height - C.farLower * far01 - C.attackLower * atk01,
+    C.distance - C.farApproach * far01 - C.attackApproach * atk01,
   );
-  camLookTarget.set(bx * 0.8, C.lookHeight, bz * C.followZ);
+  camLookTarget.set(fx * 0.8, C.lookHeight, fz * C.followZ);
   const ic = match && match.introCam;
   if (ic) {
     // ТВ-заставка: камеру ведёт параметрический путь интро; на выходе
@@ -190,8 +199,11 @@ function frame() {
     camera.position.lerpVectors(camPos, ic.pos, k);
     camLook.lerpVectors(camLookTarget, ic.look, k);
   } else {
-    camera.position.lerp(camPos, C.lerp * 60 * dt);
-    camLook.lerp(camLookTarget, C.lerp * 60 * dt);
+    // Быстрый эпизод (прострел, дальний перевод) — камера живее, штиль — плавнее
+    const kCam = Math.min(1,
+      (C.lerp + (C.lerpFast - C.lerp) * Math.min(1, ballSpeed / C.speedRef)) * 60 * dt);
+    camera.position.lerp(camPos, kCam);
+    camLook.lerp(camLookTarget, kCam);
   }
   camera.lookAt(camLook);
 
