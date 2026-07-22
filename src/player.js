@@ -148,6 +148,9 @@ export class Player {
     this.currentAction = null;
     this.currentName = null;
     this.oneShot = null;     // играющий сейчас одноразовый клип
+    this.oneShotHold = 0;    // сек до принудительного отпускания one-shot: короткие
+                             // касания (приём) не должны блокировать бег на всю
+                             // длину клипа — иначе игрок «залипает» и скользит в позе
 
     loadPlayerModel()
       .then((gltf) => this.attachModel(gltf))
@@ -238,6 +241,7 @@ export class Player {
     this.currentAction = a;
     this.currentName = name;
     this.oneShot = a;
+    this.oneShotHold = 0; // по умолчанию one-shot держится до конца клипа
   }
 
   reset(x = -3, z = 0, rot = Math.PI / 2) {
@@ -254,6 +258,7 @@ export class Player {
     this.dribbleDir = null;
     this.ballApproach = null;
     this.ownEpisodeT = 0;
+    this.oneShotHold = 0;
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.diveT = 0;
@@ -433,6 +438,17 @@ export class Player {
     }
     this.group.rotation.x = tilt;
     if (this.mixer) {
+      // Короткое касание (приём мяча) не держит игрока в позе весь длинный
+      // клип: по истечении oneShotHold отпускаем one-shot, и локомоция ниже
+      // сама сделает плавный crossfade к бегу/стойке (фидбек Олега 22.07:
+      // «после приёма то ли падает, то ли прыгает» — на деле скользил в позе)
+      if (this.oneShot && this.oneShotHold > 0) {
+        this.oneShotHold -= dt;
+        if (this.oneShotHold <= 0) {
+          this.oneShot = null;
+          this.currentName = null;
+        }
+      }
       // Пока играет одноразовый (удар, ловля) — не дёргаем
       if (!this.oneShot) {
         if (speed < 0.6) {
@@ -1951,7 +1967,10 @@ export class Player {
     this.kickCooldown = T.settle; // мяч опускается с груди — нога ждёт
     this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
     this.cancelBallApproach();
-    this.playOneShot('receive', 1.3, 0.1);
+    // Короткий кадр приёма и БЫСТРОЕ отпускание анимации: клип receive длинный
+    // (3 с) и блокировал бы бег, из-за чего игрок «залипал» и скользил в позе
+    this.playOneShot('receive', 1.5, 0.2);
+    this.oneShotHold = T.animTime;
   }
 
   // Верховой мяч у AI: сыграть в одно касание — вынос, скидка или кивок
