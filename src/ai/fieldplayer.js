@@ -32,6 +32,13 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // Замыкание в одно касание уже идёт (замах): стоим, мяч перенаправит
+  // updateAerialStrike в момент контакта — не начинаем новых решений
+  if (p.aerialStrike) {
+    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    return;
+  }
+
   // Лежим после броска — только встаём, никаких решений
   if (p.downT > 0) {
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
