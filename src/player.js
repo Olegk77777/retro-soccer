@@ -129,6 +129,7 @@ export class Player {
     this.ballApproach = null; // обязательство добежать до следующего касания
     this.sprintBoost = 0;    // инерция спринта: 1 = полный темп, спадает плавно
     this.jumpT = 0;          // остаток прыжка под удар головой (визуальная дуга)
+    this.jumpHeight = null;  // высота текущего прыжка (от силы нажатия); null = дефолт
     this.diveT = 0;          // бросок корпусом (ласточка): время полёта
     this.diveDir = null;     // направление броска
     this.downT = 0;          // лежим после броска + подъём (getup)
@@ -258,6 +259,7 @@ export class Player {
     this.pendingLaunch = null;
     this.sprintBoost = 0;
     this.jumpT = 0;
+    this.jumpHeight = null;
     this.diveT = 0;
     this.diveDir = null;
     this.downT = 0;
@@ -397,8 +399,9 @@ export class Player {
       const A = P.aerial;
       this.jumpT -= dt;
       const k = Math.max(0, 1 - this.jumpT / A.jumpTime);
-      this.group.position.y = Math.sin(Math.PI * k) * A.jumpHeight;
-      if (this.jumpT <= 0) this.group.position.y = 0;
+      const h = this.jumpHeight != null ? this.jumpHeight : A.jumpHeight;
+      this.group.position.y = Math.sin(Math.PI * k) * h;
+      if (this.jumpT <= 0) { this.group.position.y = 0; this.jumpHeight = null; }
     }
     // Бросок корпусом (ласточка) и подъём: наклон фигуры по взгляду
     // (порядок эйлера YXZ), после броска — лежим и встаём клипом getup.
@@ -1597,7 +1600,10 @@ export class Player {
         nz *= A.dive.noise;
         ny *= A.dive.noise;
       } else if (styleName === 'header') {
+        // Резкий прыжок; ВЫСОТА от силы нажатия (тап — низкий кивок, полный
+        // замах — высокий выпрыг). Мяч вылетит в верхней точке (см. windup ниже)
         this.jumpT = A.jumpTime;
+        this.jumpHeight = A.jumpHeight * (1 - A.jumpChargeH + A.jumpChargeH * Math.min(1, charge));
       }
     }
     // Замыкание (голова / с лёта) ВСЕГДА наводится на ЧУЖИЕ ворота, а не летит
@@ -1689,7 +1695,11 @@ export class Player {
     // иначе мяч улетал раньше анимации удара (фидбек Олега 23.07). Бросок
     // (ласточка) и обычный удар исполняются мгновенно, как раньше.
     if (opts.aerial && !opts.dive) {
-      this._scheduleAerialLaunch(launch, curl, st, ball);
+      // Голова: мяч вылетает в ВЕРХНЕЙ ТОЧКЕ прыжка (половина jumpTime) —
+      // игрок встречает мяч на пике, а не в начале подъёма. Удар с лёта —
+      // резкий щелчок (volleyContact), прыжка нет
+      const windup = styleName === 'header' ? A.jumpTime * 0.5 : A.volleyContact;
+      this._scheduleAerialLaunch(launch, curl, st, ball, windup);
     } else {
       ball.vel.copy(launch);
       ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
@@ -1699,17 +1709,21 @@ export class Player {
   }
 
   // Отложенный вылет мяча под кадр контакта клипа замыкания. Анимация удара
-  // стартует с самого замаха (кадр 0), мяч замирает у точки контакта, и в
-  // момент, когда клип доходит до кадра контакта (animAt), стартует полёт.
-  // Синхронно с ударом головой/с лёта — вратарский принцип releaseClip.
-  _scheduleAerialLaunch(vel, spin, st, ball) {
-    const windup = (st.animAt || 0) / (st.animTs || 1); // реальные сек до контакта
-    this.playOneShot(st.anim || 'kick', st.animTs, 0);   // клип с самого замаха
+  // стартует с самого замаха (кадр 0), мяч замирает у точки контакта, и через
+  // windup секунд (для головы — ВЕРХНЯЯ ТОЧКА прыжка) стартует полёт. Темп
+  // клипа подбирается под короткий windup — замах играет РЕЗКО (фидбек Олега
+  // 23.07: замыкание должно «выстреливать», а не медленно парить).
+  _scheduleAerialLaunch(vel, spin, st, ball, windup) {
+    const w = Math.max(0.03, windup || (st.animAt || 0) / (st.animTs || 1));
+    // Клип доходит до кадра контакта (animAt) ровно к вылету мяча — при коротком
+    // windup замах ускоряется сам, и удар головой/с лёта «щёлкает» быстро
+    const animTs = (st.animAt || 0.12) / w;
+    this.playOneShot(st.anim || 'kick', animTs, 0);
     this.pendingLaunch = {
       vel: vel.clone(),
       spin,
       t: 0,
-      windup,
+      windup: w,
       anchor: ball.mesh.position.clone(), // мяч ждёт удара у точки контакта
     };
     ball.vel.set(0, 0, 0);
@@ -2042,16 +2056,21 @@ export class Player {
   aiAerial(ball, dir, power, lift) {
     const A = CONFIG.player.aerial;
     const isHeader = ball.mesh.position.y >= A.headerY;
-    if (isHeader) this.jumpT = A.jumpTime;
+    if (isHeader) {
+      this.jumpT = A.jumpTime;
+      this.jumpHeight = A.jumpHeight; // AI — полноценный выпрыг
+    }
     const st = isHeader
-      ? { anim: 'header', animTs: 1.5, animAt: 0.12 }
-      : { anim: 'kick', animTs: 1.7, animAt: 0.13 };
+      ? { anim: 'header', animAt: 0.12 }
+      : { anim: 'kick', animAt: 0.13 };
     const d = Math.hypot(dir.x, dir.z) || 1;
     const ndir = { x: dir.x / d, z: dir.z / d };
     this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0; // замыкание закрывает эпизод владения
     const vel = new THREE.Vector3(ndir.x * power, lift, ndir.z * power);
-    this._scheduleAerialLaunch(vel, 0, st, ball);
+    // Мяч в верхней точке прыжка (голова) / резкий щелчок (с лёта) — синхрон
+    const windup = isHeader ? A.jumpTime * 0.5 : A.volleyContact;
+    this._scheduleAerialLaunch(vel, 0, st, ball, windup);
   }
 }
