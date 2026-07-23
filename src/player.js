@@ -148,9 +148,6 @@ export class Player {
     this.currentAction = null;
     this.currentName = null;
     this.oneShot = null;     // играющий сейчас одноразовый клип
-    this.oneShotHold = 0;    // сек до принудительного отпускания one-shot: короткие
-                             // касания (приём) не должны блокировать бег на всю
-                             // длину клипа — иначе игрок «залипает» и скользит в позе
 
     loadPlayerModel()
       .then((gltf) => this.attachModel(gltf))
@@ -241,7 +238,6 @@ export class Player {
     this.currentAction = a;
     this.currentName = name;
     this.oneShot = a;
-    this.oneShotHold = 0; // по умолчанию one-shot держится до конца клипа
   }
 
   reset(x = -3, z = 0, rot = Math.PI / 2) {
@@ -258,7 +254,6 @@ export class Player {
     this.dribbleDir = null;
     this.ballApproach = null;
     this.ownEpisodeT = 0;
-    this.oneShotHold = 0;
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.diveT = 0;
@@ -438,17 +433,6 @@ export class Player {
     }
     this.group.rotation.x = tilt;
     if (this.mixer) {
-      // Короткое касание (приём мяча) не держит игрока в позе весь длинный
-      // клип: по истечении oneShotHold отпускаем one-shot, и локомоция ниже
-      // сама сделает плавный crossfade к бегу/стойке (фидбек Олега 22.07:
-      // «после приёма то ли падает, то ли прыгает» — на деле скользил в позе)
-      if (this.oneShot && this.oneShotHold > 0) {
-        this.oneShotHold -= dt;
-        if (this.oneShotHold <= 0) {
-          this.oneShot = null;
-          this.currentName = null;
-        }
-      }
       // Пока играет одноразовый (удар, ловля) — не дёргаем
       if (!this.oneShot) {
         if (speed < 0.6) {
@@ -1133,13 +1117,14 @@ export class Player {
       }
     }
 
-    // Приём верхового мяча корпусом (фидбек Олега 22.07.2026): наш пас или
-    // перевод опускается на игрока, удар не заказан — грудь/бедро гасят мяч
-    // в ноги, как обычный приём паса, а не дают ему отскочить. В финишной
-    // зоне у чужих ворот авто-приём молчит: там подачу замыкают (D).
+    // Приём верхового мяча (фидбек Олега 22–23.07.2026): наш пас или перевод
+    // опускается на игрока, удар не заказан — мяч гасится в ноги на ЛЮБОЙ
+    // досягаемой высоте (грудь, голова — без прыжков и клипов), как обычный
+    // приём паса. В финишной зоне у чужих ворот авто-приём молчит: там
+    // подачу замыкают (D).
     const TR = P.trap;
     if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
-        !wantShot && bp.y > P.kickMaxBallY && bp.y <= TR.maxY &&
+        !wantShot && bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
         dist < A.reach && ball.vel.y < 1 &&
         Math.hypot(ball.vel.x, ball.vel.z) >= TR.minSpeed) {
       const mt = this.team ? this.team.match : null;
@@ -1325,8 +1310,11 @@ export class Player {
       fz = bz / bl;
     }
 
-    // Полоска = дальность адресата: короткий замах — ближний, полный — дальний
-    const want = LP.wantNear + (LP.wantFar - LP.wantNear) * Math.min(charge, 1);
+    // Полоска = дальность адресата: короткий замах — ближний, полный — дальний.
+    // Шкала нормируется от пола тапа (0.15, как zoneT навеса): чистый тап =
+    // САМЫЙ ближний адресат — короткая перекидка через соперника (23.07)
+    const chargeT = Math.max(0, (Math.min(charge, 1) - 0.15) / 0.85);
+    const want = LP.wantNear + (LP.wantFar - LP.wantNear) * chargeT;
     // Помощь в направлении: конус расширяется слайдером «Помощь в пасах»
     const passAssist = CONFIG.ai.humanPass.assist;
     const coneCos = LP.coneCos - passAssist.level * LP.coneWiden;
@@ -1351,18 +1339,34 @@ export class Player {
     }
     if (!best) return false;
 
-    // Баллистика под адресата с упреждением на его бег (угол дуги — от типа)
-    const theta = (type.angle * Math.PI) / 180;
+    // Баллистика под адресата с упреждением на его бег. Угол дуги: короткая
+    // перекидка — КРУТАЯ свеча (перелетает голову соперника и падает рядом),
+    // длинный перевод — обычный угол типа (фидбек Олега 23.07: «перекинуть
+    // соперника и отдать ближнему верхом» было невозможно — мяч улетал)
+    const chipT = Math.max(0, Math.min(1,
+      (LP.chipFar - best.dist) / (LP.chipFar - LP.chipDist)));
+    const angleDeg = type.angle + (LP.chipAngle - type.angle) * chipT;
+    const theta = (angleDeg * Math.PI) / 180;
     const g = -B.gravity;
     const t0 = Math.sqrt((2 * best.dist * Math.tan(theta)) / g); // грубое время полёта
     const mp = best.mate.group.position;
-    const tx = mp.x + best.mate.vel.x * t0 * LP.lead;
-    const tz = mp.z + best.mate.vel.z * t0 * LP.lead;
+    // Упреждение тает на коротких перекидках: мяч кладётся РЯДОМ с партнёром
+    // («отдать ближнему верхом»), а не на ход за 20 м — бегущий адресат
+    // растягивал перекидку в длинный заброс (фидбек Олега 23.07)
+    const leadK = LP.lead * (1 - chipT * 0.7);
+    const tx = mp.x + best.mate.vel.x * t0 * leadK;
+    const tz = mp.z + best.mate.vel.z * t0 * leadK;
     const dx = tx - pos.x;
     const dz = tz - pos.z;
     const dist = Math.hypot(dx, dz) || 1;
-    let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * LP.fudge;
-    power = Math.max(type.powerMin, Math.min(type.powerMax, power));
+    // Надбавка на сопротивление воздуха нужна только длинным настильным
+    // дугам: короткая крутая перекидка летит медленно, drag её почти не ест,
+    // и fudge давал чистый перелёт ~25% дальности (фидбек Олега 23.07)
+    const fudgeK = 1 + (LP.fudge - 1) * (1 - chipT);
+    let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * fudgeK;
+    // Пол силы ниже powerMin типа: короткой перекидке нужна МАЛАЯ скорость,
+    // иначе даже минимальный «зажим» уносил мяч на 12+ метров
+    power = Math.max(LP.powerFloor, Math.min(type.powerMax, power));
     if (charge > 1) power *= 1 + (charge - 1) * C.overPower; // передержка — перелёт
     const lift = power * Math.tan(theta);
 
@@ -1384,10 +1388,13 @@ export class Player {
     this.ownEpisodeT = 0; // передача закрывает эпизод владения
     this.playOneShot('kick', 1.2, 0.16);
 
-    // Адресат встречает мяч, как обычный пас (выйдет под точку и примет)
+    // Адресат встречает мяч, как обычный пас: точка приёма — ЧЕСТНЫЙ прогноз
+    // приземления уже улетевшего мяча (drag + Магнус), а не идеальная парабола
+    // — раньше кламп силы смещал реальную точку, и адресат ждал не там
+    const land = predictLanding(ball, CONFIG.player.aerial.contactY);
     team.receiver = best.mate;
-    team.receiveTarget = { x: tx, z: tz };
-    team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, flight + 0.8);
+    team.receiveTarget = land ? { x: land.x, z: land.z } : { x: tx, z: tz };
+    team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, (land ? land.t : flight) + 0.8);
     return true;
   }
 
@@ -1945,12 +1952,11 @@ export class Player {
     return true;
   }
 
-  // Приём верхового мяча корпусом (грудь/бедро): мяч гасится и опускается
-  // ПОД НОГИ — дальше обычное владение. Общий для человека и AI (фидбек
-  // Олега 22.07.2026: мяч не должен «отскакивать от деревянного»).
-  // Горизонталь капается жёстко (maxOut) и мяч идёт вниз (dropSpeed) —
-  // после приёма он медленный и низкий, поэтому приём НЕ триггерится
-  // повторно и анимация `receive` не перезапускается («колбасит»).
+  // Приём верхового мяча: МАКСИМАЛЬНО просто и привязано к месту (фидбек
+  // Олега 23.07.2026) — никакого клипа и прыжков, игрок остаётся в обычной
+  // локомоции, мяч гасится и опускается ему ПОД НОГИ. Горизонталь капается
+  // жёстко (maxOut), вертикаль идёт вниз (dropSpeed) — после приёма мяч
+  // медленный и низкий, приём не триггерится повторно.
   trapBall(ball) {
     const T = CONFIG.player.trap;
     const f = this.facing;
@@ -1961,16 +1967,12 @@ export class Player {
       vx = (vx / sp) * T.maxOut;
       vz = (vz / sp) * T.maxOut;
     }
-    ball.vel.set(vx, -T.dropSpeed, vz); // мяч сходит с груди вниз, под ноги
+    ball.vel.set(vx, -T.dropSpeed, vz); // мяч сходит с корпуса вниз, под ноги
     ball.spin = 0;
     ball.afterTouch = 0;
-    this.kickCooldown = T.settle; // мяч опускается с груди — нога ждёт
+    this.kickCooldown = T.settle; // мяч опускается — нога ждёт
     this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
     this.cancelBallApproach();
-    // Короткий кадр приёма и БЫСТРОЕ отпускание анимации: клип receive длинный
-    // (3 с) и блокировал бы бег, из-за чего игрок «залипал» и скользил в позе
-    this.playOneShot('receive', 1.5, 0.2);
-    this.oneShotHold = T.animTime;
   }
 
   // Верховой мяч у AI: сыграть в одно касание — вынос, скидка или кивок
