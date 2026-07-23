@@ -148,6 +148,7 @@ export class Player {
     this.currentAction = null;
     this.currentName = null;
     this.oneShot = null;     // играющий сейчас одноразовый клип
+    this.pendingLaunch = null; // замыкание: мяч ждёт кадра контакта клипа удара
 
     loadPlayerModel()
       .then((gltf) => this.attachModel(gltf))
@@ -254,6 +255,7 @@ export class Player {
     this.dribbleDir = null;
     this.ballApproach = null;
     this.ownEpisodeT = 0;
+    this.pendingLaunch = null;
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.diveT = 0;
@@ -1126,7 +1128,8 @@ export class Player {
     if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
         !wantShot && bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
         dist < A.reach && ball.vel.y < 1 &&
-        Math.hypot(ball.vel.x, ball.vel.z) >= TR.minSpeed) {
+        ball.vel.length() >= TR.minSpeed) { // полная скорость: крутая перекидка
+                                            // почти без горизонтали, но падает быстро
       const mt = this.team ? this.team.match : null;
       const oursIncoming = !mt || mt.possession === this.team;
       let inFinish = false;
@@ -1395,6 +1398,14 @@ export class Player {
     team.receiver = best.mate;
     team.receiveTarget = land ? { x: land.x, z: land.z } : { x: tx, z: tz };
     team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, (land ? land.t : flight) + 0.8);
+    // Курсор СРАЗУ переходит на адресата перекидки (как после навеса в
+    // штрафную): человек ведёт приёмщика на мяч и принимает его сам, а не
+    // ждёт запоздалого авто-переключения — иначе мяч «отскакивал» до смены
+    // управляемого (фидбек Олега 23.07). Приёмщик и без ввода бежит к точке.
+    const m = team.match;
+    if (m && team === m.humanTeam && best.mate !== m.controlled) {
+      m.setControlled(best.mate, 0.4);
+    }
     return true;
   }
 
@@ -1610,6 +1621,7 @@ export class Player {
     const useAim = aimOk && dist > 2.5 &&
       (opts.aerial || (angle < S.assistAngle && dist < S.assistDist && Math.abs(f.x) > 0.1));
 
+    const launch = new THREE.Vector3();
     if (useAim) {
       // БЕЗ магнита: базовый прицел — точка, куда смотрит игрок на линии ворот.
       // Стрелки сдвигают её; за штангу — можно, промах реален. Замыкание боком
@@ -1657,9 +1669,7 @@ export class Player {
       // Замыкание сверху может бить ВНИЗ (кивок в газон/угол — классика)
       let vy = (targetY - bp.y) / t - 0.5 * B.gravity * t;
       vy = Math.max(opts.aerial ? A.downLift : 0, Math.min(S.maxLift, vy));
-      ball.vel.set(dir.x * power, vy, dir.z * power);
-      ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
-      ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
+      launch.set(dir.x * power, vy, dir.z * power);
     } else if (opts.aerial && this.team) {
       // Замыкание у самой линии (dist ≤ 2.5): всё равно бьём В ВОРОТА, а не
       // по корпусу — иначе кивок в упор улетал мимо (фидбек Олега 22.07)
@@ -1667,14 +1677,64 @@ export class Player {
       const d = new THREE.Vector3(goalX - bp.x, 0, -bp.z);
       if (d.lengthSq() < 0.01) d.set(Math.sign(goalX) || 1, 0, 0);
       d.normalize();
-      ball.strike(d, power, lift, curl);
+      launch.set(d.x * power, lift, d.z * power);
     } else {
       // Обычный удар по направлению взгляда, высота растёт с замахом
       const lift = (S.freeLiftMin + (S.freeLiftMax - S.freeLiftMin) * effCharge) * st.liftFactor;
-      ball.strike(this.facing, power, lift, curl);
+      launch.set(this.facing.x * power, lift, this.facing.z * power);
     }
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot(st.anim || 'kick', st.animTs, st.animAt); // клип и темп — от типа удара
+    // Замыкание (голова / с лёта): анимация замаха играет СЕЙЧАС с начала, а
+    // мяч вылетает В КАДРЕ КОНТАКТА клипа (как вратарский вынос/вбрасывание) —
+    // иначе мяч улетал раньше анимации удара (фидбек Олега 23.07). Бросок
+    // (ласточка) и обычный удар исполняются мгновенно, как раньше.
+    if (opts.aerial && !opts.dive) {
+      this._scheduleAerialLaunch(launch, curl, st, ball);
+    } else {
+      ball.vel.copy(launch);
+      ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
+      ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
+      this.playOneShot(st.anim || 'kick', st.animTs, st.animAt); // клип и темп — от типа удара
+    }
+  }
+
+  // Отложенный вылет мяча под кадр контакта клипа замыкания. Анимация удара
+  // стартует с самого замаха (кадр 0), мяч замирает у точки контакта, и в
+  // момент, когда клип доходит до кадра контакта (animAt), стартует полёт.
+  // Синхронно с ударом головой/с лёта — вратарский принцип releaseClip.
+  _scheduleAerialLaunch(vel, spin, st, ball) {
+    const windup = (st.animAt || 0) / (st.animTs || 1); // реальные сек до контакта
+    this.playOneShot(st.anim || 'kick', st.animTs, 0);   // клип с самого замаха
+    this.pendingLaunch = {
+      vel: vel.clone(),
+      spin,
+      t: 0,
+      windup,
+      anchor: ball.mesh.position.clone(), // мяч ждёт удара у точки контакта
+    };
+    ball.vel.set(0, 0, 0);
+    ball.spin = 0;
+    ball.afterTouch = 0;
+  }
+
+  // Каждый кадр (из Match, до update/aiUpdate): держим мяч у точки контакта,
+  // пока замах не дошёл до кадра удара, затем запускаем полёт. Прыжок под
+  // удар головой (jumpT) уже идёт — игрок встречает мяч в высшей точке.
+  processPendingLaunch(dt, ball) {
+    const pl = this.pendingLaunch;
+    if (!pl) return;
+    pl.t += dt;
+    ball.mesh.position.copy(pl.anchor);
+    if (pl.t >= pl.windup) {
+      ball.vel.copy(pl.vel);
+      ball.spin = pl.spin;
+      ball.afterTouch = CONFIG.ball.afterTouchTime;
+      this.pendingLaunch = null;
+    } else {
+      ball.vel.set(0, 0, 0);
+      ball.spin = 0;
+      ball.afterTouch = 0;
+    }
   }
 
   // Бросок корпусом к мячу (удар в падении, просьба Олега 18.07.2026):
@@ -1976,14 +2036,22 @@ export class Player {
   }
 
   // Верховой мяч у AI: сыграть в одно касание — вынос, скидка или кивок
-  // в створ. Клип и прыжок — по высоте контакта (голова/с лёта)
+  // в створ. Клип и прыжок — по высоте контакта (голова/с лёта). Мяч вылетает
+  // В КАДРЕ КОНТАКТА клипа (тот же синхрон, что у замыкания человека) —
+  // AI-удары с лёта/головой тоже не «опережают» анимацию (фидбек Олега 23.07)
   aiAerial(ball, dir, power, lift) {
     const A = CONFIG.player.aerial;
     const isHeader = ball.mesh.position.y >= A.headerY;
     if (isHeader) this.jumpT = A.jumpTime;
-    const anim = isHeader
-      ? { name: 'header', ts: 1.5, at: 0.12 }
-      : { name: 'kick', ts: 1.7, at: 0.13 };
-    this.aiKick(ball, dir, power, lift, 0, anim);
+    const st = isHeader
+      ? { anim: 'header', animTs: 1.5, animAt: 0.12 }
+      : { anim: 'kick', animTs: 1.7, animAt: 0.13 };
+    const d = Math.hypot(dir.x, dir.z) || 1;
+    const ndir = { x: dir.x / d, z: dir.z / d };
+    this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
+    this.kickCooldown = CONFIG.player.kickCooldown;
+    this.ownEpisodeT = 0; // замыкание закрывает эпизод владения
+    const vel = new THREE.Vector3(ndir.x * power, lift, ndir.z * power);
+    this._scheduleAerialLaunch(vel, 0, st, ball);
   }
 }

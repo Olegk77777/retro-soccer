@@ -481,6 +481,9 @@ export class Match {
 
     for (const team of this.teams) {
       for (const p of team.players) {
+        // Замыкание: мяч ждёт кадра контакта клипа удара, потом вылетает —
+        // синхрон удара головой/с лёта с анимацией (до движения игрока)
+        if (p.pendingLaunch && !paused) p.processPendingLaunch(dt, this.ball);
         if (this.restart && p === this.restart.taker) this.updateTaker(p, dt);
         else if (p.isKeeper && p.ai && p.ai.holding) this.updateKeeperHold(p, dt);
         else if (p === this.controlled) p.update(dt, this.input, this.ball);

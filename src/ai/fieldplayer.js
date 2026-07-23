@@ -99,7 +99,9 @@ export function updateFieldPlayer(p, dt, ball) {
     : (myBallDist < AP.reach &&
         bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY);
   if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' && ball.vel.y < 2 &&
-      Math.hypot(ball.vel.x, ball.vel.z) > 4) {
+      // Полная скорость: крутая перекидка почти без горизонтали, но падает
+      // быстро — иначе адресат не принимал её и мяч «отскакивал» мимо ног
+      ball.vel.length() > 4) {
     aerialPlay(p, ball, diving);
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
     return;
