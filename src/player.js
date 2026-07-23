@@ -151,6 +151,7 @@ export class Player {
     this.oneShot = null;     // играющий сейчас одноразовый клип
     this.aerialStrike = null; // замыкание в одно касание: замах играет, мяч
                               // подлетает, перенаправляется в момент контакта
+    this._ignoreShotEdge = false; // проглотить отпускание D после волея на удержании
 
     loadPlayerModel()
       .then((gltf) => this.attachModel(gltf))
@@ -258,6 +259,7 @@ export class Player {
     this.ballApproach = null;
     this.ownEpisodeT = 0;
     this.aerialStrike = null;
+    this._ignoreShotEdge = false;
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.jumpHeight = null;
@@ -970,7 +972,10 @@ export class Player {
     let pass = input.pass.consume();
     const through = input.through.consume();
     let cross = input.consumeCross();
-    const shot = input.shot.consume();
+    let shot = input.shot.consume();
+    // Замыкание волея стартовало ещё на удержании D — гасим событие отпускания,
+    // чтобы после волея не вылетел лишний удар (фидбек Олега 24.07)
+    if (this._ignoreShotEdge && shot !== null) { shot = null; this._ignoreShotEdge = false; }
     const swipe = input.consumeSwipe();
 
     // Подкат (○ из PES, ресёрч 13): фронт нажатия НАВЕСА, когда мяч не у
@@ -1111,10 +1116,18 @@ export class Player {
           { dir: gdir, curl: -s.v.curl * CONFIG.shot.swipeCurl },
           { aerial: true, dive: true });
       }
-    } else if (canAerialPrep && wantShot) {
-      // Начинаем замах в одно касание: мяч подлетает, перенаправление в контакте
-      this.beginAerialStrike(this.pendingStrike, input, ball);
-      this.pendingStrike = null;
+    } else if (canAerialPrep && (wantShot || input.shot.held)) {
+      // Начинаем замах в одно касание: мяч подлетает, перенаправление в контакте.
+      // Триггер и по УДЕРЖАНИЮ D (замах волея копится, пока мяч летит) — иначе
+      // держащий D для мощного волея не бил вовсе (фидбек Олега 24.07).
+      if (wantShot) {
+        this.beginAerialStrike(this.pendingStrike, input, ball);
+        this.pendingStrike = null;
+      } else {
+        this.beginAerialStrike({ type: 'shot', v: Math.max(0.15, input.shot.charge01) },
+          input, ball);
+        this._ignoreShotEdge = true; // событие отпускания D не должно дать второй удар
+      }
     } else if (wantShot && !diving && !downed && this.kickCooldown <= 0 &&
         dist >= A.reach && dist < DV.reach &&
         bp.y >= DV.minY && bp.y <= DV.maxY) {
@@ -1138,9 +1151,14 @@ export class Player {
     // досягаемой высоте (грудь, голова — без прыжков и клипов), как обычный
     // приём паса. В финишной зоне у чужих ворот авто-приём молчит: там
     // подачу замыкают (D).
+    // ВАЖНО (фидбек Олега 24.07): приём НЕ срабатывает, пока игрок ЗАКАЗАЛ
+    // удар — держит D для замаха волея (событие удара выходит только на
+    // отпускании, wantShot тогда ещё false). Иначе приём «съедал» мяч грудью
+    // до волея. input.strikeCommitted = любая боевая кнопка нажата/ждёт.
     const TR = P.trap;
     if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
-        !wantShot && !this.aerialStrike && bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
+        !wantShot && !input.strikeCommitted && !this.aerialStrike &&
+        bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
         dist < A.reach && ball.vel.y < 1 &&
         ball.vel.length() >= TR.minSpeed) { // полная скорость: крутая перекидка
                                             // почти без горизонтали, но падает быстро
@@ -1536,10 +1554,13 @@ export class Player {
   // мячу (пас на ход) -> ПОДЪЁМ (с лёта, driven); иначе -> ЩЕЧКА (плассированный)
   strikeStyle(charge, ball) {
     const ST = CONFIG.shot.styles;
-    if (charge <= ST.toe.maxCharge) return 'toe';
     const speed = Math.hypot(this.vel.x, this.vel.z);
     const rel = Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z);
-    if (speed >= ST.instep.minRunSpeed || rel >= ST.instep.minBallRel) return 'instep';
+    // Приходящий на скорости мяч бьётся с лёта ПОДЪЁМОМ (driven) — даже тапом:
+    // первое касание прострела это удар ногой, а не «подставить носок». Проверка
+    // до тычка (фидбек Олега 24.07: низкий прострел выходил слабым toe-тычком)
+    if (rel >= ST.instep.minBallRel || speed >= ST.instep.minRunSpeed) return 'instep';
+    if (charge <= ST.toe.maxCharge) return 'toe';
     return 'side';
   }
 
