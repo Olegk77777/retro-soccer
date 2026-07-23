@@ -3,6 +3,31 @@
 Каждая форма клуба — один PNG 64×64 по этой схеме. Замена файла = новая форма,
 код не трогаем. Отрисовка пиксель-в-пиксель (NearestFilter), как на PS1.
 
+Путь к форме задаётся в `data/teams/*.json`:
+
+```json
+"kits": {
+  "home": "./textures/kits/brazil-1998-home.png",
+  "goalkeeper": "./textures/kits/brazil-1998-gk.png"
+}
+```
+
+Готовые комплекты ЧМ-98:
+
+- `brazil-1998-home.png` / `brazil-1998-gk.png`
+- `france-1998-home.png` / `france-1998-gk.png`
+
+Их исходная пиксельная разметка хранится в `tools/generate-kit-textures.mjs`;
+повторный запуск скрипта пересобирает четыре PNG без сглаживания.
+
+Исторические ориентиры:
+
+- [Бразилия 1998, домашняя](https://www.footballkitarchive.com/brazil-1998-home-kit-8221/)
+- [Бразилия 1998, вратарская](https://www.footballkitarchive.com/brazil-1998-gk-1-kit/61442/)
+- [Франция 1998, домашняя ЧМ](https://www.footballkitarchive.com/france-1998-world-cup-home-kit-4720/)
+- [Франция 1998, вратарская](https://www.footballkitarchive.com/france-1998-gk-1-kit/)
+- [Финал ЧМ-98, архив FIFA](https://www.plus.fifa.com/fr/content/brasilien-frankreich-finale-fifa-fussball-weltmeisterschaft-frankreich-1998-highlights/bb25cc85-30b2-47e8-b721-a419b961ca19)
+
 Координаты в пикселях, **(0,0) — левый нижний угол** (как в Blender/OpenGL).
 
 ```

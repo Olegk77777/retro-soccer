@@ -17,13 +17,35 @@ function loadPlayerModel() {
   return modelPromise;
 }
 
-// Перекраска атласа формы под цвет команды: цветные пиксели (красный дефолт)
-// получают заданный цвет с сохранением светотени, белый/чёрный не трогаются.
-// Кэш по цвету: у 4 расцветок (2 команды + 2 вратаря) — 4 текстуры на всех.
+// Конкретная форма команды приходит путём к PNG из team.json.
+// Старые JSON без kits продолжают работать: встроенный красный атлас
+// перекрашивается в kitColor, как раньше.
 const kitTexCache = new Map();
-function getKitTexture(gltf, colorHex) {
+function setupKitTexture(tex) {
+  tex.flipY = false; // glTF-развёртка хранится без переворота
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function getKitTexture(gltf, texturePath, colorHex) {
+  if (texturePath) {
+    const key = `file:${texturePath}`;
+    if (kitTexCache.has(key)) return kitTexCache.get(key);
+    const tex = setupKitTexture(new THREE.TextureLoader().load(
+      texturePath,
+      undefined,
+      undefined,
+      (e) => console.error(`Текстура формы не загрузилась: ${texturePath}`, e),
+    ));
+    kitTexCache.set(key, tex);
+    return tex;
+  }
   if (!colorHex) return null;
-  if (kitTexCache.has(colorHex)) return kitTexCache.get(colorHex);
+  const key = `color:${colorHex}`;
+  if (kitTexCache.has(key)) return kitTexCache.get(key);
   let srcMap = null;
   gltf.scene.traverse((o) => {
     if (o.isMesh && o.material && o.material.name === 'kit' && o.material.map) {
@@ -59,13 +81,8 @@ function getKitTexture(gltf, colorHex) {
     }
   }
   ctx.putImageData(id, 0, 0);
-  const tex = new THREE.CanvasTexture(c);
-  tex.flipY = false; // glTF-развёртка хранится без переворота
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  kitTexCache.set(colorHex, tex);
+  const tex = setupKitTexture(new THREE.CanvasTexture(c));
+  kitTexCache.set(key, tex);
   return tex;
 }
 
@@ -81,11 +98,12 @@ const ONE_SHOT = new Set([
 ]);
 
 export class Player {
-  // opts.kitColor — hex-цвет формы ('#3a62d8'); без него — атлас как есть.
+  // opts.kitTexture — путь к PNG-атласу; kitColor — цвет старого фолбэка/капсулы.
   // Команду, роль и isKeeper проставляет Team (src/ai/team.js).
   constructor(scene, opts = {}) {
     const P = CONFIG.player;
     this.kitColor = opts.kitColor || null;
+    this.kitTexture = opts.kitTexture || null;
     this.group = new THREE.Group();
 
     // Emissive-подсветка, чтобы фигура читалась на тёмном вечернем поле
@@ -170,7 +188,7 @@ export class Player {
     // Lambert вместо Standard: быстрее на планшете, с плоскими гранями и
     // пиксельной текстурой выглядит так же (стиль PS1). Emissive ~45% —
     // без него фигура на вечернем поле чёрная.
-    const kitTex = getKitTexture(gltf, this.kitColor);
+    const kitTex = getKitTexture(gltf, this.kitTexture, this.kitColor);
     this.model.traverse((o) => {
       if (!o.isMesh) return;
       // Скелет двигает вершины мимо исходной рамки объекта — отсечение по ней врёт

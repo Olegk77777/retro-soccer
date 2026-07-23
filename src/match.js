@@ -74,10 +74,13 @@ export class Match {
     this.goals = goals;
     this.input = input;
 
-    const mkPlayers = (data) => CONFIG.formation.roles.map((r, i) =>
-      new Player(scene, {
-        kitColor: i === 0 ? data.colors.gk : data.colors.primary,
-      }));
+    const mkPlayers = (data) => CONFIG.formation.roles.map((r, i) => {
+      const isKeeper = i === 0;
+      return new Player(scene, {
+        kitColor: isKeeper ? data.colors.gk : data.colors.primary,
+        kitTexture: isKeeper ? data.kits?.goalkeeper : data.kits?.home,
+      });
+    });
     this.teams = [
       new Team(this, +1, teamsData[0], mkPlayers(teamsData[0])),
       new Team(this, -1, teamsData[1], mkPlayers(teamsData[1])),
