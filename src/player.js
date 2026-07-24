@@ -244,7 +244,10 @@ export class Player {
   // Одноразовый клип поверх движения (удар, подкат…).
   // startAt (сек клипа) стартует не с нуля, а ближе к контакту с мячом:
   // удар мгновенный, а полный замах отставал бы от уже улетевшего мяча.
-  playOneShot(name, timeScale = 1, startAt = 0) {
+  // endAt (сек клипа) обрезает хвост: доиграли проводку — и сразу обратно в
+  // бег. Без обрезки длинный клип (`header` — 1.2 с) морозил ноги на пол-
+  // секунды после удара и ломал темп эпизода (фидбек Олега 24.07).
+  playOneShot(name, timeScale = 1, startAt = 0, endAt = null) {
     const a = this.actions[name];
     if (!a) return;
     if (this.currentAction && this.currentAction !== a) {
@@ -260,6 +263,7 @@ export class Player {
     this.currentAction = a;
     this.currentName = name;
     this.oneShot = a;
+    this.oneShotUntil = endAt;
   }
 
   reset(x = -3, z = 0, rot = Math.PI / 2) {
@@ -280,7 +284,12 @@ export class Player {
     this._ignoreShotEdge = false;
     this.sprintBoost = 0;
     this.jumpT = 0;
+    this.jumpAge = 0;
+    this.jumpDelay = 0;
+    this.jumpRise = CONFIG.player.aerial.jumpRise;
+    this.jumpFall = CONFIG.player.aerial.jumpFall;
     this.jumpHeight = null;
+    this.oneShotUntil = null;
     this.diveT = 0;
     this.diveDir = null;
     this.downT = 0;
@@ -326,6 +335,173 @@ export class Player {
     this._handL.getWorldPosition(_handA);
     this._handR.getWorldPosition(_handB);
     return out.copy(_handA).add(_handB).multiplyScalar(0.5);
+  }
+
+  // Точка удара в мировых координатах: носок бьющей ноги (клип `kick` бьёт
+  // ЛЕВОЙ — проверено по риггу) или голова. Нужна, чтобы в кадре контакта
+  // мяч оказался ровно на бутсе/лбу, а не «примерно рядом с игроком».
+  // null, пока модель не загрузилась (на капсуле-фолбэке синхрон не нужен).
+  strikePointWorld(styleName, out) {
+    if (!this.model) return null;
+    if (this._bootBone === undefined) {
+      this._bootBone = this.model.getObjectByName('mixamorigLeftToeBase') || null;
+      this._headBone = this.model.getObjectByName('mixamorigHead') || null;
+    }
+    const bone = styleName === 'header' ? this._headBone : this._bootBone;
+    if (!bone) return null;
+    bone.getWorldPosition(out);
+    if (styleName !== 'header') out.y = Math.max(out.y, CONFIG.ball.radius);
+    return out;
+  }
+
+  // Текущий потолок скорости бега (спринт учтён) — для честного прогноза
+  // встречи с мячом. Совпадает с расчётом maxSpeed в update()/aiUpdate().
+  _runSpeedCap() {
+    const P = CONFIG.player;
+    const m = this.team && this.team.match;
+    const base = P.speed * (m && m.controlled === this ? 1 : CONFIG.ai.speedFactor);
+    return base * (1 + (P.sprintFactor - 1) * this.sprintBoost);
+  }
+
+  // Куда игрок будет бить (единичный вектор): в чужие ворота — туда же за время
+  // замаха доворачивается корпус, значит туда смотрит и бьющая нога
+  _strikeAimDir(fromX, fromZ) {
+    if (this.team) {
+      const dx = this.team.attackGoalX - fromX;
+      const dz = -fromZ;
+      const d = Math.hypot(dx, dz);
+      if (d > 0.01) return { x: dx / d, z: dz / d };
+    }
+    const f = this.facing;
+    return { x: f.x, z: f.z };
+  }
+
+  // Прогноз встречи мяча с ТОЧКОЙ УДАРА (бутса/лоб, а не «центр игрока»).
+  // Мини-симуляция той же физики, что в ball.update (гравитация + квадратичный
+  // drag + Магнус); игрок при этом бежит в точку прилёта — ровно так его ведёт
+  // обязательство замыкания в update(). Отсюда пляшет ВЕСЬ синхрон замыкания:
+  // темп клипа, момент прыжка, доворот корпуса, куда встать ногами.
+  // Возвращает { t, x, y, z, dist, tx, tz }, где x/y/z — мяч в миг удара,
+  // tx/tz — куда встать ИГРОКУ (под волей это на шаг ЗА точку прилёта).
+  // styleLock: во время замаха клип уже выбран, и прогноз обязан искать контакт
+  // ИМЕННО этой точкой удара (голова/нога). Без замка мяч, круто падающий ниже
+  // головы, «переопределял» встречу на ногу — кивок бил на полметра выше мяча.
+  predictAerialContact(ball, maxT = CONFIG.player.aerial.maxWait, styleLock = null) {
+    const P = CONFIG.player;
+    const A = P.aerial;
+    const SY = A.sync;
+    const B = CONFIG.ball;
+    const APP = P.approach;
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+    const runMax = this._runSpeedCap();
+    const land = predictLanding(ball, A.contactY);
+    const landX = land ? land.x : bp.x;
+    const landZ = land ? land.z : bp.z;
+    const aim = this._strikeAimDir(landX, landZ);
+
+    // Один прогон с заданным выносом точки удара вперёд от корпуса
+    const sweep = (ahead) => {
+      // Ноги целятся так, чтобы В ТОЧКЕ ПРИЛЁТА оказалась бутса/лоб, а не живот
+      const tx = landX - aim.x * ahead;
+      const tz = landZ - aim.z * ahead;
+      let x = bp.x; let y = bp.y; let z = bp.z;
+      let vx = ball.vel.x; let vy = ball.vel.y; let vz = ball.vel.z;
+      let spin = ball.spin;
+      let px = pos.x; let pz = pos.z;
+      let pvx = this.vel.x; let pvz = this.vel.z;
+      const dt = 1 / 90; // мельче кадра: момент контакта нужен точнее рендера
+      let best = null;
+      for (let t = dt; t <= maxT; t += dt) {
+        vy += B.gravity * dt;
+        const sp = Math.hypot(vx, vy, vz);
+        if (sp > 0.01) {
+          const d = Math.min(B.dragK * sp * dt, 0.5);
+          vx *= 1 - d; vy *= 1 - d; vz *= 1 - d;
+        }
+        if (Math.abs(spin) > 0.01) {
+          const sx = vx; const sz = vz;
+          vx += -sz * spin * B.magnus * dt;
+          vz += sx * spin * B.magnus * dt;
+          spin *= Math.pow(B.spinDecay, dt * 60);
+        }
+        x += vx * dt; y += vy * dt; z += vz * dt;
+        // Ноги: разгон к своей точке с торможением у неё (как arrive в update)
+        const dxr = tx - px;
+        const dzr = tz - pz;
+        const dr = Math.hypot(dxr, dzr) || 1;
+        const gas = Math.min(1, dr / APP.strikeHoldRadius);
+        const ak = Math.min(1, dt * APP.accel);
+        pvx += ((dxr / dr) * runMax * gas - pvx) * ak;
+        pvz += ((dzr / dr) * runMax * gas - pvz) * ak;
+        px += pvx * dt; pz += pvz * dt;
+        // Точка удара этого мига: нога вынесена вперёд, голова над корпусом;
+        // по высоте достаём не выше, чем позволяют клип и выпрыг
+        const head = styleLock ? styleLock === 'header' : y >= A.headerY;
+        const off = head ? SY.headAhead : SY.bootAhead;
+        const sxp = px + aim.x * off;
+        const szp = pz + aim.z * off;
+        const syp = head
+          ? Math.min(y, SY.headHitY + A.jumpHeight)
+          : Math.min(y, SY.bootHitY + SY.volleyHopMax);
+        const d3 = Math.hypot(x - sxp, y - syp, z - szp);
+        if (d3 <= SY.hitRadius) return { t, x, y, z, dist: d3, tx: px, tz: pz };
+        if (!best || d3 < best.dist) best = { t, x, y, z, dist: d3, tx: px, tz: pz };
+        else if (d3 > best.dist + 0.5) break; // ближайшую точку прошли
+        if (y < B.radius) break;              // мяч уже на газоне
+      }
+      return best || { t: 0, x: bp.x, y: bp.y, z: bp.z, dist: Infinity, tx: pos.x, tz: pos.z };
+    };
+
+    // Два прохода: первый узнаёт высоту контакта (значит, чем бьём), второй
+    // ставит ноги под нужный вынос — под волей это шаг назад от точки прилёта.
+    // Если стиль уже зафиксирован замахом, первый проход не нужен.
+    if (styleLock) {
+      return sweep(styleLock === 'header' ? SY.headAhead : SY.bootAhead);
+    }
+    const first = sweep(0);
+    const ahead = first.y >= A.headerY ? SY.headAhead : SY.bootAhead;
+    return ahead > 0.02 ? sweep(ahead) : first;
+  }
+
+  // Выпрыг под замыкание: голова — полноценный прыжок, высокий волей — короткий
+  // подскок, чтобы бутса дошла до мяча (в клипе она поднимается лишь на ~0.5 м).
+  // Верхняя точка в обоих случаях приходится ровно на миг контакта.
+  _scheduleStrikeJump(styleName, tHit, contactY, charge) {
+    const A = CONFIG.player.aerial;
+    const SY = A.sync;
+    // Прыгаем РОВНО НА СКОЛЬКО НАДО, чтобы лоб/бутса пришли на мяч. Раньше
+    // кивок всегда шёл с полным выпрыгом, и по мячу на уровне груди игрок
+    // выпрыгивал так, что лоб проходил на полметра выше (фидбек «по позициям»).
+    // Сила нажатия по-прежнему решает: тапом высокий мяч не достать.
+    const need = this._strikeJumpNeed(styleName, contactY, charge);
+    if (need > 0.04) this.startJump(tHit, need);
+  }
+
+  // На сколько подпрыгнуть, чтобы точка удара пришла на мяч (м)
+  _strikeJumpNeed(styleName, contactY, charge) {
+    const A = CONFIG.player.aerial;
+    const SY = A.sync;
+    if (styleName === 'header') {
+      const cap = A.jumpHeight *
+        (1 - A.jumpChargeH + A.jumpChargeH * Math.min(1, charge));
+      return Math.min(cap, contactY - SY.headHitY);
+    }
+    return Math.min(SY.volleyHopMax, contactY - SY.bootHitY - SY.volleyHopSlack);
+  }
+
+  // Прыжок под удар головой с верхней точкой РОВНО на контакте (hitIn сек).
+  // Мячу лететь дольше подъёма — толчок откладывается (jumpDelay), а не
+  // растягивается: иначе выпрыг выглядит «вязким», как в аркадах.
+  startJump(hitIn, height) {
+    const A = CONFIG.player.aerial;
+    const rise = Math.max(0.08, Math.min(A.jumpRiseMax, hitIn));
+    this.jumpDelay = Math.max(0, hitIn - rise);
+    this.jumpRise = rise;
+    this.jumpFall = A.jumpFall;
+    this.jumpAge = 0;
+    this.jumpT = this.jumpDelay + rise + A.jumpFall;
+    this.jumpHeight = height;
   }
 
   // Мяч живёт в руках: каждый кадр следует за кистями по всей анимации —
@@ -414,14 +590,23 @@ export class Player {
   // (gk_idle, руки наготове) — фидбек Олега 18.07.2026 «отбивает ногами».
   _updateAnim(dt, speed) {
     const P = CONFIG.player;
-    // Прыжок под удар головой: короткая дуга вверх-вниз (визуал, физику
-    // замыкания решает зона aerial.maxY — прыжок её не расширяет)
+    // Прыжок под удар головой: несимметричная дуга — резкий толчок вверх
+    // (jumpRise) и падение (jumpFall). ВЕРХНЯЯ ТОЧКА ставится ровно на миг
+    // контакта: startJump растягивает подъём под прогноз прилёта мяча, а
+    // jumpDelay откладывает толчок, если мячу лететь ещё долго.
     if (this.jumpT > 0) {
       const A = P.aerial;
       this.jumpT -= dt;
-      const k = Math.max(0, 1 - this.jumpT / A.jumpTime);
+      this.jumpAge += dt;
       const h = this.jumpHeight != null ? this.jumpHeight : A.jumpHeight;
-      this.group.position.y = Math.sin(Math.PI * k) * h;
+      const a = this.jumpAge - this.jumpDelay;
+      let y = 0;
+      if (a > 0) {
+        y = a < this.jumpRise
+          ? Math.sin((a / this.jumpRise) * Math.PI * 0.5) * h        // толчок
+          : Math.max(0, 1 - ((a - this.jumpRise) / this.jumpFall) ** 2) * h; // падение
+      }
+      this.group.position.y = y;
       if (this.jumpT <= 0) { this.group.position.y = 0; this.jumpHeight = null; }
     }
     // Бросок корпусом (ласточка) и подъём: наклон фигуры по взгляду
@@ -459,6 +644,14 @@ export class Player {
     }
     this.group.rotation.x = tilt;
     if (this.mixer) {
+      // Хвост клипа удара обрезан (oneShotUntil): проводка доиграна — ноги
+      // сразу возвращаются в бег, эпизод не проседает
+      if (this.oneShot && this.oneShotUntil != null &&
+          this.oneShot.time >= this.oneShotUntil) {
+        this.oneShot = null;
+        this.oneShotUntil = null;
+        this.currentName = null; // следующий кадр сам выберет бег/idle
+      }
       // Пока играет одноразовый (удар, ловля) — не дёргаем
       if (!this.oneShot) {
         if (speed < 0.6) {
@@ -549,15 +742,19 @@ export class Player {
 
     // Корпус: бежим — смотрим по ходу; стоим — куда велел мозг (обычно на мяч)
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    let want = null;
-    if (speed > 0.5) want = Math.atan2(this.vel.x, this.vel.z);
-    else if (opts.face != null) want = opts.face;
-    if (want != null) {
-      let d = want - this.rot;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      const turn = P.turnRate * (1 - (1 - P.sprintTurnFactor) * this.sprintBoost);
-      this.rot += d * Math.min(1, turn * dt);
+    if (this.aerialStrike && this.aerialStrike.aimRot != null) {
+      this._turnIntoStrike(dt); // замах замыкания: корпус приходит в удар к контакту
+    } else {
+      let want = null;
+      if (speed > 0.5) want = Math.atan2(this.vel.x, this.vel.z);
+      else if (opts.face != null) want = opts.face;
+      if (want != null) {
+        let d = want - this.rot;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        const turn = P.turnRate * (1 - (1 - P.sprintTurnFactor) * this.sprintBoost);
+        this.rot += d * Math.min(1, turn * dt);
+      }
     }
     this.group.rotation.y = this.rot;
 
@@ -615,11 +812,19 @@ export class Player {
     const speedNow = Math.hypot(this.vel.x, this.vel.z);
     if (aiming && !this.chargeRun && speedNow > CONFIG.shot.runKeepSpeed) this.chargeRun = true;
     if (!aiming) this.chargeRun = false;
-    const brake = aiming && !this.chargeRun;
+    const bpEarly = ball.mesh.position;
+    // Прицельная стойка — только под мяч, который реально играется с газона.
+    // Если мяч ЛЕТИТ на игрока, удержание D означает заказ ЗАМЫКАНИЯ: ноги
+    // обязаны бежать под мяч, а не вкапываться в газон. Раньше игрок замирал
+    // и навес проходил в метре от него (замер в живой игре 24.07)
+    const aerialIntent = !!this.aerialStrike ||
+      (aiming && !downed && this.diveT <= 0 && this.kickCooldown <= 0 &&
+        bpEarly.y > P.kickMaxBallY && ball.vel.y < 2 &&
+        Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) < APP.strikePursuitRange * 2);
+    const brake = aiming && !this.chargeRun && !aerialIntent;
 
     // --- Бег: плавный разгон к желаемой скорости (спринт — быстрее) ---
     let sprinting = input.sprint && !brake;
-    const bpEarly = ball.mesh.position;
     let approachMove = null;
     let strikeMove = null;
     let approachIntentAtContact = null;
@@ -738,6 +943,30 @@ export class Player {
       }
     }
 
+    // Врывание под замыкание: пока держим D, а мяч ЛЕТИТ на нас, ноги идут к
+    // точке встречи — до замаха это точка прилёта, во время замаха её ведёт сам
+    // замах. Без этого прицельная стойка вкапывала игрока и навес проходил
+    // мимо в метре (замер в живой игре 24.07)
+    let aerialTarget = null;
+    if (aerialIntent && !downed && this.diveT <= 0) {
+      // Цель врывания — та же точка, куда прогноз ставит ноги под удар (под
+      // волей это шаг ЗА точку прилёта, чтобы мяч пришёл на бутсу). Во время
+      // замаха её ведёт сам замах. Раньше ноги бежали в точку прилёта, а мяч
+      // оказывался у живота — бутса промахивалась почти на метр
+      if (this.aerialStrike && this.aerialStrike.point) {
+        aerialTarget = this.aerialStrike.point;
+      } else {
+        const pre = this.predictAerialContact(ball, P.aerial.interceptT);
+        aerialTarget = pre.dist < Infinity
+          ? { x: pre.tx, z: pre.tz }
+          : predictLanding(ball, P.aerial.contactY);
+      }
+      if (aerialTarget) {
+        const dTa = Math.hypot(aerialTarget.x - pos.x, aerialTarget.z - pos.z);
+        if (dTa > 2 && !this.aerialStrike) sprinting = true; // далеко — врываемся
+      }
+    }
+
     // Инерция спринта (фидбек Олега): включается быстро, спадает плавно.
     // Отпустил ⚡/E — темп ещё живёт ~секунду: можно отпустить спринт
     // и тут же пробить с лёта на скорости
@@ -828,7 +1057,25 @@ export class Player {
       mvz = receiverMove.z;
     }
 
-    const k = Math.min(1, dt * ((approachMove || strikeMove || receiverMove) ? APP.accel : P.accel));
+    // Замах замыкания — приоритет надо всем: ноги ДОБЕГАЮТ до точки контакта,
+    // а не стоят и не уходят по стику (стрелки в это время — прицел удара).
+    // Так рождается врывание: игрок встречает мяч на ходу, и сила разбега
+    // уходит в удар (aerial.runPower). Мяч ждать себя не заставляет.
+    let aerialMove = null;
+    if (aerialTarget) {
+      const dax = aerialTarget.x - pos.x;
+      const daz = aerialTarget.z - pos.z;
+      const da = Math.hypot(dax, daz);
+      // На точке уже стоим — не проскакиваем мяч, гасим ход
+      aerialMove = da > APP.strikeHoldRadius
+        ? { x: dax / da, z: daz / da }
+        : { x: 0, z: 0 };
+      mvx = aerialMove.x;
+      mvz = aerialMove.z;
+    }
+
+    const k = Math.min(1, dt *
+      ((approachMove || strikeMove || receiverMove || aerialMove) ? APP.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -857,7 +1104,11 @@ export class Player {
     // (фидбек Олега: иначе игрок доворачивался раньше мяча, и мяч «прилетал
     // сбоку»). Вне ведения — обычный разворот в сторону бега.
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    if (!brake && speed > 0.5) {
+    if (this.aerialStrike && this.aerialStrike.aimRot != null) {
+      // Замах замыкания: корпус доворачивается в удар РОВНО к мигу контакта —
+      // не раньше (иначе игрок бежит боком) и не позже (иначе бьёт мимо кадра)
+      this._turnIntoStrike(dt);
+    } else if (!brake && speed > 0.5) {
       let want;
       const bpp = ball.mesh.position; // bp определяется ниже — берём позицию напрямую
       const bd2 = Math.hypot(bpp.x - pos.x, bpp.z - pos.z);
@@ -1117,9 +1368,23 @@ export class Player {
     // Мяч подлетает (снижается и не улетает от игрока) — тогда замах оправдан
     const closingAerial = ball.vel.y < 2 &&
       (bp.x - pos.x) * ball.vel.x + (bp.z - pos.z) * ball.vel.z < 2;
-    const canAerialPrep = this.kickCooldown <= 0 && !downed && !diving &&
-      !this.aerialStrike && dist < A.prepareRadius && closingAerial &&
-      bp.y >= P.kickMaxBallY && bp.y <= A.maxY;
+    // Зона замаха шире зоны удара (3 м): чтобы замах успел прочитаться, решение
+    // принимается заранее — а раз заранее, то и проверять надо ПРОГНОЗНУЮ высоту
+    // контакта, а не сегодняшнюю высоту мяча. Иначе игрок затевал бы кивок под
+    // мяч, который к нему прикатится по газону.
+    let canAerialPrep = this.kickCooldown <= 0 && !downed && !diving &&
+      !this.aerialStrike && dist < A.prepareRadius && closingAerial;
+    if (canAerialPrep) {
+      // Решает ПРОГНОЗНАЯ высота контакта, а не сегодняшняя высота мяча.
+      // Проверка «мяч уже ниже maxY» откладывала замах до последнего мига:
+      // навес падает почти отвесно, и к моменту, когда он опускался в зону,
+      // бить было уже нечем — замах не успевал (замер в игре 24.07)
+      // …и замах начинается ТОЛЬКО если прогноз нашёл настоящий контакт: мяч
+      // реально придёт на бутсу/лоб. Иначе игрок молотит воздух и теряет темп
+      const pre = this.predictAerialContact(ball, A.maxWait);
+      canAerialPrep = pre.y >= P.kickMaxBallY && pre.y <= A.maxY &&
+        pre.dist <= A.sync.hitRadius * 1.5;
+    }
     const wantShot = this.pendingStrike &&
       (this.pendingStrike.type === 'shot' ||
         (this.pendingStrike.type === 'swipe' && this.pendingStrike.v.kind === 'shot'));
@@ -1655,8 +1920,8 @@ export class Player {
       } else if (styleName === 'header' && !opts.compute) {
         // Прыжок под голову ставит beginAerialStrike (замах уже идёт); в режиме
         // compute (пересчёт удара в момент контакта) прыжок не трогаем
-        this.jumpT = A.jumpTime;
-        this.jumpHeight = A.jumpHeight * (1 - A.jumpChargeH + A.jumpChargeH * Math.min(1, charge));
+        this.startJump(A.jumpRise,
+          A.jumpHeight * (1 - A.jumpChargeH + A.jumpChargeH * Math.min(1, charge)));
       }
     }
     // Замыкание (голова / с лёта) ВСЕГДА наводится на ЧУЖИЕ ворота, а не летит
@@ -1758,46 +2023,136 @@ export class Player {
     this.playOneShot(st.anim || 'kick', st.animTs, st.animAt); // клип и темп — от типа удара
   }
 
-  // ===== Замыкание в ОДНО КАСАНИЕ (PES 6, фидбек Олега 23.07.2026) =====
+  // ===== Замыкание в ОДНО КАСАНИЕ (PES 6, фидбек Олега 23–24.07.2026) =====
   // Мяч НЕ замирает у игрока (это и создавало «зависание»): замах начинается,
   // пока мяч подлетает, а перенаправление в ворота — в момент реального
   // контакта, сохраняя импульс приходящего мяча. Голова — с прыжком.
+  //
+  // Главное с 24.07: замах ПРИВЯЗАН К ПРОГНОЗУ ПРИЛЁТА. Клип удара получает
+  // такой темп (и такой стартовый кадр), чтобы измеренный кадр контакта
+  // (sync.hitKick / sync.hitHeader) пришёлся ровно на встречу с мячом. Прыжок
+  // выходит в верхнюю точку тем же мигом, корпус доворачивается в удар к тому
+  // же мигу. Раньше клип играл «своим» темпом, а мяч улетал когда придётся —
+  // голова кивала уже вслед улетевшему мячу (замер: расхождение до 0.26 с).
   beginAerialStrike(s, input, ball) {
     const A = CONFIG.player.aerial;
-    const bp = ball.mesh.position;
-    const styleName = bp.y >= A.headerY ? 'header' : 'volley';
-    const st = CONFIG.shot.styles[styleName];
-    // Замах играет резко, с самого начала клипа (виден удар, не только проводка)
-    this.playOneShot(st.anim || 'kick', styleName === 'header' ? 2.0 : 2.2, 0);
-    if (styleName === 'header') {
-      const charge = s.type === 'swipe' ? Math.min(s.v.power, 1.3) : s.v;
-      this.jumpT = A.jumpTime;
-      this.jumpHeight = A.jumpHeight * (1 - A.jumpChargeH + A.jumpChargeH * Math.min(1, charge));
-    }
+    const SY = A.sync;
+    const charge = s.type === 'swipe' ? Math.min(s.v.power, 1.3) : s.v;
+
+    // Где и когда мяч реально встретится с игроком
+    const hit = this.predictAerialContact(ball, A.maxWait);
+    const tHit = Math.max(SY.leadMin, Math.min(A.maxWait, hit.t));
+    // Стиль решает ПРОГНОЗНАЯ высота контакта, а не высота мяча сейчас:
+    // опускающийся мяч, что сегодня на груди, к удару придёт под колено —
+    // и это волей ногой, а не кивок головой в пустоту
+    const styleName = hit.y >= A.headerY ? 'header' : 'volley';
+
     let gesture = null;
     if (s.type === 'swipe') {
       const gdir = new THREE.Vector3(s.v.dir.x, 0, s.v.dir.z).normalize();
       gesture = { dir: gdir, curl: -s.v.curl * CONFIG.shot.swipeCurl };
     }
+    // Куда бьём — туда за время замаха и разворачивается корпус
+    let aimRot = null;
+    if (gesture) {
+      aimRot = Math.atan2(gesture.dir.x, gesture.dir.z);
+    } else if (this.team) {
+      aimRot = Math.atan2(this.team.attackGoalX - hit.x, -hit.z);
+    }
+
     this.aerialStrike = {
       styleName,
-      charge: s.type === 'swipe' ? Math.min(s.v.power, 1.3) : s.v,
+      charge,
       gesture,
-      input, // сохраняем ввод: прицел стрелками читается в момент контакта
+      input,      // сохраняем ввод: прицел стрелками читается в момент контакта
+      aimRot,
+      point: { x: hit.tx, z: hit.tz }, // ноги встают ровно сюда
       t: 0,
+      hitAt: tHit,
       minDist: Infinity,
+      clipDelay: 0,
+      clipStarted: false,
     };
+    this._scheduleStrikeClip(tHit, true);
+    this._scheduleStrikeJump(styleName, tHit, hit.y, charge);
     // Блокируем повторный триггер/приём, пока идёт замах (но не даём кулдаун
     // на весь удар — он выставится при контакте)
     this.pendingStrike = null;
   }
 
-  // Каждый кадр (из Match, до движения игрока): ждём реального контакта мяча и
-  // перенаправляем его в ворота. Мяч всё это время ЛЕТИТ сам — не зависает.
+  // Подгон клипа удара под момент контакта (сердце синхрона).
+  // tLeft — сколько секунд осталось до встречи с мячом.
+  // fresh = true — клип ещё не запущен: выбираем темп и стартовый кадр;
+  // fresh = false — клип уже играет: сервоприводом правим только темп, чтобы
+  // кадр контакта доехал ровно к уточнённому прогнозу (мяч тормозится о воздух,
+  // игрок доворачивает бег — момент встречи всё время «плывёт»).
+  _scheduleStrikeClip(tLeft, fresh) {
+    const as = this.aerialStrike;
+    if (!as) return;
+    const SY = CONFIG.player.aerial.sync;
+    const st = CONFIG.shot.styles[as.styleName];
+    const clip = st.anim || 'kick';
+    const hitFrame = as.styleName === 'header' ? SY.hitHeader : SY.hitKick;
+    const endFrame = as.styleName === 'header' ? SY.endHeader : SY.endKick;
+    const left = Math.max(1 / 120, tLeft);
+
+    if (fresh) {
+      let rate = hitFrame / left;
+      let startAt = 0;
+      if (rate > SY.rateMax) {
+        // Мяч почти здесь: замах целиком не влезает — срезаем его начало,
+        // но кадр удара всё равно приходит вовремя (резкий «выстрел» PES)
+        rate = SY.rateMax;
+        startAt = Math.max(0, hitFrame - left * rate);
+      } else if (rate < SY.rateMin) {
+        // Мячу лететь ещё долго: клип не растягиваем до «вязкости», а ждём —
+        // игрок продолжает бежать и стартует замах позже
+        rate = SY.rateMin;
+        as.clipDelay = Math.max(0, left - hitFrame / rate);
+      }
+      as.clipRate = rate;
+      as.clipStart = startAt;
+      as.clipHit = hitFrame;
+      as.clipEnd = endFrame;
+      as.clipName = clip;
+      if (as.clipDelay <= 0) {
+        this.playOneShot(clip, rate, startAt, endFrame);
+        as.clipStarted = true;
+      }
+      return;
+    }
+
+    // Сервопривод: клип играет — правим темп под уточнённый прогноз.
+    // left уже зажат снизу (иначе на последнем кадре деление уносило темп
+    // в клампы и проводка уходила в слоу-мо — замечено на стенде)
+    const a = this.oneShot;
+    if (!a || this.currentName !== as.clipName) return;
+    const rate = (hitFrame - a.time) / left;
+    if (rate > 0) {
+      a.timeScale = Math.max(SY.rateMin * 0.5, Math.min(SY.rateMax * 1.4, rate));
+    }
+  }
+
+  // Доворот корпуса в удар за время замаха: угол «доезжает» ровно к контакту.
+  // Раньше корпус вставал по удару мгновенным присвоением rot (AI) или вообще
+  // жил своей жизнью (человек) — кивок выглядел приклеенным к бегу.
+  _turnIntoStrike(dt) {
+    const as = this.aerialStrike;
+    if (!as || as.aimRot == null) return;
+    let d = as.aimRot - this.rot;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const left = Math.max(dt, as.hitAt - as.t);
+    this.rot += d * Math.min(1, dt / left);
+  }
+
+  // Каждый кадр (из Match, до движения игрока): ведём замах к контакту и
+  // перенаправляем мяч ровно в кадре удара. Мяч всё это время ЛЕТИТ сам.
   updateAerialStrike(dt, ball) {
     const as = this.aerialStrike;
     if (!as) return;
     const A = CONFIG.player.aerial;
+    const SY = A.sync;
     const bp = ball.mesh.position;
     const pos = this.group.position;
     as.t += dt;
@@ -1806,16 +2161,103 @@ export class Player {
       this.aerialStrike = null;
       return;
     }
+
     const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
     const wasClosing = dist <= as.minDist + 1e-4;
     as.minDist = Math.min(as.minDist, dist);
-    const contact = dist <= A.contactRadius && bp.y <= A.maxY;
-    // Мяч прошёл ближайшую точку (начал удаляться) — бьём по нему сейчас
-    const passed = !wasClosing && as.minDist <= A.prepareRadius && as.t > 0.05;
-    const timeout = as.t >= A.maxWait;
-    if (!(contact || passed || timeout)) return;
 
-    // Перенаправляем мяч в ворота из ТЕКУЩЕЙ позиции (одно касание). Скорость
+    // Уточняем прогноз каждый кадр и сглаженно ведём к нему момент удара.
+    // Стиль зафиксирован (клип уже играет) — прогноз ищет встречу именно им
+    const hit = this.predictAerialContact(ball, A.maxWait, as.styleName);
+    if (hit.dist < A.prepareRadius) {
+      const want = as.t + hit.t;
+      as.hitAt += (want - as.hitAt) * Math.min(1, dt * SY.servo);
+      as.point.x = hit.tx;
+      as.point.z = hit.tz;
+      // Высота выпрыга тоже плывёт вместе с прогнозом: мяч тормозится о воздух,
+      // игрок доворачивает бег — точка контакта уходит выше или ниже расчёта
+      const wantJump = this._strikeJumpNeed(as.styleName, hit.y, as.charge != null ? as.charge : 1);
+      if (this.jumpT > 0 && this.jumpHeight != null) {
+        this.jumpHeight += (Math.max(0, wantJump) - this.jumpHeight) *
+          Math.min(1, dt * SY.servo);
+      } else if (wantJump > 0.04 && this.jumpT <= 0) {
+        this.startJump(Math.max(1 / 60, as.hitAt - as.t), wantJump);
+      }
+    }
+    let left = as.hitAt - as.t;
+
+    // Отложенный замах: мячу было лететь дольше клипа — стартуем сейчас
+    if (!as.clipStarted) {
+      as.clipDelay -= dt;
+      if (as.clipDelay <= 0 || left <= as.clipHit / as.clipRate) {
+        this.playOneShot(as.clipName, as.clipRate, as.clipStart, as.clipEnd);
+        as.clipStarted = true;
+      }
+    } else {
+      this._scheduleStrikeClip(left, false);
+    }
+
+    // Мяч прошёл ближайшую точку (начал удаляться) — бьём по нему сейчас;
+    // ждать дальше нечего, иначе мяч уйдёт «сквозь» игрока
+    const passed = !wasClosing && as.minDist <= A.prepareRadius && as.t > 0.05;
+    const timeout = as.t >= A.maxWait + SY.lateWait;
+    // Кадр удара: либо доехал прогноз, либо клип дошёл до измеренного кадра
+    // контакта — по определению это один и тот же миг, вторая проверка страхует.
+    // Округляем к БЛИЖАЙШЕМУ кадру (полшага вперёд): иначе на быстром клипе
+    // удар всегда чуть запаздывал — целый кадр проводки до вылета мяча
+    const atFrame = as.clipStarted && this.oneShot &&
+      this.currentName === as.clipName &&
+      this.oneShot.time + this.oneShot.timeScale * dt * 0.5 >= as.clipHit;
+    const onFrame = left <= dt * 0.5 || atFrame;
+    if (!(onFrame || passed || timeout)) return;
+
+    // Мяч так и не дошёл до бутсы/лба — это ПРОМАХ, а не удар: замах доигрывает
+    // вхолостую, мяч летит дальше. Иначе получался «выстрел из воздуха» —
+    // мяч менял направление в метре от игрока (замер на симуляции матча)
+    const spMiss = this.strikePointWorld(as.styleName, _handA);
+    if (spMiss && spMiss.distanceTo(bp) > SY.missRadius) {
+      this.aerialStrike = null;
+      this.kickCooldown = CONFIG.player.kickCooldown * 0.5; // отмашка ногой — пауза
+      return;
+    }
+
+    // Мяч встаёт РОВНО на бутсу/лоб: без этого он отлетал от точки в метре от
+    // игрока и контакт не читался (фидбек Олега «по позициям»). Поправку делим
+    // на две части: ВДОЛЬ полёта мяча (глазу не видно — мяч и так идёт по этой
+    // линии, бюджет щедрый) и ПОПЕРЁК (скупой, иначе мяч заметно телепортится).
+    const sp = this.strikePointWorld(as.styleName, _handA);
+    if (sp) {
+      const dx = sp.x - bp.x;
+      const dy = sp.y - bp.y;
+      const dz = sp.z - bp.z;
+      const vlen = Math.hypot(ball.vel.x, ball.vel.y, ball.vel.z);
+      let ax = 0;
+      let ay = 0;
+      let az = 0;          // продольная часть поправки (щедрый лимит)
+      let px = dx;
+      let py = dy;
+      let pz = dz;         // поперечная часть (скупой лимит)
+      if (vlen > 0.5) {
+        const ux = ball.vel.x / vlen;
+        const uy = ball.vel.y / vlen;
+        const uz = ball.vel.z / vlen;
+        const along = dx * ux + dy * uy + dz * uz;
+        const cl = Math.max(-SY.snapAlong, Math.min(SY.snapAlong, along));
+        ax = ux * cl;
+        ay = uy * cl;
+        az = uz * cl;
+        px = dx - ux * along;
+        py = dy - uy * along;
+        pz = dz - uz * along;
+      }
+      const pd = Math.hypot(px, py, pz);
+      const pk = pd > 0.001 ? Math.min(1, SY.snap / pd) : 0;
+      bp.x += ax + px * pk;
+      bp.y = Math.max(CONFIG.ball.radius, bp.y + ay + py * pk);
+      bp.z += az + pz * pk;
+    }
+
+    // Перенаправляем мяч в ворота из ТОЧКИ КОНТАКТА (одно касание). Скорость
     // приходящего мяча уже вложена в силу (oneTouchMomentum). AI использует
     // заранее посчитанный вектор, человек пересчитывает удар из текущей позиции.
     if (as.aiVel) {
@@ -1828,6 +2270,12 @@ export class Player {
       ball.spin = r.spin;
     }
     ball.afterTouch = CONFIG.ball.afterTouchTime;
+    // Проводка идёт своим резким темпом: замах мог тянуться под медленный мяч,
+    // но НОГА ПОСЛЕ УДАРА всегда допрямляется быстро — иначе конец клипа
+    // доигрывался в слоу-мо и съедал темп эпизода
+    if (this.oneShot && this.currentName === as.clipName) {
+      this.oneShot.timeScale = SY.followRate;
+    }
     this.lastStrikeStyle = as.styleName;
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0;
@@ -1845,7 +2293,7 @@ export class Player {
     this.vel.x = dx * DV.lunge;
     this.vel.z = dz * DV.lunge;
     this.rot = Math.atan2(dx, dz); // корпус — в сторону броска
-    this.playOneShot(contactY >= CONFIG.player.aerial.headerY ? 'header' : 'kick', 1.0, 0.05);
+    this.playOneShot(contactY >= DV.headerY ? 'header' : 'kick', 1.0, 0.05);
   }
 
   // Снос: игрок сбит и лежит dur секунд (клип fallen), потом встаёт.
@@ -2133,25 +2581,29 @@ export class Player {
   }
 
   // Верховой мяч у AI: сыграть в ОДНО КАСАНИЕ — вынос, скидка или кивок в
-  // створ. Как и у человека: замах играет, мяч подлетает и перенаправляется в
-  // момент контакта (не зависает). Клип и прыжок — по высоте контакта.
+  // створ. Синхрон тот же, что у человека (кадр удара клипа = миг контакта,
+  // верхняя точка прыжка = миг контакта, корпус доворачивается к тому же мигу).
   aiAerial(ball, dir, power, lift) {
     const A = CONFIG.player.aerial;
-    const isHeader = ball.mesh.position.y >= A.headerY;
+    const SY = A.sync;
     const d = Math.hypot(dir.x, dir.z) || 1;
     const ndir = { x: dir.x / d, z: dir.z / d };
-    this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
-    if (isHeader) {
-      this.jumpT = A.jumpTime;
-      this.jumpHeight = A.jumpHeight; // AI — полноценный выпрыг
-    }
-    this.playOneShot(isHeader ? 'header' : 'kick', isHeader ? 2.0 : 2.2, 0);
+    const hit = this.predictAerialContact(ball, A.maxWait);
+    const tHit = Math.max(SY.leadMin, Math.min(A.maxWait, hit.t));
+    const isHeader = hit.y >= A.headerY;
     this.aerialStrike = {
       styleName: isHeader ? 'header' : 'volley',
       aiVel: new THREE.Vector3(ndir.x * power, lift, ndir.z * power),
       aiSpin: 0,
+      aimRot: Math.atan2(ndir.x, ndir.z), // корпус доворачивается К УДАРУ, не рывком
+      point: { x: hit.tx, z: hit.tz },
       t: 0,
+      hitAt: tHit,
       minDist: Infinity,
+      clipDelay: 0,
+      clipStarted: false,
     };
+    this._scheduleStrikeClip(tHit, true);
+    this._scheduleStrikeJump(isHeader ? 'header' : 'volley', tHit, hit.y, 1); // AI — полноценный выпрыг
   }
 }

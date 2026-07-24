@@ -32,10 +32,20 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
-  // Замыкание в одно касание уже идёт (замах): стоим, мяч перенаправит
-  // updateAerialStrike в момент контакта — не начинаем новых решений
+  // Замыкание в одно касание уже идёт (замах): новых решений не принимаем,
+  // но и НЕ ЗАМИРАЕМ — ноги добегают до точки контакта. Стойка на месте гасила
+  // врывание (в PES мощь кивка даёт именно разбег) и выглядела как ступор
+  // посреди эпизода (фидбек Олега 24.07)
   if (p.aerialStrike) {
-    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    const ap = p.aerialStrike.point;
+    let mv = { x: 0, z: 0 };
+    if (ap) {
+      const dx = ap.x - pos.x;
+      const dz = ap.z - pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > CONFIG.player.approach.strikeHoldRadius) mv = { x: dx / d, z: dz / d };
+    }
+    p.aiUpdate(dt, mv, {});
     return;
   }
 
@@ -100,11 +110,21 @@ export function updateFieldPlayer(p, dt, ball) {
   // В броске (ласточка) зона контакта — вытянутый корпус (dive.stretch)
   const AP = CONFIG.player.aerial;
   const diving = p.diveT > 0;
+  // Замах начинается с той же дистанции, что у человека (prepareRadius), и по
+  // ПРОГНОЗНОЙ высоте контакта. На прежних 1.5 м AI решался, когда мяч уже был
+  // на ноге: замах не успевал прочитаться, а ноги не успевали встать под удар
   const aerialOk = diving
     ? (myBallDist < AP.reach + AP.dive.stretch &&
         bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
-    : (myBallDist < AP.reach &&
-        bp.y > CONFIG.player.kickMaxBallY && bp.y <= AP.maxY);
+    : (myBallDist < AP.prepareRadius &&
+        (() => {
+          // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
+          // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
+          // пролетающий мимо мяч и молотил воздух (замер симуляцией матча)
+          const pre = p.predictAerialContact(ball, AP.maxWait);
+          return pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
+            pre.dist <= AP.sync.hitRadius * 1.5;
+        })());
   if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' && ball.vel.y < 2 &&
       // Полная скорость: крутая перекидка почти без горизонтали, но падает
       // быстро — иначе адресат не принимал её и мяч «отскакивал» мимо ног
@@ -500,6 +520,9 @@ function aerialPlay(p, ball, diving = false) {
 
   const isReceiver = team.receiver === p;
   const distGoal = Math.hypot(goalX - pos.x, pos.z);
+  // Прицел считаем по ПРОГНОЗНОЙ высоте контакта, а не по высоте мяча сейчас:
+  // замах начинается заранее, и за это время мяч успевает заметно опуститься
+  const contactY = diving ? bp.y : p.predictAerialContact(ball).y;
 
   // Приём (фидбек Олега 22–23.07.2026): адресат нашей верховой передачи
   // гасит опускающийся мяч себе в ноги на ЛЮБОЙ досягаемой высоте — а не
@@ -535,7 +558,7 @@ function aerialPlay(p, ball, diving = false) {
       AIR.headerPower + spd * AIR.headerPowerRun) * DF;
     // Вертикаль: прийти к воротам на высоте headerTargetY (кивок вниз можно)
     const t = d / (power * 0.85);
-    let vy = (AIR.headerTargetY - bp.y) / t - 0.5 * CONFIG.ball.gravity * t;
+    let vy = (AIR.headerTargetY - contactY) / t - 0.5 * CONFIG.ball.gravity * t;
     vy = Math.max(-6, Math.min(5, vy));
     p.aiAerial(ball, { x: dx / d, z: dz / d }, power, vy);
     return;
