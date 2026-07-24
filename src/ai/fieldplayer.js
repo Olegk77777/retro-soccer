@@ -113,10 +113,16 @@ export function updateFieldPlayer(p, dt, ball) {
   // Замах начинается с той же дистанции, что у человека (prepareRadius), и по
   // ПРОГНОЗНОЙ высоте контакта. На прежних 1.5 м AI решался, когда мяч уже был
   // на ноге: замах не успевал прочитаться, а ноги не успевали встать под удар
+  // Адресат нашей верховой передачи ПРИНИМАЕТ мяч, а не бьёт по нему: он
+  // ждёт настоящего касания корпусом и до этого продолжает бежать к точке
+  const isTrapper = !diving && team.receiver === p &&
+    Math.hypot(team.attackGoalX - pos.x, pos.z) >= AI.aerial.headerRange;
   const aerialOk = diving
     ? (myBallDist < AP.reach + AP.dive.stretch &&
         bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
-    : (myBallDist < AP.prepareRadius &&
+    : isTrapper
+      ? p.bodyContactPoint(bp).reachable
+      : (myBallDist < AP.prepareRadius &&
         (() => {
           // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
           // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
@@ -324,10 +330,11 @@ function pressBall(p, dt, ball, match) {
         bp.y < P.tackle.ballMaxY &&
         myBallDist > TKA.rangeMin && myBallDist < TKA.range &&
         Math.random() < TKA.ratePerSec * dt) {
-      // Упреждение на время долёта слайда — целим, где мяч БУДЕТ
-      const lead = Math.min(P.tackle.aimLeadMax, myBallDist / P.tackle.speedMin);
-      const dx = bp.x + ball.vel.x * lead - pos.x;
-      const dz = bp.z + ball.vel.z * lead - pos.z;
+      // Упреждение на приход НОГИ — целим, где мяч БУДЕТ (та же математика,
+      // что у человека: вынос ноги укорачивает путь корпуса)
+      const aim = p.tackleAim(ball);
+      const dx = aim.x;
+      const dz = aim.z;
       const dl = Math.hypot(dx, dz) || 1;
       const behind =
         (dx / dl) * owner.facing.x + (dz / dl) * owner.facing.z > P.tackle.backCos;
@@ -530,7 +537,9 @@ function aerialPlay(p, ball, diving = false) {
   // и звезды — читалось как поломанная анимация приёма). У чужих ворот
   // приём не включается: там подачу ЗАМЫКАЮТ.
   if (!diving && isReceiver && distGoal >= AIR.headerRange) {
-    p.trapBall(ball);
+    // Гасим ТОЛЬКО когда мяч реально коснулся корпуса: раньше приём срабатывал,
+    // едва мяч влетал в радиус 1.5 м, и мяч менял курс в метре от груди
+    p.trapBall(ball, p.bodyContactPoint(bp));
     return;
   }
 

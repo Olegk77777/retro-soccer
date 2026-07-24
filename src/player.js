@@ -290,6 +290,7 @@ export class Player {
     this.jumpFall = CONFIG.player.aerial.jumpFall;
     this.jumpHeight = null;
     this.oneShotUntil = null;
+    this.trapCushion = 0;
     this.diveT = 0;
     this.diveDir = null;
     this.downT = 0;
@@ -338,16 +339,19 @@ export class Player {
   }
 
   // Точка удара в мировых координатах: носок бьющей ноги (клип `kick` бьёт
-  // ЛЕВОЙ — проверено по риггу) или голова. Нужна, чтобы в кадре контакта
-  // мяч оказался ровно на бутсе/лбу, а не «примерно рядом с игроком».
-  // null, пока модель не загрузилась (на капсуле-фолбэке синхрон не нужен).
+  // ЛЕВОЙ, клип `tackle` метёт ПРАВОЙ — проверено по риггу) или голова.
+  // Нужна, чтобы в кадре контакта мяч оказался ровно на бутсе/лбу, а не
+  // «примерно рядом с игроком». null, пока модель не загрузилась.
   strikePointWorld(styleName, out) {
     if (!this.model) return null;
     if (this._bootBone === undefined) {
       this._bootBone = this.model.getObjectByName('mixamorigLeftToeBase') || null;
       this._headBone = this.model.getObjectByName('mixamorigHead') || null;
+      this._slideBone = this.model.getObjectByName('mixamorigRightToeBase') || null;
     }
-    const bone = styleName === 'header' ? this._headBone : this._bootBone;
+    let bone = this._bootBone;
+    if (styleName === 'header') bone = this._headBone;
+    else if (styleName === 'tackle') bone = this._slideBone;
     if (!bone) return null;
     bone.getWorldPosition(out);
     if (styleName !== 'header') out.y = Math.max(out.y, CONFIG.ball.radius);
@@ -615,6 +619,15 @@ export class Player {
     // корпус откинут НАЗАД (ноги вперёд), после слайда сидим на газоне
     const DV = P.aerial.dive;
     let tilt = 0;
+    // Приём: короткий подсед-отклон корпуса — «мягкие ноги» гасят мяч.
+    // Клипа у приёма нет (просьба Олега 23.07), но без единого движения
+    // корпуса приём читался как удар мяча о столб
+    if (this.trapCushion > 0) {
+      this.trapCushion -= dt;
+      const T = P.trap;
+      const k = Math.max(0, this.trapCushion) / T.cushionTime;
+      tilt = -Math.sin(Math.PI * (1 - k)) * T.cushionTilt;
+    }
     if (this.tackleT > 0 || this.slideRecover) {
       // Подкат: наклон не трогаем — весь силуэт (скольжение + вставание)
       // даёт сам клип `tackle`, который продолжает играть в фазе recover
@@ -650,6 +663,7 @@ export class Player {
           this.oneShot.time >= this.oneShotUntil) {
         this.oneShot = null;
         this.oneShotUntil = null;
+    this.trapCushion = 0;
         this.currentName = null; // следующий кадр сам выберет бег/idle
       }
       // Пока играет одноразовый (удар, ловля) — не дёргаем
@@ -1439,10 +1453,12 @@ export class Player {
     // отпускании, wantShot тогда ещё false). Иначе приём «съедал» мяч грудью
     // до волея. input.strikeCommitted = любая боевая кнопка нажата/ждёт.
     const TR = P.trap;
+    // Приём — по РЕАЛЬНОМУ касанию корпуса, а не по влёту в радиус 1.5 м
+    const trapC = this.bodyContactPoint(bp);
     if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
         !wantShot && !input.strikeCommitted && !this.aerialStrike &&
         bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
-        dist < A.reach && ball.vel.y < 1 &&
+        trapC.reachable && ball.vel.y < 1 &&
         ball.vel.length() >= TR.minSpeed) { // полная скорость: крутая перекидка
                                             // почти без горизонтали, но падает быстро
       const mt = this.team ? this.team.match : null;
@@ -1452,7 +1468,7 @@ export class Player {
         const dg = Math.hypot(this.team.attackGoalX - pos.x, pos.z);
         inFinish = dg < CONFIG.ai.aerial.headerRange;
       }
-      if (oursIncoming && !inFinish) this.trapBall(ball);
+      if (oursIncoming && !inFinish) this.trapBall(ball, trapC);
     }
 
     // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
@@ -1677,11 +1693,12 @@ export class Player {
     const dx = tx - pos.x;
     const dz = tz - pos.z;
     const dist = Math.hypot(dx, dz) || 1;
-    // Надбавка на сопротивление воздуха нужна только длинным настильным
-    // дугам: короткая крутая перекидка летит медленно, drag её почти не ест,
-    // и fudge давал чистый перелёт ~25% дальности (фидбек Олега 23.07)
-    const fudgeK = 1 + (LP.fudge - 1) * (1 - chipT);
-    let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * fudgeK;
+    // Силу ищем ЧЕСТНОЙ баллистикой (drag учтён в симуляции), а не формулой
+    // идеальной параболы с поправкой: та мазала мимо адресата на 0.8–2.0 м.
+    // Целимся в высоту приёма (грудь), а не в газон — мяч должен прийти
+    // партнёру на корпус, а не сесть в двух метрах за ним
+    let power = this.solveLoftPower(dist, theta, CONFIG.player.aerial.contactY,
+      LP.powerFloor, type.powerMax);
     // Пол силы ниже powerMin типа: короткой перекидке нужна МАЛАЯ скорость,
     // иначе даже минимальный «зажим» уносил мяч на 12+ метров
     power = Math.max(LP.powerFloor, Math.min(type.powerMax, power));
@@ -2334,24 +2351,95 @@ export class Player {
     const TK = CONFIG.player.tackle;
     const pos = this.group.position;
     const op = owner.group.position;
-    // Соперник-владелец должен быть в досягаемости слайда, иначе — добегаем,
-    // а не бросаемся в подкат за тридевять земель («противник рядом», Олег)
-    if (Math.hypot(op.x - pos.x, op.z - pos.z) > TK.reachOwner) return false;
+    // Соперник-владелец должен быть в досягаемости слайда — но дистанцию мерим
+    // С УЧЁТОМ СБЛИЖЕНИЯ: прущий на меня форвард за время слайда сам приедет.
+    // Раньше самый естественный подкат (шаг навстречу) движок отказывался
+    // исполнять с 4.5 м, хотя сближение было 9 м/с (замер 24.07)
+    const relX = op.x - pos.x;
+    const relZ = op.z - pos.z;
+    const d0 = Math.hypot(relX, relZ) || 1;
+    const closing = Math.max(0,
+      ((this.vel.x - owner.vel.x) * relX + (this.vel.z - owner.vel.z) * relZ) / d0);
+    if (d0 - closing * TK.reachClosing > TK.reachOwner) return false;
 
-    // Прицел: стик, иначе в соперника с упреждением на его бег (мяч сзади
-    // экранирован его корпусом — тогда подкат считается грубым)
-    const run = Math.hypot(this.vel.x, this.vel.z);
-    const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
-    const d0 = Math.hypot(op.x - pos.x, op.z - pos.z);
-    const lead = Math.min(TK.aimLeadMax, d0 / Math.max(sld, 1));
-    let dx = aimDir ? aimDir.x : op.x + owner.vel.x * lead - pos.x;
-    let dz = aimDir ? aimDir.z : op.z + owner.vel.z * lead - pos.z;
+    // Прицел: стик, иначе — В МЯЧ с упреждением на приход НОГИ (раньше целились
+    // в корпус соперника: слайд шёл в человека — фол или мимо мяча)
+    let dx;
+    let dz;
+    if (aimDir) {
+      dx = aimDir.x;
+      dz = aimDir.z;
+    } else {
+      const aim = this.tackleAim(ball);
+      dx = aim.x;
+      dz = aim.z;
+    }
     if (Math.hypot(dx, dz) < 0.01) {
       dx = this.facing.x;
       dz = this.facing.z;
     }
     this.startTackle(dx, dz);
     return true;
+  }
+
+  // Подбор силы верховой передачи ЧЕСТНОЙ баллистикой: скорость ищется
+  // бисекцией по той же физике, что в ball.update (drag + Магнус), а не по
+  // формуле идеальной параболы с поправочным коэффициентом. Формула + fudge
+  // промахивались мимо адресата на 0.8–2.0 м (замер 24.07): на своей половине
+  // мягкий заброс «улетал не туда», и партнёр бежал не к тому месту.
+  solveLoftPower(dist, theta, targetH, lo, hi) {
+    const B = CONFIG.ball;
+    const fly = (power) => {
+      let x = 0;
+      let y = CONFIG.ball.radius;
+      let vx = power;
+      let vy = power * Math.tan(theta);
+      const dt = 1 / 120;
+      for (let t = 0; t < 6; t += dt) {
+        vy += B.gravity * dt;
+        const sp = Math.hypot(vx, vy);
+        if (sp > 0.01) {
+          const k = Math.min(B.dragK * sp * dt, 0.5);
+          vx *= 1 - k;
+          vy *= 1 - k;
+        }
+        x += vx * dt;
+        y += vy * dt;
+        if (vy < 0 && y <= targetH) return x;
+        if (y < 0) return x;
+      }
+      return x;
+    };
+    let a = lo;
+    let b = hi;
+    for (let i = 0; i < 26; i++) {
+      const mid = (a + b) / 2;
+      if (fly(mid) < dist) a = mid; else b = mid;
+    }
+    return (a + b) / 2;
+  }
+
+  // Куда вести слайд: точка, где окажется МЯЧ к приходу вытянутой ноги.
+  // Итерация из трёх шагов — время долёта зависит от дистанции, а дистанция
+  // от времени. Вынос ноги (legAhead) укорачивает нужный путь корпуса.
+  tackleAim(ball) {
+    const TK = CONFIG.player.tackle;
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+    const run = Math.hypot(this.vel.x, this.vel.z);
+    const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
+    let t = 0;
+    for (let i = 0; i < 3; i++) {
+      const tx = bp.x + ball.vel.x * t;
+      const tz = bp.z + ball.vel.z * t;
+      const d = Math.max(0, Math.hypot(tx - pos.x, tz - pos.z) - TK.legAhead);
+      t = Math.min(TK.aimLeadMax, d / Math.max(sld, 1));
+    }
+    return {
+      x: bp.x + ball.vel.x * t - pos.x,
+      z: bp.z + ball.vel.z * t - pos.z,
+      t,
+    };
   }
 
   startTackle(dx, dz) {
@@ -2373,9 +2461,12 @@ export class Player {
     this.pendingStrike = null;
     this.strikeContactLock = false;
     this.cancelBallApproach();
-    // Стартуем клип сразу с фазы скольжения (не с разбега) — иначе за
-    // короткий слайд виден только «выпад» стоя, а не сам подкат
-    this.playOneShot('tackle', TK.clipRate, TK.clipStart);
+    // Клип стартует ровно на входе в фазу подметания (таз на газоне, нога
+    // вытянута), а темп подбирается так, чтобы эта фаза заняла ровно слайд:
+    // раньше первую треть слайда игрок ещё «падал» стоя, уже скользя по полю
+    const sweep = TK.sweepTo - TK.sweepFrom;
+    const rate = Math.max(0.6, Math.min(1.8, sweep / Math.max(0.05, TK.time)));
+    this.playOneShot('tackle', rate, TK.clipStart);
   }
 
   // Скольжение: контакт ноги с мячом выбивает его в 50/50 (владение НЕ
@@ -2417,8 +2508,22 @@ export class Player {
 
     const dBall = Math.hypot(bp.x - pos.x, bp.z - pos.z);
 
+    // Достала ли МЯЧ вытянутая нога. Точка ноги — из скелета (кадр подметания),
+    // фолбэк на капсуле — вынос legAhead по курсу слайда. Раньше мерили от
+    // ЦЕНТРА игрока (1.35 м): мяч «выбивался», когда нога была в полуметре от
+    // него, и подкат читался как удар по воздуху (замер 24.07)
+    const legHit = () => {
+      if (!active || bp.y >= TK.ballMaxY) return false;
+      if (dBall > TK.ballReach + TK.legAhead) return false; // грубый предфильтр
+      const lp = this.strikePointWorld('tackle', _handB);
+      if (lp) return Math.hypot(bp.x - lp.x, bp.y - lp.y, bp.z - lp.z) < TK.legReach;
+      const d = this.tackleDir || { x: this.facing.x, z: this.facing.z };
+      return Math.hypot(bp.x - (pos.x + d.x * TK.legAhead),
+        bp.z - (pos.z + d.z * TK.legAhead)) < TK.legReach;
+    };
+
     // Вытянутая нога достаёт мяч — выбить
-    if (active && !this.tackleHit && dBall < TK.ballReach && bp.y < TK.ballMaxY) knock();
+    if (!this.tackleHit && legHit()) knock();
 
     // Столкновение с соперником (одна жертва за слайд)
     const m = this.team && this.team.match;
@@ -2557,25 +2662,70 @@ export class Player {
     return true;
   }
 
-  // Приём верхового мяча: МАКСИМАЛЬНО просто и привязано к месту (фидбек
-  // Олега 23.07.2026) — никакого клипа и прыжков, игрок остаётся в обычной
-  // локомоции, мяч гасится и опускается ему ПОД НОГИ. Горизонталь капается
-  // жёстко (maxOut), вертикаль идёт вниз (dropSpeed) — после приёма мяч
-  // медленный и низкий, приём не триггерится повторно.
-  trapBall(ball) {
+  // Ближайшая точка КОРПУСА к мячу: вертикальный отрезок от стопы до лба,
+  // сдвинутый чуть вперёд по взгляду. Возвращает { x, y, z, dist } — это и
+  // есть «мяч коснулся игрока», а не «мяч влетел в радиус полтора метра».
+  bodyContactPoint(bp) {
     const T = CONFIG.player.trap;
+    const pos = this.group.position;
     const f = this.facing;
-    let vx = this.vel.x * 0.35 + f.x * T.push;
-    let vz = this.vel.z * 0.35 + f.z * T.push;
+    const cx = pos.x + f.x * T.bodyAhead;
+    const cz = pos.z + f.z * T.bodyAhead;
+    const cy = Math.max(T.bodyLowY, Math.min(T.bodyTopY, bp.y));
+    const horiz = Math.hypot(bp.x - cx, bp.z - cz);
+    // Касание = мяч над корпусом по горизонтали И в пределах роста. Мерить
+    // одним 3D-радиусом нельзя: мяч в 40 см НАД ГОЛОВОЙ попадал в сферу и
+    // «принимался» (замер 24.07) — рост считаем отдельной проверкой
+    return {
+      x: cx, y: cy, z: cz, horiz,
+      dist: Math.hypot(bp.x - cx, bp.y - cy, bp.z - cz),
+      reachable: horiz < T.contactRadius &&
+        bp.y <= T.bodyTopY && bp.y >= T.bodyLowY - T.underFoot,
+    };
+  }
+
+  // Приём верхового мяча: мяч ГАСИТСЯ О КОРПУС в точке касания и сходит под
+  // ноги ПО СВОЕМУ ходу. Клипа и прыжков по-прежнему нет (просьба Олега
+  // 23.07) — вместо них короткий подсед корпуса: видно, что мяч приняли.
+  // Раньше мяч менял направление в метре от груди и мог улететь назад в
+  // пасующего на 3.4 м/с — это и читалось как «отскок от дерева».
+  trapBall(ball, contact = null) {
+    const T = CONFIG.player.trap;
+    const bp = ball.mesh.position;
+    const c = contact || this.bodyContactPoint(bp);
+
+    // Мяч встаёт на точку касания (сдвиг ограничен — телепорта не видно)
+    const dx = c.x - bp.x;
+    const dy = c.y - bp.y;
+    const dz = c.z - bp.z;
+    const d = Math.hypot(dx, dy, dz);
+    if (d > 0.001) {
+      const k = Math.min(1, T.snap / d);
+      bp.x += dx * k;
+      bp.y = Math.max(CONFIG.ball.radius, bp.y + dy * k);
+      bp.z += dz * k;
+    }
+
+    // Гашение: мяч НЕ разворачивается назад — он сходит с корпуса по своему
+    // ходу плюс доля бега игрока. Стоящий игрок просто роняет мяч себе в ноги.
+    const insp = Math.hypot(ball.vel.x, ball.vel.z);
+    const ux = insp > 0.1 ? ball.vel.x / insp : this.facing.x;
+    const uz = insp > 0.1 ? ball.vel.z / insp : this.facing.z;
+    let vx = ux * T.keepIn + this.vel.x * T.keepRun;
+    let vz = uz * T.keepIn + this.vel.z * T.keepRun;
     const sp = Math.hypot(vx, vz);
     if (sp > T.maxOut) {
       vx = (vx / sp) * T.maxOut;
       vz = (vz / sp) * T.maxOut;
     }
-    ball.vel.set(vx, -T.dropSpeed, vz); // мяч сходит с корпуса вниз, под ноги
+    // Вниз — тем сильнее, чем выше приняли: мяч у самой земли не вколачиваем
+    const drop = T.dropSpeed *
+      Math.max(0.2, Math.min(1, (c.y - T.bodyLowY) / (T.dropRefY - T.bodyLowY)));
+    ball.vel.set(vx, -drop, vz);
     ball.spin = 0;
     ball.afterTouch = 0;
     this.kickCooldown = T.settle; // мяч опускается — нога ждёт
+    this.trapCushion = T.cushionTime; // корпус «мягкий»: видно, что приняли
     this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
     this.cancelBallApproach();
   }
