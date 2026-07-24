@@ -191,9 +191,21 @@ export function updateFieldPlayer(p, dt, ball) {
       // погоня за тенью мяча увела бы с траектории.
       // У точки — arrive вместо seek и стойка лицом к мячу: seek без радиуса
       // прибытия дрожал на месте (фидбек Олега 22.07 «адресат дёргается»)
-      const t = team.receiveTarget;
+      // Точка прилёта ПЕРЕСЧИТЫВАЕТСЯ каждый кадр, пока мяч в воздухе: за
+      // время полёта drag и Магнус сдвигают её на метры, а приём теперь
+      // требует настоящего касания корпусом — стоять «примерно там» мало
+      // (замер 24.07: мяч проходил в метре от ждущего, и приёма не было)
+      let t = team.receiveTarget;
+      if (bp.y > CONFIG.player.kickMaxBallY && ball.vel.y < 3) {
+        const land = predictLanding(ball, CONFIG.player.aerial.contactY);
+        if (land) t = land;
+      }
       const dT = Math.hypot(t.x - pos.x, t.z - pos.z);
-      if (myBallDist < 6 && bp.y < 1.2) {
+      // Погоня за мячом — только когда мяч УЖЕ НИЗОМ. Пока он в воздухе, ноги
+      // стоят на точке прилёта: прежний порог 1.2 м срывал адресата с места
+      // ровно на последних метрах (pursuit целится с упреждением ВПЕРЁД мяча),
+      // и опускающийся мяч проходил у него за спиной
+      if (myBallDist < 6 && bp.y < CONFIG.player.kickMaxBallY) {
         move = pursuitBall(pos.x, pos.z, ball, CONFIG.player.speed);
       } else {
         move = arrive(pos.x, pos.z, t.x, t.z, 1.6);
@@ -322,28 +334,35 @@ function pressBall(p, dt, ball, match) {
 
   const op = owner.group.position;
   const badTouch = Math.hypot(bp.x - op.x, bp.z - op.z) > D.badTouchDist;
-  if (badTouch) {
-    // Ошибка владельца — окно отбора. Из зоны досягаемости 90-е решают
-    // грубо: подкат в мяч (сбоку, никогда в спину — дух фолов PES)
-    const TKA = D.tackle;
-    if (p.tackleCd <= 0 && p.kickCooldown <= 0 && p.downT <= 0 && p.diveT <= 0 &&
-        bp.y < P.tackle.ballMaxY &&
-        myBallDist > TKA.rangeMin && myBallDist < TKA.range &&
-        Math.random() < TKA.ratePerSec * dt) {
-      // Упреждение на приход НОГИ — целим, где мяч БУДЕТ (та же математика,
-      // что у человека: вынос ноги укорачивает путь корпуса)
-      const aim = p.tackleAim(ball);
-      const dx = aim.x;
-      const dz = aim.z;
-      const dl = Math.hypot(dx, dz) || 1;
-      const behind =
-        (dx / dl) * owner.facing.x + (dz / dl) * owner.facing.z > P.tackle.backCos;
-      if (!behind) {
-        p.startTackle(dx, dz);
-        return { move: { x: 0, z: 0 }, sprint: false, face: null, speedCap: null };
-      }
+
+  // Окно отбора. Классическое — ОШИБКА ВЛАДЕЛЬЦА (мяч отскочил от ноги), там
+  // решаются охотно. Но ждать только её нельзя: AI-ведение держит мяч в 0.9 м
+  // от ноги, и «плохое касание» не наступает практически никогда — замер
+  // 24.07 дал 0.1% кадров ведения и НОЛЬ подкатов AI за 20 минут. Поэтому
+  // добавлено обычное окно: слайд идёт, когда он ФИЗИЧЕСКИ достаёт мяч сбоку.
+  const TKA = D.tackle;
+  if (p.tackleCd <= 0 && p.kickCooldown <= 0 && p.downT <= 0 && p.diveT <= 0 &&
+      bp.y < P.tackle.ballMaxY &&
+      myBallDist > TKA.rangeMin && myBallDist < TKA.range &&
+      p.tackleReachable(ball)) {
+    // Упреждение на приход НОГИ — целим, где мяч БУДЕТ (та же математика,
+    // что у человека: вынос ноги укорачивает путь корпуса)
+    const aim = p.tackleAim(ball);
+    const dl = Math.hypot(aim.x, aim.z) || 1;
+    const behind =
+      (aim.x / dl) * owner.facing.x + (aim.z / dl) * owner.facing.z > P.tackle.backCos;
+    // Ближе к своим воротам решаются злее — там цена потери выше
+    const ownDepth = Math.hypot(pos.x - team.ownGoalX, pos.z);
+    const rate = (badTouch ? TKA.ratePerSec : TKA.rateNormal) *
+      (ownDepth < TKA.desperateDepth ? TKA.desperateK : 1);
+    if (!behind && Math.random() < rate * dt) {
+      p.startTackle(aim.x, aim.z);
+      return { move: { x: 0, z: 0 }, sprint: false, face: null, speedCap: null };
     }
-    // Иначе — обычный рывок в мяч
+  }
+
+  if (badTouch) {
+    // Владелец потерял касание — рывок в мяч
     return {
       move: pursuitBall(pos.x, pos.z, ball, P.speed),
       sprint: true,

@@ -155,6 +155,34 @@ export function isPassSafe(fromX, fromZ, toX, toZ, power, opponents) {
   return true;
 }
 
+// Запас проходимости паса (м): насколько соперники НЕ успевают на линию.
+// Модель времени вместо плоского коридора: пока мяч летит до проекции
+// соперника на линию паса, тот бежит поперёк — но не мгновенно (react) и не
+// всем спринтом (speedK: он ещё разворачивается и не всегда лицом к мячу).
+// > 0 — пас проходит, < 0 — перехватят. Плоский порог «чистоты» отсекал
+// почти всё: в компактном блоке зазора в пару метров попросту не бывает.
+export function passSafeMargin(fromX, fromZ, toX, toZ, power, opponents, cfg) {
+  const dx = toX - fromX;
+  const dz = toZ - fromZ;
+  const len = Math.hypot(dx, dz) || 1;
+  const nx = dx / len;
+  const nz = dz / len;
+  const P = CONFIG.player;
+  const oppSpeed = P.speed * CONFIG.ai.speedFactor * P.sprintFactor;
+  let margin = Infinity;
+  for (const o of opponents) {
+    if (o.downT > 0 || o.tackleT > 0) continue; // лежащий на линии не перехватит
+    const op = o.group.position;
+    const lx = (op.x - fromX) * nx + (op.z - fromZ) * nz; // вдоль линии паса
+    if (lx < 0.5 || lx > len) continue;                   // за спиной или дальше цели
+    const ly = Math.abs(-(op.x - fromX) * nz + (op.z - fromZ) * nx); // поперёк
+    const tBall = lx / Math.max(power * 0.8, 1);
+    const reach = cfg.body + oppSpeed * cfg.speedK * Math.max(0, tBall - cfg.react);
+    margin = Math.min(margin, ly - reach);
+  }
+  return margin;
+}
+
 // Насколько «чист» коридор паса: минимальное расстояние от соперников
 // до отрезка (fromX,fromZ)→(toX,toZ). Меньше порога = пас перехватят.
 export function passLaneClearance(fromX, fromZ, toX, toZ, opponents) {

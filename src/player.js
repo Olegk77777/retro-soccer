@@ -2419,6 +2419,19 @@ export class Player {
     return (a + b) / 2;
   }
 
+  // Достанет ли слайд мяч вообще: путь корпуса до точки прицела (минус вынос
+  // ноги) против того, сколько корпус проедет за активную фазу скольжения.
+  // Нужно, чтобы AI шёл в подкат, когда есть РЕАЛЬНЫЙ шанс, а не по таймеру.
+  tackleReachable(ball) {
+    const TK = CONFIG.player.tackle;
+    const aim = this.tackleAim(ball);
+    const need = Math.max(0, Math.hypot(aim.x, aim.z) - TK.legAhead - TK.legReach);
+    const run = Math.hypot(this.vel.x, this.vel.z);
+    const sld = Math.min(TK.speedMax, Math.max(TK.speedMin, run * TK.runBoost));
+    const avg = (sld + TK.speedEnd) / 2; // слайд затухает по ходу
+    return need <= avg * TK.time * TK.activeTo;
+  }
+
   // Куда вести слайд: точка, где окажется МЯЧ к приходу вытянутой ноги.
   // Итерация из трёх шагов — время долёта зависит от дистанции, а дистанция
   // от времени. Вынос ноги (legAhead) укорачивает нужный путь корпуса.

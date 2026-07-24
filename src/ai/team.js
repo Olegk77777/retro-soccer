@@ -4,7 +4,7 @@
 // назначения, «головы» игроков (fieldplayer.js) их исполняют.
 
 import { CONFIG } from '../config.js';
-import { distToBall, passLaneClearance, freeSpace, isPassSafe, predictLanding } from './steering.js';
+import { distToBall, passLaneClearance, passSafeMargin, freeSpace, isPassSafe, predictLanding } from './steering.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -91,8 +91,14 @@ export class Team {
     // касания пасующего — сразу после удара он ещё пару кадров «ближайший».
     if (this.receiver) {
       this.receiveTimer -= dt;
+      // Наш верховой мяч ещё В ВОЗДУХЕ — назначение живёт, даже если формально
+      // «ближайшим» на миг стал соперник под траекторией. Иначе адресат
+      // бросал бег на середине полёта и мяч падал в пустоту (замер 24.07:
+      // приёмщика снимало через 3 с, а мяч летел 4 с)
+      const bpR = ball.mesh.position;
+      const inFlight = bpR.y > CONFIG.player.kickMaxBallY;
       const done = this.receiveTimer <= 0 ||
-        this.match.possession === this.match.otherTeam(this) ||
+        (!inFlight && this.match.possession === this.match.otherTeam(this)) ||
         this.match.toucher === this.receiver;
       if (done) {
         this.receiver = null;
@@ -599,6 +605,13 @@ export class Team {
     const opponents = this.opponents;
     let best = null;
     let bestScore = -Infinity;
+    // Под прессингом пас обязателен: рискованный коридор лучше потери мяча
+    let nearestOpp = Infinity;
+    for (const o of opponents) {
+      const op = o.group.position;
+      nearestOpp = Math.min(nearestOpp, Math.hypot(op.x - fp.x, op.z - fp.z));
+    }
+    const underPressure = nearestOpp < AI.passPressure;
 
     for (const mate of this.players) {
       if (mate === from || mate.isKeeper) continue;
@@ -620,11 +633,19 @@ export class Team {
       const tz = mp.z + mate.vel.z * t * lead;
 
       const clearance = passLaneClearance(fp.x, fp.z, tx, tz, opponents);
-      // Пас в разрез терпит более узкую щель (riskFactor, Gliders2d)
-      const needClear = isRunner
-        ? AI.passOpenRadius * CONFIG.ai.attack.runs.riskFactor
-        : AI.passOpenRadius;
-      if (clearance < needClear) continue;
+      const PI = AI.passIntercept;
+      // Соперник практически НА линии — коридор закрыт при любой скорости
+      if (clearance < PI.hardBlock) continue;
+      // Иначе решает модель перехвата по времени: успеет ли защитник на линию
+      // раньше мяча. Пас в разрез терпит более узкую щель (riskFactor,
+      // Gliders2d), под прессингом прощается ещё riskUnderPress — деваться
+      // некуда, отдавай. Плоский порог «чистого коридора 2.6 м» отсекал 80%
+      // вариантов, и AI не пасовал вовсе (замер 24.07)
+      const margin = passSafeMargin(fp.x, fp.z, tx, tz, speed, opponents, PI);
+      let allow = 0;
+      if (isRunner) allow += PI.body * (1 - CONFIG.ai.attack.runs.riskFactor);
+      if (underPressure) allow += PI.riskUnderPress;
+      if (margin < -allow) continue;
 
       // Ценим продвижение к воротам, чистоту коридора, свободную зону на
       // приёме (перевод из толпы на пустой фланг) и бегущего в разрез
@@ -655,6 +676,18 @@ export class Team {
     this.receiver = pass.mate;
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
+    // Верховой пас летит по баллистике и садится ЗАМЕТНО ДАЛЬШЕ наземной цели,
+    // под которую считалась сила. Адресат обязан бежать в реальную точку
+    // прилёта, иначе он ждёт там, где мяча не будет: замер 24.07 дал 9 верховых
+    // пасов и НОЛЬ приёмов — мяч каждый раз садился мимо ожидающего
+    const ball = this.match && this.match.ball;
+    if (ball && (pass.lift || 0) > 2) {
+      const land = predictLanding(ball, CONFIG.player.aerial.contactY);
+      if (land) {
+        this.receiveTarget = { x: land.x, z: land.z };
+        this.receiveTimer = Math.max(this.receiveTimer, land.t + 0.8);
+      }
+    }
     if (this.runner === pass.mate) {
       // Пас на рывок отдан — дальше раннер живёт как обычный приёмщик
       this.runner = null;
