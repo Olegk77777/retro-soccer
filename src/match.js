@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { PACK } from './pack.js';
-import { Player } from './player.js';
+import { Player, setLookTarget } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
@@ -78,6 +78,9 @@ export class Match {
     this.ball = ball;
     this.goals = goals;
     this.input = input;
+    // Куда все смотрят головой. Вектор позиции мяча живой (мутируется на
+    // месте), поэтому отдаём его слою анимации один раз — дальше он читает сам
+    setLookTarget(ball.mesh.position);
 
     const mkPlayers = (data) => CONFIG.formation.roles.map((r, i) => {
       const isKeeper = i === 0;
@@ -383,8 +386,7 @@ export class Match {
       const d = Math.hypot(dx, dz) || 1;
       const power = Math.max(6, Math.min(11, d * 1.25)); // мягко, чтоб не проскочил
       st1.rot = Math.atan2(dx, dz);
-      st1.aiKick(this.ball, { x: dx / d, z: dz / d }, power, 0, 0,
-        { name: 'kick', ts: 1.5, at: 0.2 });
+      st1.aiKick(this.ball, { x: dx / d, z: dz / d }, power, 0, 0, 'pass');
       kt.receiver = st2;
       kt.receiveTarget = { x: p2.x, z: p2.z };
       kt.receiveTimer = CONFIG.ai.receiveGiveUp;
@@ -1239,7 +1241,7 @@ export class Match {
     this.ball.strike(dir, power, cfg.lift);
     r.taker.rot = Math.atan2(dir.x, dir.z);
     r.taker.kickCooldown = P.kickCooldown;
-    r.taker.playOneShot('kick', 1.6, 0.20);
+    r.taker.playStrike('setpiece'); // стандарт: игрок стоит, время на замах есть
     this._finishRestart();
   }
 
@@ -1321,8 +1323,7 @@ export class Match {
       const theta = (RC.angle * Math.PI) / 180;
       let power = Math.sqrt((-CONFIG.ball.gravity * dist) / (2 * Math.tan(theta))) * RC.powerFudge;
       power = Math.max(RC.powerMin, Math.min(RC.powerMax, power));
-      taker.aiKick(this.ball, { x: dx / dist, z: dz / dist }, power, power * Math.tan(theta), 0,
-        { name: 'kick', ts: 1.2, at: 0.16 });
+      taker.aiKick(this.ball, { x: dx / dist, z: dz / dist }, power, power * Math.tan(theta), 0, 'cross');
       team.onCrossStruck(this.ball); // замыкающий врывается на прилёт
       this._finishRestart();
       return;
@@ -1332,14 +1333,13 @@ export class Match {
     const K = CONFIG.ai.keeper;
     const pass = team.choosePass(taker, this.ball);
     if (pass) {
-      taker.aiKick(this.ball, pass.dir, pass.power, pass.lift, 0,
-        { name: 'kick', ts: 1.4, at: 0.18 });
+      taker.aiKick(this.ball, pass.dir, pass.power, pass.lift, 0, 'setpiece');
       team.commitPass(pass, taker);
     } else {
       const zs = Math.sign(r.z || 1);
       const dl = Math.hypot(team.side, zs * 0.5);
       taker.aiKick(this.ball, { x: team.side / dl, z: (zs * 0.5) / dl },
-        K.clearPower, K.clearLift, 0, { name: 'kick', ts: 1.4, at: 0.18 });
+        K.clearPower, K.clearLift, 0, 'setpiece');
     }
     this._finishRestart();
   }

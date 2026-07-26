@@ -633,8 +633,7 @@ function aiCross(p, ball, oppD, pass = null) {
   power = Math.max(14, Math.min(30, power));
   const lift = power * Math.tan(theta);
   team.bump('cross');
-  p.aiKick(ball, { x: dx / dist, z: dz / dist }, power, lift, 0,
-    { name: 'kick', ts: 1.2, at: 0.16 }); // навес — с проводкой
+  p.aiKick(ball, { x: dx / dist, z: dz / dist }, power, lift, 0, 'cross');
   // Замыкающего назначает тренер по точке прилёта (врывание на прилёт)
   team.onCrossStruck(ball);
   return true;
@@ -754,5 +753,7 @@ function aiShoot(p, ball, goalX, distGoal, pressed = false) {
   const lift = lowShot
     ? Math.min(3.5, 0.4 + distGoal * 0.075)
     : Math.min(7, 1.2 + distGoal * 0.12 + Math.random() * 1.5);
-  p.aiKick(ball, { x: dx / d, z: dz / d }, power, lift);
+  // Клип по манере удара: на разбеге — полный мах подъёмом, с места — щёчка
+  const running = Math.hypot(p.vel.x, p.vel.z) > CONFIG.shot.styles.instep.minRunSpeed;
+  p.aiKick(ball, { x: dx / d, z: dz / d }, power, lift, 0, running ? 'instep' : 'side');
 }

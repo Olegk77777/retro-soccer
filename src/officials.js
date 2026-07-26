@@ -50,31 +50,21 @@ class Official {
     this._animate(dt);
   }
 
-  // Клип по направлению бега относительно взгляда: вперёд — бег, вбок —
-  // приставные шаги (лайнсмен вдоль бровки бегает именно так), назад — спиной
+  // Ноги арбитра ведёт тот же смеситель ступеней, что и у игроков
+  // (Player.updateLoco): вперёд — ходьба/бег/спринт по скорости, вбок —
+  // приставные шаги (лайнсмен вдоль бровки бегает именно так), назад — спиной.
+  // Раньше здесь лежала СВОЯ копия старой логики с делителем 4.0 — она жила
+  // отдельной жизнью и повторяла все те же ошибки темпа. Теперь общий код:
+  // достаточно синхронизировать скорость и разворот с телом.
   _animate(dt) {
     const b = this.body;
     if (!b.mixer) return;
+    b.vel.copy(this.vel);
+    b.rot = this.face;
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    if (speed < 0.5) {
-      b.playAction('idle', 0.2);
-    } else {
-      const fx = Math.sin(this.face);
-      const fz = Math.cos(this.face);
-      const fwd = this.vel.x * fx + this.vel.z * fz;
-      const side = fx * this.vel.z - fz * this.vel.x;
-      let clip = 'run';
-      if (Math.abs(fwd) < speed * 0.5 && b.actions.strafe_l) {
-        clip = side > 0 ? 'strafe_r' : 'strafe_l';
-      } else if (fwd < -speed * 0.5 && b.actions.run_back) {
-        clip = 'run_back';
-      }
-      b.playAction(clip, 0.14);
-      if (b.actions[clip]) {
-        b.actions[clip].timeScale = Math.min(1.8, Math.max(0.6, speed / 4.0));
-      }
-    }
+    b.updateLoco(dt, speed);
     b.mixer.update(dt);
+    b.updatePose(dt, speed);   // и головой судья следит за мячом, как положено
   }
 }
 

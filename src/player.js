@@ -5,14 +5,19 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
+import { buildDerivedClips } from './anim.js';
 import { predictLanding, pursuitBall } from './ai/steering.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
 // Исходные материалы НЕ трогаем — каждый клон собирает свои (цвет команды).
+// Сразу после загрузки достраиваем производные шаговые клипы (ходьба, спринт)
+// и меряем длину шага каждого — см. src/anim.js. Делается один раз на общий
+// gltf, до первого клона, поэтому все игроки получают готовый набор.
 let modelPromise = null;
 function loadPlayerModel() {
   if (!modelPromise) {
-    modelPromise = new GLTFLoader().loadAsync('./models/player.glb');
+    modelPromise = new GLTFLoader().loadAsync('./models/player.glb')
+      .then((gltf) => buildDerivedClips(gltf));
   }
   return modelPromise;
 }
@@ -102,8 +107,24 @@ const HAIR_STYLES = {
 const _handA = new THREE.Vector3();
 const _handB = new THREE.Vector3();
 
-// Какие клипы играются один раз (удары, падения), остальные — циклы
+// Временные для слоя «живой корпус» (updatePose) — тоже без аллокаций
+const _poseEuler = new THREE.Euler();
+const _poseQuat = new THREE.Quaternion();
+
+// Куда игроки смотрят головой. Мяч — один на всех, и его вектор позиции живой
+// (мутируется на месте), поэтому достаточно отдать его СЮДА один раз при сборке
+// матча — дальше слой взгляда читает его сам, без прокидывания через сигнатуры.
+let _lookTarget = null;
+export function setLookTarget(pos) { _lookTarget = pos; }
+
+// Какие клипы играются один раз (удары, падения), остальные — циклы.
+// `fallen` тут не было — и это был не стилевой недосмотр, а баг: клип падения
+// оставался зациклённым, событие finished не приходило НИКОГДА, поэтому
+// this.oneShot у сбитого игрока не сбрасывался до следующего удара. Всё это
+// время выбор шагового клипа был заблокирован, и человек бегал по полю в позе
+// падения — ровно то самое «полупарализованные».
 const ONE_SHOT = new Set([
+  'fallen',
   'kick', 'kick_run', 'penalty', 'header', 'tackle', 'trip', 'getup',
   'throwin', 'receive', 'gk_catch', 'gk_dive', 'gk_dropkick', 'gk_throw',
   'gk_scoop', 'gk_pass',
@@ -261,11 +282,64 @@ export class Player {
     }
     this.mixer.addEventListener('finished', (e) => {
       if (e.action === this.oneShot) {
+        this.fadingOneShot = this.oneShot; // менеджер весов погасит его сам
         this.oneShot = null;
         this.currentName = null; // следующий кадр сам выберет idle/run
       }
     });
-    this.playAction('idle', 0);
+    this.setupLoco(gltf);
+  }
+
+  // Шаговые клипы живут иначе, чем всё остальное: они НЕ переключаются, а
+  // постоянно играют с весами. Соседние ступени лестницы (стойка → ходьба →
+  // бег → спринт) смешиваются по скорости, поэтому перехода «дёрнулся и сменил
+  // клип» не существует в принципе. Веса ведём руками — crossFade три.js тут
+  // мешал бы (он ставит свой интерполятор поверх наших весов).
+  setupLoco(gltf) {
+    const A = CONFIG.player.anim;
+    const nat = (gltf.userData && gltf.userData.locoSpeed) || {};
+    // Масштаб модели входит в длину шага честно: высокий шагает шире
+    const s = this.model.scale.z || 1;
+    this.loco = {};
+    const names = A.derive.map((d) => d.name).concat(['idle', 'gk_idle']);
+    for (const name of names) {
+      const a = this.actions[name];
+      if (!a) continue;
+      a.enabled = true;
+      a.setLoop(THREE.LoopRepeat, Infinity);
+      a.setEffectiveWeight(0);
+      a.play();
+      this.loco[name] = { a, w: 0, nat: (nat[name] || 0) * s, dur: a.getClip().duration };
+    }
+    // Личная фаза и личный темп: без них 22 фигуры маршируют строем в ногу
+    // (замер до правки: все 20 полевых стояли ровно на кадре t = 0.663)
+    this.animPhase = Math.random();
+    this.animRate = 1 + (Math.random() * 2 - 1) * A.rateJitter;
+    this.locoName = 'idle';   // ведущая ступень (её пишет повтор)
+    this.locoMode = 'fwd';    // направление лестницы (с гистерезисом)
+    this.oneShotW = 0;        // текущий вес одноразового клипа
+    this.fadingOneShot = null; // доигравший клип, который надо погасить
+    this.lookYaw = 0;
+    this.lookPitch = 0;
+    this.leanZ = 0;
+    this.leanX = 0;
+    this.locoPhase = this.animPhase;
+    this._prevRot = this.rot;
+    this._prevFwd = 0;
+    // Кости слоя «живой корпус» ищем один раз (getObjectByName обходит дерево)
+    this._headBoneLook = this.model.getObjectByName('mixamorigHead') || null;
+    this._chestBone = this.model.getObjectByName('mixamorigSpine2')
+      || this.model.getObjectByName('mixamorigSpine1') || null;
+    this._spineBone = this.model.getObjectByName('mixamorigSpine') || null;
+    // Стартовая раскладка: стойка со своей фазы
+    const idle = this.loco.idle;
+    if (idle) {
+      idle.w = 1;
+      idle.a.setEffectiveWeight(1);
+      idle.a.time = this.animPhase * idle.dur;
+    }
+    this.currentAction = idle ? idle.a : null;
+    this.currentName = 'idle';
   }
 
   // Причёска: низкополигональная «шапка» на кости головы. Кость Mixamo живёт
@@ -311,20 +385,6 @@ export class Player {
     }
   }
 
-  // Плавное переключение клипа (crossfade), повторный вызов того же клипа — no-op
-  playAction(name, fade = 0.12) {
-    const next = this.actions[name];
-    if (!next || this.currentName === name) return;
-    next.enabled = true;
-    next.reset();
-    if (this.currentAction && this.currentAction !== next) {
-      next.crossFadeFrom(this.currentAction, fade, false);
-    }
-    next.play();
-    this.currentAction = next;
-    this.currentName = name;
-  }
-
   // Одноразовый клип поверх движения (удар, подкат…).
   // startAt (сек клипа) стартует не с нуля, а ближе к контакту с мячом:
   // удар мгновенный, а полный замах отставал бы от уже улетевшего мяча.
@@ -334,20 +394,271 @@ export class Player {
   playOneShot(name, timeScale = 1, startAt = 0, endAt = null) {
     const a = this.actions[name];
     if (!a) return;
-    if (this.currentAction && this.currentAction !== a) {
-      this.currentAction.fadeOut(0.05);
-    }
+    // Предыдущий одноразовый гасим сами (менеджер весов в updateLoco): его
+    // собственный fadeOut ставил интерполятор поверх наших весов и дрался с ним
+    if (this.oneShot && this.oneShot !== a) this.fadingOneShot = this.oneShot;
+    if (this.fadingOneShot === a) this.fadingOneShot = null;
     a.reset();
     a.time = startAt;
     a.timeScale = timeScale;
     a.enabled = true;
-    a.setEffectiveWeight(1);
-    a.fadeIn(0.05);
+    // Вес поднимет менеджер: удар вытесняет шаговые клипы, а не складывается
+    // с ними (два клипа по весу 1 давали половину удара и половину бега)
+    a.setEffectiveWeight(this.loco ? this.oneShotW : 1);
     a.play();
     this.currentAction = a;
     this.currentName = name;
     this.oneShot = a;
     this.oneShotUntil = endAt;
+  }
+
+  // Смеситель шаговых клипов. Вызывать раз в кадр ДО mixer.update.
+  //
+  // Принцип. Ступени лестницы (стойка → ходьба → бег → спринт) не
+  // переключаются, а смешиваются по весам: берём пару соседних и выдаём их
+  // долями. Темп считается от ДЛИНЫ ШАГА смеси, поэтому опорная стопа едет
+  // ровно со скоростью газона под ней — скольжения нет ни на одной скорости.
+  // Фаза у ступеней ОБЩАЯ (одна нормированная 0..1 на игрока): без неё две
+  // смешанные походки идут не в ногу и дают кашу вместо ног.
+  updateLoco(dt, speed) {
+    const A = CONFIG.player.anim;
+    const L = this.loco;
+    if (!L) return;
+
+    // --- 1. Одноразовый клип (удар, подкат, сейв) вытесняет шаговые ---
+    // Суммарный вес всегда держим около 1: при меньшем three.js подмешивает
+    // позу покоя, и фигура «уползает» в T-позу.
+    const kOne = Math.min(1, A.oneShotRate * dt);
+    if (this.oneShot) {
+      this.oneShotW += (1 - this.oneShotW) * kOne;
+      this.oneShot.setEffectiveWeight(this.oneShotW);
+      if (this.fadingOneShot && this.fadingOneShot !== this.oneShot) {
+        this.fadingOneShot.setEffectiveWeight(0);
+        this.fadingOneShot.stop();
+        this.fadingOneShot = null;
+      }
+    } else if (this.oneShotW > 0.002) {
+      this.oneShotW = Math.max(0, this.oneShotW - kOne * 1.5);
+      if (this.fadingOneShot) this.fadingOneShot.setEffectiveWeight(this.oneShotW);
+    } else if (this.fadingOneShot) {
+      this.fadingOneShot.setEffectiveWeight(0);
+      this.fadingOneShot.stop();
+      this.fadingOneShot = null;
+      this.oneShotW = 0;
+    }
+    const room = Math.max(0, 1 - this.oneShotW);
+
+    // --- 2. Какая лестница: вперёд, спиной или боком ---
+    // Взгляд считаем напрямую: геттер facing аллоцирует Vector3 на каждый вызов
+    const fx = Math.sin(this.rot);
+    const fz = Math.cos(this.rot);
+    const fwd = this.vel.x * fx + this.vel.z * fz;
+    const side = fx * this.vel.z - fz * this.vel.x; // >0 — движение вправо от взгляда
+    const bottom = (this.isKeeper && L.gk_idle) ? 'gk_idle' : 'idle';
+    // Направление с гистерезисом: порог входа в режим строже порога выхода,
+    // иначе на грани (движение под ~60° к взгляду) режим дребезжит и в позе
+    // одновременно висят шаг влево и шаг вправо — ноги превращаются в кашу
+    const mode = this.locoMode || 'fwd';
+    const sideK = speed > 0.01 ? Math.abs(side) / speed : 0;
+    const fwdK = speed > 0.01 ? fwd / speed : 1;
+    const sideways = mode === 'sideL' || mode === 'sideR';
+    let next = mode;
+    if (speed < A.dirMinSpeed) {
+      next = 'fwd';
+    } else if (sideways) {
+      // Держим боковой режим, пока движение вбок ощутимо И по доле, и в м/с.
+      // Сторону меняем только по УВЕРЕННОМУ боковому ходу: около нуля знак
+      // `side` дребезжит, и раньше в позе висели оба приставных шага сразу
+      const keep = sideK > A.sideExit && Math.abs(side) > A.sideMin * A.sideKeep;
+      if (!keep) next = fwdK < A.backEnter ? 'back' : 'fwd';
+      else if (Math.abs(side) > A.sideMin) next = side > 0 ? 'sideR' : 'sideL';
+    } else if (mode === 'back') {
+      if (fwdK > A.backExit) next = 'fwd';
+    } else if (sideK > A.sideEnter && Math.abs(side) > A.sideMin) {
+      next = side > 0 ? 'sideR' : 'sideL';
+    } else if (fwdK < A.backEnter) {
+      next = 'back';
+    }
+    this.locoMode = next;
+    const LADDER = {
+      fwd: A.ladder, back: A.ladderBack, sideL: A.ladderSideL, sideR: A.ladderSideR,
+    };
+    const rungs = (LADDER[next] || A.ladder).map((n) => (n === 'idle' ? bottom : n));
+    const avail = rungs.filter((n) => L[n]);
+    if (!avail.length) return;
+
+    // --- 3. Пара соседних ступеней и доли между ними ---
+    // Якорь ступени = её вымеренная скорость (у стойки — ноль). Смесь двух
+    // ступеней даёт скорость ног, равную взвешенному среднему якорей, —
+    // поэтому темп ниже считается именно от него.
+    const anchor = avail.map((n) => (n === bottom ? 0 : L[n].nat || 0));
+    let i = 0;
+    while (i < avail.length - 2 && speed >= anchor[i + 1]) i++;
+    const j = Math.min(i + 1, avail.length - 1);
+    let t = anchor[j] > anchor[i] ? (speed - anchor[i]) / (anchor[j] - anchor[i]) : 1;
+    t = Math.max(0, Math.min(1, t));
+    // «Полка»: нижняя ступень держится чисто в начале промежутка — в переходе
+    // сэмплятся два клипа, и лишнюю их долю мы не оплачиваем на планшете
+    if (A.blendBand < 1) t = Math.max(0, Math.min(1, (t - (1 - A.blendBand)) / A.blendBand));
+    t = t * t * (3 - 2 * t);       // smoothstep: вход и выход без рывка
+
+    const want = this._locoWant || (this._locoWant = {});
+    for (const n in L) want[n] = 0;
+    want[avail[i]] += 1 - t;
+    want[avail[j]] += t;
+
+    // --- 4. Веса догоняют цель плавно (смена режима вперёд/боком дискретна) ---
+    const kW = Math.min(1, A.weightRate * dt);
+    let sum = 0;
+    for (const n in L) {
+      const e = L[n];
+      e.w += ((want[n] || 0) - e.w) * kW;
+      if (e.w < A.weightFloor && !want[n]) e.w = 0;
+      sum += e.w;
+    }
+    const norm = sum > 0.001 ? room / sum : 0;
+
+    // --- 5. Общая фаза: ступени идут ШАГ В ШАГ ---
+    // Длину шага смеси считаем по ФАКТИЧЕСКИМ весам, а не по целевым. Разница
+    // не косметическая: при торможении с бега в позе ещё «висят» спринт и бег
+    // (веса догоняют цель ~0.07 с), и если считать темп по цели, ноги едут
+    // быстрее, чем рисует смесь. Замер: в полосе 1–2 м/с у ступеней-догонялок
+    // оставалось 15% веса — ровно на них и приходилось лишнее скольжение.
+    // Стойка входит в среднее с нулём законно: подмешанная неподвижная поза
+    // укорачивает видимый шаг, и клип обязан крутиться быстрее.
+    let nat = 0;
+    if (sum > 0.001) {
+      for (let k = 0; k < avail.length; k++) nat += L[avail[k]].w * anchor[k];
+      for (const n in L) {
+        if (avail.indexOf(n) < 0) nat += L[n].w * (L[n].nat || 0);
+      }
+      nat /= sum;
+    }
+    const rate = nat > 0.05
+      ? Math.max(A.rateMin, Math.min(A.rateMax, speed / nat)) * this.animRate
+      : this.animRate;
+    // Опорная длительность — у ведущей шаговой ступени (у стойки цикла нет)
+    const leadGait = avail[j] !== bottom ? avail[j] : avail[i];
+    const ref = (L[leadGait] && leadGait !== bottom && L[leadGait].dur) || 0.7;
+    this.locoPhase = (this.locoPhase + (rate * dt) / ref) % 1;
+
+    // --- 6. Раздача весов и кадров ---
+    let lead = null;
+    let leadW = -1;
+    for (const n in L) {
+      const e = L[n];
+      const w = e.w * norm;
+      e.a.setEffectiveWeight(w);
+      if (n === bottom) {
+        e.a.timeScale = this.animRate;      // стойка живёт своим ходом
+      } else {
+        e.a.timeScale = 0;                  // время шаговых ведём фазой сами
+        e.a.time = this.locoPhase * e.dur;
+      }
+      if (e.w > leadW) { leadW = e.w; lead = n; }
+    }
+    // Повтор (src/replay.js) пишет ОДИН клип и его время — отдаём ведущую
+    // ступень; при весе ≥ 0.5 картинка от смеси почти не отличается
+    if (!this.oneShot && lead) {
+      this.currentAction = L[lead].a;
+      this.currentName = lead;
+    }
+    this.locoName = lead;
+  }
+
+  // Живой корпус поверх клипа: доворот на мяч и завал в поворот.
+  // Вызывать ПОСЛЕ mixer.update — микшер уже поставил позу кадра, а мы
+  // доворачиваем шею и грудь сверху. Это самый дешёвый способ убрать
+  // «деревянность»: пара кватернионов на игрока, зато фигура смотрит туда,
+  // куда должна, и заваливается в дугу, как живой бегущий.
+  //
+  // ВАЖНО: во время одноразовых клипов (удар, сейв, подкат) слой молчит.
+  // Кадры контакта вымерены по риггу (CONFIG.player.aerial.sync), а точки
+  // удара считаются от костей головы и стопы — доворот сдвинул бы их.
+  updatePose(dt, speed) {
+    const A = CONFIG.player.anim;
+    if (!this.model) return;
+    const active = !this.oneShot && this.oneShotW < 0.2 &&
+      this.diveT <= 0 && this.downT <= 0 && this.tackleT <= 0;
+
+    // --- Доворот головы и груди на мяч ---
+    const LK = A.look;
+    if (LK.enabled) {
+      let yaw = 0;
+      let pitch = 0;
+      const ball = active ? _lookTarget : null;
+      if (ball) {
+        const dx = ball.x - this.group.position.x;
+        const dz = ball.z - this.group.position.z;
+        const flat = Math.hypot(dx, dz);
+        if (flat < LK.maxDist) {
+          let d = Math.atan2(dx, dz) - this.rot;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          yaw = Math.max(-LK.maxYaw, Math.min(LK.maxYaw, d));
+          const dy = ball.y - CONFIG.player.height * 0.9;
+          pitch = Math.max(-LK.maxPitch, Math.min(LK.maxPitch, -Math.atan2(dy, Math.max(1, flat))));
+        }
+      }
+      const kL = Math.min(1, LK.rate * dt);
+      this.lookYaw += (yaw - this.lookYaw) * kL;
+      this.lookPitch += (pitch - this.lookPitch) * kL;
+      this._applyBone(this._headBoneLook, LK.headShare * this.lookYaw, LK.headShare * this.lookPitch);
+      this._applyBone(this._chestBone, LK.chestShare * this.lookYaw, 0);
+    }
+
+    // --- Завал в поворот и на разгоне ---
+    const LN = A.lean;
+    if (LN.enabled) {
+      let dRot = this.rot - this._prevRot;
+      while (dRot > Math.PI) dRot -= Math.PI * 2;
+      while (dRot < -Math.PI) dRot += Math.PI * 2;
+      this._prevRot = this.rot;
+      const fwdSp = this.vel.x * this.facing.x + this.vel.z * this.facing.z;
+      const accel = dt > 0 ? (fwdSp - this._prevFwd) / dt : 0;
+      this._prevFwd = fwdSp;
+      const k01 = Math.min(1, speed / LN.speedRef);
+      let bank = 0;
+      let pitch = 0;
+      if (active) {
+        const w = dt > 0 ? dRot / dt : 0;
+        bank = Math.max(-LN.turnMax, Math.min(LN.turnMax, -w * LN.turn * 0.1)) * k01;
+        pitch = Math.max(-LN.accelMax, Math.min(LN.accelMax, accel * LN.accel)) * k01;
+      }
+      const kN = Math.min(1, LN.rate * dt);
+      this.leanZ += (bank - this.leanZ) * kN;
+      this.leanX += (pitch - this.leanX) * kN;
+      this._applyBone(this._spineBone, 0, this.leanX, this.leanZ);
+    }
+  }
+
+  // Доворот одной кости поверх позы клипа (порядок YXZ: сначала в сторону,
+  // потом вверх-вниз, потом завал). Кость ищем лениво и кэшируем.
+  _applyBone(bone, yaw, pitch, roll = 0) {
+    if (!bone) return;
+    if (Math.abs(yaw) < 1e-4 && Math.abs(pitch) < 1e-4 && Math.abs(roll) < 1e-4) return;
+    _poseEuler.set(pitch, yaw, roll, 'YXZ');
+    _poseQuat.setFromEuler(_poseEuler);
+    bone.quaternion.multiply(_poseQuat);
+  }
+
+  // Клип касания по ВИДУ действия и по бьющей ноге.
+  //
+  // Ногу игра уже выбирает физически (kickFoot: мяч слева от корпуса — бьёт
+  // левая), но анимация об этом раньше не знала и всегда играла `kick` —
+  // клип, который машет ЛЕВОЙ. Теперь под правую ногу идут `kick_run` или
+  // `penalty`, и удар наконец совпадает с тем, что решила игра.
+  // Внутри подходящей группы вариант выбирается случайно — два одинаковых
+  // паса подряд выглядят как повтор кадра.
+  playStrike(kind) {
+    const table = CONFIG.player.anim.strike[kind];
+    if (!table) { this.playOneShot('kick', 1.2, 0.16); return; }
+    const foot = (this.lastKick && this.lastKick.foot) || CONFIG.player.dominantFoot;
+    let list = table.filter((v) => this.actions[v.clip] && (!v.foot || v.foot === foot));
+    if (!list.length) list = table.filter((v) => this.actions[v.clip]);
+    if (!list.length) { this.playOneShot('kick', 1.2, 0.16); return; }
+    const v = list[Math.floor(Math.random() * list.length)];
+    this.playOneShot(v.clip, v.rate, v.at, v.end != null ? v.end : null);
   }
 
   // --- Поза для повтора (src/replay.js) ---
@@ -358,12 +669,26 @@ export class Player {
     if (!this.mixer) return;
     const a = this.actions[clipName];
     if (!a) return;
+    // Шаговые ступени постоянно играют с весами — на повторе их надо погасить,
+    // иначе записанная поза смешалась бы с живым бегом
+    if (this.loco) {
+      for (const n in this.loco) {
+        const e = this.loco[n];
+        e.w = 0;
+        if (e.a !== a) e.a.setEffectiveWeight(0);
+      }
+      this.oneShotW = 0;
+    }
     if (this.currentAction && this.currentAction !== a) {
-      this.currentAction.stop();
+      this.currentAction.setEffectiveWeight(0);
+    }
+    if (this.fadingOneShot && this.fadingOneShot !== a) {
+      this.fadingOneShot.setEffectiveWeight(0);
     }
     a.enabled = true;
     a.setEffectiveWeight(1);
     a.paused = true;
+    a.timeScale = 1;
     a.play();
     a.time = clipTime;
     this.currentAction = a;
@@ -377,6 +702,20 @@ export class Player {
     for (const name in this.actions) this.actions[name].paused = false;
     this.oneShot = null;
     this.oneShotUntil = null;
+    this.oneShotW = 0;
+    this.fadingOneShot = null;
+    // Ступени лестницы снова в игре: без play() они остались бы «мёртвыми»
+    // после setReplayPose, и живой игрок замер бы в позе последнего повтора
+    if (this.loco) {
+      for (const n in this.loco) {
+        const e = this.loco[n];
+        e.w = 0;
+        e.a.paused = false;
+        e.a.enabled = true;
+        e.a.setEffectiveWeight(0);
+        e.a.play();
+      }
+    }
     this.currentName = null; // следующий кадр сам выберет бег/idle
   }
 
@@ -791,33 +1130,15 @@ export class Player {
       // сразу возвращаются в бег, эпизод не проседает
       if (this.oneShot && this.oneShotUntil != null &&
           this.oneShot.time >= this.oneShotUntil) {
+        this.fadingOneShot = this.oneShot;
         this.oneShot = null;
         this.oneShotUntil = null;
-    this.trapCushion = 0;
+        this.trapCushion = 0;
         this.currentName = null; // следующий кадр сам выберет бег/idle
       }
-      // Пока играет одноразовый (удар, ловля) — не дёргаем
-      if (!this.oneShot) {
-        if (speed < 0.6) {
-          const idle = this.isKeeper && this.actions.gk_idle ? 'gk_idle' : 'idle';
-          this.playAction(idle, 0.18);
-        } else {
-          // Продольная и поперечная составляющие скорости относительно взгляда
-          const f = this.facing;
-          const fwd = this.vel.x * f.x + this.vel.z * f.z;
-          const side = f.x * this.vel.z - f.z * this.vel.x; // >0 — движение вправо от взгляда
-          let clip = 'run';
-          if (Math.abs(fwd) < speed * 0.5 && this.actions.strafe_l) {
-            clip = side > 0 ? 'strafe_r' : 'strafe_l'; // боком — приставные шаги
-          } else if (fwd < -speed * 0.5 && this.actions.run_back) {
-            clip = 'run_back'; // пятимся, не отворачиваясь от мяча
-          }
-          this.playAction(clip, 0.12);
-          // Темп ног растёт со скоростью (клипы сняты под лёгкую трусцу)
-          this.actions[clip].timeScale = Math.min(1.9, Math.max(0.6, speed / 4.0));
-        }
-      }
+      this.updateLoco(dt, speed);
       this.mixer.update(dt);
+      this.updatePose(dt, speed);
     } else {
       // Капсула-фолбэк: лёгкое покачивание вместо анимаций
       this.bobT += dt * speed * 1.8;
@@ -926,16 +1247,25 @@ export class Player {
   }
 
   // Удар AI: пас/выстрел/вынос — обычный strike с анимацией и кулдауном.
-  // anim позволяет мозгу выбрать клип (вратарь ловит/выбивает своими)
+  // anim: строка — ВИД касания (см. CONFIG.player.anim.strike), объект —
+  // конкретный клип (так вратарь играет свои ловли и выбросы).
+  //
+  // Раньше AI вообще не считал бьющую ногу — и все 22 фигуры весь матч били
+  // одним левоногим клипом. Теперь нога определяется тем же правилом, что у
+  // человека, и ДО доворота корпуса: важно, слева или справа мяч был
+  // относительно СТАРОГО взгляда, а не после разворота в удар.
   aiKick(ball, dir, power, lift, curl = 0, anim = null) {
     const d = Math.hypot(dir.x, dir.z) || 1;
     const ndir = { x: dir.x / d, z: dir.z / d };
+    const foot = this.kickFoot(ball);
     ball.strike(ndir, power, lift, curl);
+    this.lastKick = { foot, contact: 'inside' };
     this.rot = Math.atan2(ndir.x, ndir.z); // корпус доворачивается по удару
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0; // передача закрывает эпизод владения
-    const a = anim || { name: 'kick', ts: 1.6, at: 0.20 };
-    this.playOneShot(a.name, a.ts, a.at);
+    if (typeof anim === 'string') this.playStrike(anim);
+    else if (anim) this.playOneShot(anim.name, anim.ts, anim.at, anim.end);
+    else this.playStrike('pass');
   }
 
   update(dt, input, ball) {
@@ -1483,7 +1813,7 @@ export class Player {
           cfg.lift,
         );
         this.kickCooldown = P.kickCooldown;
-        this.playOneShot('kick', 1.6, 0.20); // короткий тычок, почти без замаха
+        this.playStrike('toe'); // короткий тычок, почти без замаха
         // СТЕНОЧКА (Q/LB + пас, 22.07.2026): пас ушёл партнёру — пасующий сам
         // рвёт вперёд за спину опекуну, курсор переходит на адресата (как
         // L1+пас в PES 5/6). Возврат мяча на ход — W
@@ -1714,7 +2044,7 @@ export class Player {
       ball.strike(sol.dir, sol.power, sol.lift, sol.spin);
       this.lastKick = { foot: sol.foot, contact: 'inside' };
       this.kickCooldown = CONFIG.player.kickCooldown;
-      this.playOneShot('kick', 1.2, 0.16); // навес — чуть больше проводки
+      this.playStrike('cross'); // навес — широкий мах под мяч
       this.afterCross(ball);
       return;
     }
@@ -1739,7 +2069,7 @@ export class Player {
     const fw = this.applyFootwork(curl, ball);
     ball.strike(f, power * fw.powerF, lift, curl * fw.curlF);
     this.kickCooldown = CONFIG.player.kickCooldown;
-    this.playOneShot('kick', 1.2, 0.16);
+    this.playStrike('cross');
     this.afterCross(ball);
   }
 
@@ -1854,7 +2184,7 @@ export class Player {
     this.rot = Math.atan2(dir.x, dir.z);
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0; // передача закрывает эпизод владения
-    this.playOneShot('kick', 1.2, 0.16);
+    this.playStrike('pass');
 
     // Адресат встречает мяч, как обычный пас: точка приёма — ЧЕСТНЫЙ прогноз
     // приземления уже улетевшего мяча (drag + Магнус), а не идеальная парабола
@@ -1926,7 +2256,7 @@ export class Player {
         this.lastKick = { foot: sol.foot, contact: 'inside' };
         this.rot = Math.atan2(sol.dir.x, sol.dir.z);
         this.kickCooldown = P.kickCooldown;
-        this.playOneShot('kick', 1.3, 0.17);
+        this.playStrike('through');
         this.afterCross(ball);
         return;
       }
@@ -1942,7 +2272,7 @@ export class Player {
     // Развернуться в сторону мяча — читаемость
     this.rot = Math.atan2(dir.x, dir.z);
     this.kickCooldown = P.kickCooldown;
-    this.playOneShot('kick', 1.3, 0.17);
+    this.playStrike('through');
   }
 
   // Какой ногой бьём: мяч слева от корпуса — левой, справа — правой,
@@ -2170,7 +2500,12 @@ export class Player {
     ball.vel.copy(launch);
     ball.spin = curl; // щечка подкручена внутрь ноги, подъём/носок — чистые
     ball.afterTouch = B.afterTouchTime; // докрутка направлением доступна и тут
-    this.playOneShot(st.anim || 'kick', st.animTs, st.animAt); // клип и темп — от типа удара
+    // Клип по типу удара. У головы и удара с лёта клип задан в стиле ЖЁСТКО
+    // (st.anim) — там кадр контакта вымерен по риггу и завязан на
+    // CONFIG.player.aerial.sync, подменять его нельзя. Наземные удары
+    // (носок / подъём / щёчка) выбирают клип по бьющей ноге.
+    if (st.anim) this.playOneShot(st.anim, st.animTs, st.animAt);
+    else this.playStrike(styleName);
   }
 
   // ===== Замыкание в ОДНО КАСАНИЕ (PES 6, фидбек Олега 23–24.07.2026) =====
