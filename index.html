@@ -4,7 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Футбол 98</title>
+  <!-- Шрифт телеграфики: узкий гротеск с кириллицей — так выглядели плашки
+       трансляций 90-х. Jersey 10 / Press Start 2P из первоначального плана
+       отпали: у Jersey 10 нет кириллицы, а пиксельный шрифт — это приставка,
+       а не телевизор. Не загрузился — падаем на системный узкий гротеск. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --tv-font: "Oswald", "PT Sans Narrow", "Arial Narrow", Arial, sans-serif;
+      --tv-navy: #131a3c;
+      --tv-navy-deep: #080c22;
+      --tv-gold: #f2c73d;
+    }
     html, body {
       margin: 0; padding: 0;
       width: 100%; height: 100%;
@@ -19,34 +32,100 @@
     /* «Жучок» телеканала в углу — как логотип канала в эфире 98-го */
     #bug {
       position: fixed; top: 12px; right: 16px;
-      color: rgba(255, 255, 255, 0.75);
-      font-weight: bold; font-size: 22px; letter-spacing: 2px;
-      text-shadow: 0 0 6px rgba(120, 200, 255, 0.8), 2px 2px 0 rgba(0,0,0,0.5);
+      font-family: var(--tv-font);
+      color: rgba(255, 255, 255, 0.78);
+      font-weight: 700; font-size: 24px; letter-spacing: 3px;
+      text-shadow: 0 0 7px rgba(120, 200, 255, 0.85), 2px 2px 0 rgba(0,0,0,0.6);
       pointer-events: none;
     }
 
-    /* Табло-телеграфика: счёт и минута, как плашка трансляции 90-х */
+    /* Табло-телеграфика: плашка трансляции 98-го — тёмно-синий блок,
+       цветные метки команд по бортам, счёт в собственной ячейке,
+       минута отдельным «окошком» справа. */
     #scoreboard {
       position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
-      display: flex; gap: 10px; align-items: baseline;
-      background: linear-gradient(#232a52, #12162e);
-      border: 1px solid rgba(255,255,255,0.55);
-      color: #fff; font-weight: bold; font-size: 16px; letter-spacing: 2px;
-      padding: 6px 14px 5px; pointer-events: none; z-index: 10;
-      text-shadow: 1px 1px 0 #000;
+      display: flex; align-items: stretch;
+      font-family: var(--tv-font);
+      background: linear-gradient(180deg, #2b3566 0%, var(--tv-navy) 42%, var(--tv-navy-deep) 100%);
+      border: 1px solid rgba(255,255,255,0.5);
+      box-shadow: 0 2px 0 rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.35);
+      color: #fff; font-weight: 500; font-size: 17px; letter-spacing: 2px;
+      pointer-events: none; z-index: 10;
+      text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
     }
-    #sb-score { color: #ffd23f; font-size: 19px; letter-spacing: 3px; }
-    #sb-time { color: #7fd642; min-width: 40px; text-align: right; }
+    #scoreboard span { display: flex; align-items: center; }
+    .sb-team { padding: 4px 11px 3px; }
+    /* Цветная метка команды — как полоска формы в углу плашки */
+    .sb-mark { width: 6px; align-self: stretch; background: #888; }
+    #sb-score {
+      color: var(--tv-gold); font-weight: 700; font-size: 20px; letter-spacing: 3px;
+      padding: 3px 13px 2px; background: rgba(0,0,0,0.42);
+      border-left: 1px solid rgba(255,255,255,0.22);
+      border-right: 1px solid rgba(255,255,255,0.22);
+    }
+    #sb-time {
+      color: #8fe05a; min-width: 46px; justify-content: flex-end;
+      padding: 4px 11px 3px; background: rgba(0,0,0,0.3);
+      border-left: 1px solid rgba(255,255,255,0.35);
+      font-variant-numeric: tabular-nums;
+    }
 
     #goal-flash {
-      position: fixed; top: 38%; left: 0; right: 0;
-      text-align: center;
-      color: #fff; font-weight: bold; font-size: 9vw; letter-spacing: 8px;
-      text-shadow: 0 0 18px rgba(255,255,120,0.9), 3px 3px 0 #000;
+      position: fixed; top: 34%; left: 0; right: 0;
+      text-align: center; font-family: var(--tv-font);
+      color: #fff; font-weight: 700; font-size: 9vw; letter-spacing: 10px;
+      text-shadow: 0 0 18px rgba(255,255,120,0.9), 4px 4px 0 #000;
       opacity: 0; pointer-events: none;
       transition: opacity 0.15s;
     }
     #goal-flash.show { opacity: 1; }
+
+    /* Плашка автора гола: выезжает под криком «ГОЛ!», как титр в эфире */
+    #goal-card {
+      position: fixed; top: 34%; left: 50%;
+      transform: translate(-50%, 11vw) translateY(14px);
+      display: flex; align-items: stretch; font-family: var(--tv-font);
+      background: linear-gradient(180deg, #2b3566, var(--tv-navy-deep));
+      border: 1px solid rgba(255,255,255,0.5);
+      box-shadow: 0 3px 0 rgba(0,0,0,0.5);
+      color: #fff; font-size: 18px; letter-spacing: 3px;
+      opacity: 0; pointer-events: none; z-index: 10;
+      transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+      text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
+    }
+    #goal-card.show { opacity: 1; transform: translate(-50%, 11vw) translateY(0); }
+    #goal-card .gc-mark { width: 7px; align-self: stretch; background: #888; }
+    #goal-card .gc-team { padding: 6px 14px 4px; font-weight: 500; }
+    #goal-card .gc-min {
+      padding: 6px 12px 4px; color: var(--tv-gold); font-weight: 700;
+      background: rgba(0,0,0,0.4); border-left: 1px solid rgba(255,255,255,0.25);
+    }
+
+    /* Заставка перед матчем: кто с кем, где и когда — как титр в начале эфира */
+    #matchcard {
+      position: fixed; left: 50%; bottom: 12%;
+      transform: translateX(-50%) translateY(18px);
+      font-family: var(--tv-font); text-align: center;
+      opacity: 0; pointer-events: none; z-index: 10;
+      transition: opacity 0.5s ease-out, transform 0.5s ease-out;
+    }
+    #matchcard.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #mc-teams {
+      display: flex; align-items: stretch; justify-content: center;
+      background: linear-gradient(180deg, #2b3566 0%, var(--tv-navy) 45%, var(--tv-navy-deep) 100%);
+      border: 1px solid rgba(255,255,255,0.5);
+      box-shadow: 0 3px 0 rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.3);
+      color: #fff; font-size: clamp(18px, 3.1vw, 34px); font-weight: 500;
+      letter-spacing: 5px; text-shadow: 2px 2px 0 rgba(0,0,0,0.85);
+    }
+    #mc-teams span { display: flex; align-items: center; padding: 5px 18px 3px; }
+    #mc-teams .mc-mark { width: 8px; align-self: stretch; background: #888; padding: 0; }
+    #mc-teams .mc-dash { color: var(--tv-gold); padding: 5px 8px 3px; }
+    #mc-venue {
+      margin-top: 7px; color: rgba(255,255,255,0.82);
+      font-size: clamp(11px, 1.5vw, 16px); letter-spacing: 4px;
+      text-shadow: 1px 1px 0 #000;
+    }
 
     #settings-btn {
       position: fixed; top: 12px; left: 16px;
@@ -97,7 +176,11 @@
       color: rgba(255,255,255,0.65); font-size: 13px;
       pointer-events: none;
       text-shadow: 1px 1px 0 #000;
+      transition: opacity 1.2s ease-out;
     }
+    /* Шпаргалка гаснет, когда игра пошла: в эфире нет строки с раскладкой.
+       Временные подсказки (стандарты, вратарь) зажигают её снова. */
+    #hint.dim { opacity: 0; }
 
     /* Виртуальный стик (появляется под пальцем на левой половине экрана) */
     #stick-base {
@@ -192,8 +275,15 @@
 <body>
   <canvas id="game"></canvas>
   <div id="bug">Ф·98</div>
-  <div id="scoreboard"><span id="sb-home">КРА</span><span id="sb-score">0:0</span><span id="sb-away">СИН</span><span id="sb-time">0'</span></div>
+  <div id="scoreboard"><span class="sb-mark" id="sb-home-mark"></span><span class="sb-team" id="sb-home">КРА</span><span id="sb-score">0:0</span><span class="sb-team" id="sb-away">СИН</span><span class="sb-mark" id="sb-away-mark"></span><span id="sb-time">0'</span></div>
   <div id="goal-flash">ГОЛ!</div>
+  <div id="goal-card"><span class="gc-mark" id="gc-mark"></span><span class="gc-team" id="gc-team"></span><span class="gc-min" id="gc-min"></span></div>
+  <div id="matchcard">
+    <div id="mc-teams">
+      <span class="mc-mark" id="mc-home-mark"></span><span id="mc-home"></span><span class="mc-dash">—</span><span id="mc-away"></span><span class="mc-mark" id="mc-away-mark"></span>
+    </div>
+    <div id="mc-venue"></div>
+  </div>
   <button id="settings-btn">⚙ НАСТРОЙКИ</button>
 
   <div id="settings">

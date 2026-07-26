@@ -126,9 +126,34 @@ export class Match {
       time: document.getElementById('sb-time'),
       flash: document.getElementById('goal-flash'),
       hint: document.getElementById('hint'),
+      // Титры трансляции: заставка «кто с кем» и плашка автора гола
+      card: document.getElementById('goal-card'),
+      cardMark: document.getElementById('gc-mark'),
+      cardTeam: document.getElementById('gc-team'),
+      cardMin: document.getElementById('gc-min'),
+      matchcard: document.getElementById('matchcard'),
     };
     this.hud.home.textContent = teamsData[0].short;
     this.hud.away.textContent = teamsData[1].short;
+
+    // Цвет формы — метка команды на табло и в титрах (данные, не код)
+    this._teamColors = teamsData.map((t) => (t.colors && t.colors.primary) || '#cccccc');
+    const paintMark = (id, color) => {
+      const el = document.getElementById(id);
+      if (el) el.style.background = color;
+    };
+    paintMark('sb-home-mark', this._teamColors[0]);
+    paintMark('sb-away-mark', this._teamColors[1]);
+    paintMark('mc-home-mark', this._teamColors[0]);
+    paintMark('mc-away-mark', this._teamColors[1]);
+    const mcHome = document.getElementById('mc-home');
+    const mcAway = document.getElementById('mc-away');
+    const mcVenue = document.getElementById('mc-venue');
+    if (mcHome) mcHome.textContent = teamsData[0].name;
+    if (mcAway) mcAway.textContent = teamsData[1].name;
+    if (mcVenue) mcVenue.textContent = CONFIG.match.venue;
+    this._teamNames = teamsData.map((t) => t.name);
+    this.goalCardTimer = 0;
     this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';
     this._keeperHintShown = false;
     this._tempHint = false;
@@ -222,6 +247,8 @@ export class Match {
       mix: 1,
       fading: false,
     };
+    // Титр «кто с кем и где» выезжает поверх заставки, как в начале эфира
+    if (this.hud.matchcard) this.hud.matchcard.classList.add('show');
     this.controlledMarker.visible = false; // звезда не мельтешит в кино-кадре
     this._setTempHint('');
   }
@@ -301,6 +328,7 @@ export class Match {
   // в игровую позицию плавным вытеснением (introCam.mix тает в update)
   beginIntroKickoff() {
     this._restoreHint();
+    if (this.hud.matchcard) this.hud.matchcard.classList.remove('show');
     this.controlledMarker.visible = true;
     this.introCam.fading = true;
     // Свисток мог молчать до первого жеста (автоплей) — добираем его сейчас
@@ -417,6 +445,18 @@ export class Match {
     if (this.flashTimer > 0) {
       this.flashTimer -= dt;
       if (this.flashTimer <= 0) this.hud.flash.classList.remove('show');
+    }
+    // Плашка автора гола висит дольше крика — как титр в трансляции
+    if (this.goalCardTimer > 0) {
+      this.goalCardTimer -= dt;
+      if (this.goalCardTimer <= 0 && this.hud.card) this.hud.card.classList.remove('show');
+    }
+
+    // Шпаргалка управления гаснет, когда игра пошла: кадр остаётся чистым,
+    // как в эфире. Временная подсказка (стандарт, вратарь) зажжёт её снова.
+    if (this.hud.hint && !this._tempHint && this.state !== 'intro') {
+      this.hintTimer = (this.hintTimer || 0) + dt;
+      if (this.hintTimer > CONFIG.match.hintFade) this.hud.hint.classList.add('dim');
     }
 
     // Хвост ТВ-заставки: интро-камера дотаивает уже по живой игре (mix 1→0),
@@ -1328,14 +1368,19 @@ export class Match {
 
   // Временная строка-подсказка (вратарь с мячом, интро) вместо постоянной
   _setTempHint(text) {
-    if (this.hud.hint) this.hud.hint.textContent = text;
+    if (this.hud.hint) {
+      this.hud.hint.textContent = text;
+      this.hud.hint.classList.remove('dim'); // временная подсказка всегда видна
+    }
     this._tempHint = true;
+    this.hintTimer = 0;
   }
 
   _restoreHint() {
     if (this._tempHint && this.hud.hint) this.hud.hint.innerHTML = this._hintHTML;
     this._tempHint = false;
     this._keeperHintShown = false;
+    this.hintTimer = 0; // базовая шпаргалка повисит и погаснет заново
   }
 
   // Пауза = мяч мёртв: кипер не держит его в руках. Без этого его отложенный
@@ -1369,6 +1414,16 @@ export class Match {
     this.hud.flash.textContent = 'ГОЛ!';
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;
+
+    // Титр под криком: чья команда и на какой минуте — как плашка в эфире
+    if (this.hud.card) {
+      const min = Math.max(1, Math.min(90, Math.floor(this.clock / 60)));
+      this.hud.cardMark.style.background = this._teamColors[scorerIdx];
+      this.hud.cardTeam.textContent = this._teamNames[scorerIdx];
+      this.hud.cardMin.textContent = `${min}'`;
+      this.hud.card.classList.add('show');
+      this.goalCardTimer = CONFIG.match.goalCardTime;
+    }
   }
 
   fullTime() {
