@@ -105,6 +105,7 @@ export class Match {
     this.possession = this.teams[0];
     this.toucher = null;      // кто из 22 сейчас у мяча (арбитраж владения)
     this.lastTouch = null;    // последнее касание — решает, чей аут/угловой
+    this.touchLog = [];       // журнал касаний: по нему ищем автора гола
     this.restart = null;      // активный стандарт: аут / угловой / удар от ворот
     this.score = [0, 0];
     this.clock = 0;           // игровые секунды (0..90×60)
@@ -218,6 +219,7 @@ export class Match {
     this.kickoffTeam = kickingIdx;
     this.restart = null;
     this.lastTouch = null;
+    this.touchLog.length = 0; // касания прошлого эпизода к следующему голу не относятся
     this.ball.reset();
 
     for (const team of this.teams) {
@@ -720,7 +722,37 @@ export class Match {
     this.toucher = best;
     for (const p of this._all) p.isToucher = p === best;
     if (best) this.possession = best.team;
-    if (touch) this.lastTouch = touch;
+    if (touch) {
+      this.lastTouch = touch;
+      // Журнал последних касаний. Нужен для автора гола: в момент, когда мяч
+      // пересекает линию, ближайшим к нему почти всегда оказывается ВРАТАРЬ
+      // или защитник — по одному lastTouch автор не определяется никогда.
+      const log = this.touchLog;
+      if (!log.length || log[log.length - 1].p !== touch) {
+        log.push({ p: touch, t: this.clock });
+        if (log.length > 12) log.shift();
+      }
+    }
+  }
+
+  // Автор гола: последний касавшийся ИЗ ЗАБИВШЕЙ команды (он же бьющий, а при
+  // рикошете — тот, кто начал). Не нашли (автогол, дальний рикошет) —
+  // празднует ближайший к воротам полевой игрок.
+  findScorer(scorerIdx) {
+    const team = this.teams[scorerIdx];
+    for (let i = this.touchLog.length - 1; i >= 0; i--) {
+      const p = this.touchLog[i].p;
+      if (p.team === team && !p.isKeeper) return p;
+    }
+    let best = null;
+    let bestD = Infinity;
+    const bp = this.ball.mesh.position;
+    for (const p of team.players) {
+      if (p.isKeeper) continue;
+      const d = distToBall(p, this.ball) + Math.abs(p.group.position.x - bp.x) * 0.1;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
   }
 
   // Переключение управляемого игрока: Q/LB — вручную (ближний к мячу),
@@ -1509,10 +1541,9 @@ export class Match {
     for (const p of this._all) p.isToucher = false;
     this._releaseKeeperHolds();
     this._scorerIdx = scorerIdx;      // кого отматывать в повторе
-    // Автор гола: последний касавшийся из забившей команды. Он же побежит
-    // праздновать и его же покажет крупный план в конце серии повторов
-    this._scorerPlayer = this.lastTouch && this.lastTouch.team === this.teams[scorerIdx]
-      ? this.lastTouch : null;
+    // Автор гола: он побежит праздновать, его назовёт титр и его же покажет
+    // крупный план в конце серии повторов
+    this._scorerPlayer = this.findScorer(scorerIdx);
     this.replay.markGoal(this._scorerPlayer ? this._all.indexOf(this._scorerPlayer) : -1);
     // Стадион взрывается: рёв трибун, шквал фотовспышек, сектора светлеют
     crowdCheer(1);

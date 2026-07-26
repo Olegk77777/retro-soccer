@@ -114,7 +114,12 @@ export class Celebration {
   // что в повторе, — строится вокруг цели и всегда на неё смотрит.
   _updateCam(dt) {
     const C = CONFIG.celebration;
-    const target = this.scorer ? this.scorer.group.position : this._target.set(0, 0, 0);
+    // Автора празднования нам обязан дать матч. Если его всё-таки нет,
+    // показываем ворота с мячом — но НЕ центр поля: камера, уехавшая в центр,
+    // выхватывает случайных бегущих, и празднование пропадает из кадра.
+    const target = this.scorer
+      ? this.scorer.group.position
+      : this._target.set(this.team ? this.team.attackGoalX * 0.9 : 0, 0, 0);
     // Камера заходит со стороны ближней бровки — там же, где ТВ-камера
     const side = target.z >= 0 ? 1 : -1;
     this._camWant.set(
