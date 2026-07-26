@@ -126,11 +126,18 @@ export class Player {
     this.nose.position.set(0, 0.1, P.radius + 0.12);
     this.group.add(this.nose);
 
-    this.shadow = new THREE.Mesh(
-      new THREE.CircleGeometry(P.radius * 1.25, 12),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
-    );
-    this.shadow.rotation.x = -Math.PI / 2;
+    // Тень не одна: на ночном стадионе четыре мачты дают веер теней.
+    // Рисует их общий менеджер (src/atmosphere.js) одним draw call, а нам
+    // достаётся «якорь» — пустышка, у которой мы двигаем только позицию.
+    // Если сцена без менеджера (отладочный стенд) — падаем на старый кружок.
+    const shadows = scene.userData && scene.userData.shadows;
+    this.shadow = shadows
+      ? shadows.create(P.height * P.modelScale)
+      : new THREE.Mesh(
+        new THREE.CircleGeometry(P.radius * 1.25, 12),
+        new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
+      );
+    this.shadow.rotation.x = shadows ? 0 : -Math.PI / 2;
     this.shadow.position.y = 0.02;
 
     this.vel = new THREE.Vector3();

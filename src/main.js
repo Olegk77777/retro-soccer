@@ -37,6 +37,9 @@ camera.position.set(0, CONFIG.camera.height, CONFIG.camera.distance);
 camera.lookAt(0, 1, 0);
 
 // --- ТВ-пресеты ---
+// Стартовая картинка — чистый RGB («оригинал»): пусть игрок сам решит, когда
+// накинуть эфирный шум или VHS. Какой пресет стартовый — решают ДАННЫЕ
+// (tv-presets.json → "default"), а выбор игрока переживает перезапуск.
 let presets = [];
 let presetIndex = 0;
 const presetBtn = document.getElementById('preset-btn');
@@ -45,7 +48,10 @@ fetch('./data/tv-presets.json')
   .then((r) => r.json())
   .then((data) => {
     presets = data.presets;
-    applyPreset(0);
+    const saved = localStorage.getItem('f98.tvPreset');
+    const savedIdx = presets.findIndex((p) => p.id === saved);
+    const defIdx = presets.findIndex((p) => p.id === data.default);
+    applyPreset(savedIdx >= 0 ? savedIdx : Math.max(0, defIdx));
   })
   .catch((e) => console.error('Не удалось загрузить ТВ-пресеты:', e));
 
@@ -54,6 +60,7 @@ function applyPreset(i) {
   presetIndex = ((i % presets.length) + presets.length) % presets.length;
   crt.setPreset(presets[presetIndex]);
   presetBtn.textContent = 'ТВ: ' + presets[presetIndex].name;
+  try { localStorage.setItem('f98.tvPreset', presets[presetIndex].id); } catch (e) { /* приватный режим */ }
 }
 
 presetBtn.addEventListener('click', (e) => {
@@ -163,6 +170,9 @@ function frame() {
   if (match) match.update(dt); // 22 игрока: человек + AI-мозги
   const event = ball.update(dt);
   goals.update(dt);
+  // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
+  if (scene.userData.shadows) scene.userData.shadows.update();
+  if (scene.userData.flashes) scene.userData.flashes.update(dt);
   if (event === 'goal' && match) match.onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.

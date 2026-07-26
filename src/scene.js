@@ -5,6 +5,10 @@
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { GoalSystem } from './goal.js';
+import {
+  mastPositions, paintPitchLight, buildFloodlightHalos,
+  CameraFlashes, GroundShadows,
+} from './atmosphere.js';
 
 const STADIUM_TEXTURES = Object.freeze({
   grass: './textures/stadium/grass-98.png',
@@ -114,6 +118,10 @@ function createPitchTexture() {
       wear(m(4), cy, m(5.5), m(7.5), 0.12);
       wear(w - m(4), cy, m(5.5), m(7.5), 0.12);
       wear(cx, cy, m(3.8), m(6.5), 0.055);
+
+      // Свет мачт: четыре пятна и потемневшие края. Ровное зелёное сукно —
+      // первый признак «примитивной» картинки, ночью так не бывает.
+      paintPitchLight(ctx, w, h);
     } else {
       // Мгновенный фолбэк на время загрузки PNG и на случай 404.
       const stripes = 14;
@@ -301,6 +309,7 @@ function createCrowdTexture() {
   return tex;
 }
 
+// Возвращает четыре сектора: по ним потом рассыпаются вспышки фотокамер.
 function buildStands(scene) {
   const F = CONFIG.field;
   const crowd = createCrowdTexture();
@@ -363,28 +372,28 @@ function buildStands(scene) {
   east.rotation.x = tilt;
   east.position.set(dx, standY, 0);
   scene.add(east);
+
+  return [north, south, west, east];
 }
 
 function buildFloodlights(scene) {
-  const F = CONFIG.field;
   const poleMat = new THREE.MeshLambertMaterial({ color: 0x555c66 });
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff8dd }); // светится сам, без освещения
-  const poleGeo = new THREE.CylinderGeometry(0.35, 0.5, 28, 6);
   const lampGeo = new THREE.BoxGeometry(4.5, 3, 0.8);
 
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const x = sx * (F.length / 2 + F.apron + 4);
-      const z = sz * (F.width / 2 + F.apron + 4);
-      const pole = new THREE.Mesh(poleGeo, poleMat);
-      pole.position.set(x, 14, z);
-      scene.add(pole);
-      const lamp = new THREE.Mesh(lampGeo, lampMat);
-      lamp.position.set(x, 28.5, z);
-      lamp.lookAt(0, 0, 0);
-      scene.add(lamp);
-    }
+  // Мачты стоят там, где их видят пятна на газоне и веер теней —
+  // координаты приходят из одного места (CONFIG.atmosphere.masts).
+  for (const m of mastPositions()) {
+    const poleGeo = new THREE.CylinderGeometry(0.35, 0.5, m.y - 0.5, 6);
+    const pole = new THREE.Mesh(poleGeo, poleMat);
+    pole.position.set(m.x, (m.y - 0.5) / 2, m.z);
+    scene.add(pole);
+    const lamp = new THREE.Mesh(lampGeo, lampMat);
+    lamp.position.set(m.x, m.y, m.z);
+    lamp.lookAt(0, 0, 0);
+    scene.add(lamp);
   }
+  buildFloodlightHalos(scene);
 }
 
 // До публичного релиза используем настоящие бренды эпохи: они сразу продают кадр как трансляцию 1998-го.
@@ -500,8 +509,13 @@ export function buildStadium() {
 
   scene.userData.goals = new GoalSystem(scene);
   buildBoards(scene);
-  buildStands(scene);
+  const stands = buildStands(scene);
   buildFloodlights(scene);
+
+  // Живой стадион: щелчки фотоаппаратов на трибунах и веер теней под
+  // игроками. Обновляются раз в кадр из main.js.
+  scene.userData.flashes = new CameraFlashes(scene, stands);
+  scene.userData.shadows = new GroundShadows(scene);
 
   // Свет (для объёмных объектов: мяч, ворота, трибуны): ночь + мощные прожекторы
   scene.add(new THREE.HemisphereLight(0x99aacc, 0x334422, 0.9));
