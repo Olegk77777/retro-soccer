@@ -116,6 +116,117 @@ export function predictLanding(ball, h = CONFIG.ball.radius, maxT = 4) {
   return null;
 }
 
+// Прогноз пересечения ПЛОСКОСТИ ВОРОТ (x = goalX): та же мини-симуляция
+// физики, что predictLanding, но условие остановки — не высота, а координата X.
+// Нужна вратарю: он обязан знать, КУДА и КОГДА мяч придёт на линию, иначе
+// «сейв» — это магнит радиусом полтора метра, а не чтение удара.
+// Возвращает { z, y, t, speed } или null (мяч не идёт в створ за maxT).
+export function predictGoalPlane(ball, goalX, maxT = 2.0) {
+  const B = CONFIG.ball;
+  const p = ball.mesh.position;
+  const dirX = Math.sign(goalX);
+  // Мяч уже за линией или летит от ворот — предсказывать нечего
+  if ((goalX - p.x) * dirX <= 0) return null;
+  if (ball.vel.x * dirX <= 0.1) return null;
+
+  let x = p.x;
+  let y = p.y;
+  let z = p.z;
+  let vx = ball.vel.x;
+  let vy = ball.vel.y;
+  let vz = ball.vel.z;
+  let spin = ball.spin;
+  const dt = 1 / 60;
+  for (let t = 0; t < maxT; t += dt) {
+    const airborne = y > B.radius + 0.001 || vy > 0;
+    if (airborne) {
+      vy += B.gravity * dt;
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 0.01) {
+        const d = Math.min(B.dragK * sp * dt, 0.5);
+        vx *= 1 - d;
+        vy *= 1 - d;
+        vz *= 1 - d;
+      }
+      if (Math.abs(spin) > 0.01) {
+        const ax = -vz * spin * B.magnus * dt;
+        const az = vx * spin * B.magnus * dt;
+        vx += ax;
+        vz += az;
+        spin *= Math.pow(B.spinDecay, dt * 60);
+      }
+    } else {
+      const roll = Math.pow(B.rollFriction, dt * 60);
+      vx *= roll;
+      vz *= roll;
+    }
+    const px = x;
+    x += vx * dt;
+    y += vy * dt;
+    z += vz * dt;
+    if (y < B.radius) {
+      y = B.radius;
+      if (Math.abs(vy) > 1.2) vy = -vy * B.bounce;
+      else vy = 0;
+    }
+    if ((x - goalX) * dirX >= 0) {
+      // Линейная доводка внутри шага — точность до сантиметров
+      const k = px !== x ? (goalX - px) / (x - px) : 0;
+      return {
+        z: z - vz * dt * (1 - k),
+        y: Math.max(B.radius, y - vy * dt * (1 - k)),
+        t: t + dt * k,
+        speed: Math.hypot(vx, vy, vz),
+      };
+    }
+    if (vx * dirX <= 0.05) return null; // мяч встал/развернулся — до линии не дойдёт
+  }
+  return null;
+}
+
+// ===== Арифметика паса (ресёрч 15, раздел 1) =====
+// Качение мяча — экспоненциальное затухание: dv/dt = −λ·v, где λ выводится
+// из CONFIG.ball.rollFriction («за кадр при 60 fps»). Отсюда ТОЧНЫЕ формулы:
+//   v(d) = v0 − λ·d          скорость мяча, прокатившегося d метров
+//   t(d) = −ln(1 − λd/v0)/λ  время прихода
+// Главный вывод ресёрча: задавать надо ПРИХОДЯЩУЮ скорость, а не начальную.
+// Прежняя формула (v0 = d·0.55 + 5.5) давала пас на 15 м, летящий 2.15 с и
+// приходящий на 2.9 м/с — медленнее, чем добежать спринтом. Отсюда и брался
+// весь дисбаланс «легче самому бежать, чем отдавать пас».
+export const ROLL_LAMBDA = -60 * Math.log(CONFIG.ball.rollFriction);
+
+// Начальная скорость паса, чтобы мяч ПРИШЁЛ к адресату со скоростью arrive
+export function passPower(dist, arrive) {
+  return arrive + ROLL_LAMBDA * dist;
+}
+
+// Время прихода наземного паса на дистанцию dist при начальной скорости v0
+export function passTime(dist, v0) {
+  const k = (ROLL_LAMBDA * dist) / Math.max(0.1, v0);
+  if (k >= 0.995) return Infinity; // мяч не докатится
+  return -Math.log(1 - k) / ROLL_LAMBDA;
+}
+
+// Ценность позиции для атаки — упрощённый xT (expected threat, сетка Карун
+// Сингха). Нужна скорингу паса: без неё «пас вперёд» и «пас назад» отличаются
+// только метрами, и AI одинаково рад откату к своим воротам и разрезу в
+// штрафную. Модель аналитическая (не таблица): экспонента по дистанции до
+// чужих ворот × центральность + мягкий бонус за продвижение по полю.
+// Калибровка по сетке Сингха: ~0.30 у вратарской, ~0.07 у линии штрафной,
+// ~0.03 с 25 м, ~0.01 у центра поля.
+export function xThreat(x, z, side) {
+  const F = CONFIG.field;
+  const goalX = side * (F.length / 2);
+  const dx = goalX - x;
+  const d = Math.hypot(dx, z);
+  if (d < 0.5) return 1;
+  // cos λ — насколько точка «смотрит» на ворота вдоль оси поля: по центру 1,
+  // с острого угла меньше. Калибровка (ресёрч 15): точка пенальти 0.54,
+  // линия штрафной по центру 0.41, 30 м 0.19, центр поля 0.06
+  const cosL = Math.max(0, (dx * side) / d);
+  return Math.exp(-d / 18) * (0.35 + 0.65 * cosL);
+}
+
 // Свободная зона вокруг точки: 1 = пусто, 0 = толпа (ресёрч 10, формула
 // GameplayFootball AI_CalculateFreeSpace — 90% пользы pitch control за O(n)).
 // Соперники берутся с упреждением на их движение.

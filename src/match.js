@@ -9,7 +9,7 @@ import { Player } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
-import { distToBall, freeSpace } from './ai/steering.js';
+import { distToBall, freeSpace, passPower } from './ai/steering.js';
 import { playWhistle, setCrowdIntensity, crowdCheer } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
@@ -108,6 +108,13 @@ export class Match {
     this.restart = null;      // активный стандарт: аут / угловой / удар от ворот
     this.score = [0, 0];
     this.clock = 0;           // игровые секунды (0..90×60)
+    // Статистика матча (Фаза 3: «баланс проверяем автосимуляцией, не на глаз»).
+    // Индекс — номер команды в this.teams. Считать дёшево, а без чисел любой
+    // разговор о балансе превращается в «мне показалось»
+    this.stats = {
+      pass: [0, 0], passOk: [0, 0], shot: [0, 0], cross: [0, 0],
+      save: [0, 0], hold: [0, 0], parry: [0, 0], loose: [0, 0],
+    };
     this.state = 'kickoff';   // kickoff | play | goalpause | fulltime
     this.stateTimer = 0;
     this.kickoffTeam = 0;
@@ -791,7 +798,15 @@ export class Match {
       if (dist < HP.minDist || dist > HP.maxDist) continue;
       const cos = (dx * f.x + dz * f.z) / dist;
       if (cos < coneCos) continue;
-      const score = cos * 30 - dist * 0.25; // ближе к линии взгляда и не слишком далеко
+      // В конусе выбираем не «самого точно по взгляду», а самого ПОЛЕЗНОГО:
+      // проходимость коридора × свободная зона на приёме × продвижение.
+      // Без этого пас регулярно уходил в ближайшего опекаемого партнёра —
+      // одна из причин, почему человеку было выгоднее везти мяч самому
+      const pc = team.passComplete(pos.x, pos.z, mp.x, mp.z,
+        Math.max(12, dist * 0.9 + 9), team.opponents, 0);
+      const space = freeSpace(mp.x, mp.z, team.opponents);
+      const gain = team.side * dx;
+      const score = cos * 12 + pc * 14 + space * 6 + gain * 0.20 - dist * 0.10;
       if (score > bestScore) {
         bestScore = score;
         best = { mate, dist };
@@ -800,8 +815,9 @@ export class Match {
     if (!best) return null;
 
     // Помощь в силе: полоска тянется к «идеальной для дистанции» на долю
-    // level×powerPull. Осознанная передержка всё равно уводит мяч дальше
-    const ideal = best.dist * AS.idealK;
+    // level×powerPull. Осознанная передержка всё равно уводит мяч дальше.
+    // Идеал считается ПО ПРИХОДУ: мяч должен добраться живым (ресёрч 15)
+    const ideal = passPower(best.dist, AS.idealArrive);
     const P = CONFIG.player;
     const cfg = type === 'through' ? P.through : P.pass;
     let outPower = power + (ideal - power) * Math.min(1, AS.level * AS.powerPull);
