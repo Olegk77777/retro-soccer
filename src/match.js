@@ -14,6 +14,7 @@ import { distToBall, freeSpace, passPower } from './ai/steering.js';
 import { playWhistle, setCrowdIntensity, crowdCheer } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
+import { Celebration } from './celebration.js';
 
 // Плавная кривая 0..1 (smoothstep): кино-движение камеры интро без рывков
 function smooth01(t) {
@@ -196,6 +197,8 @@ export class Match {
     // Повтор гола: кольцевая запись поз всех тел, включается после гола
     this.replay = new Replay(this._all, ball);
     this.replayTag = document.getElementById('replay-tag');
+    // Празднование: живой эпизод после гола, он же попадает в повтор
+    this.celebration = new Celebration();
 
     this.kickoff(0);
     this.startIntro(); // премьера матча — ТВ-заставка с крупного плана мяча
@@ -498,16 +501,34 @@ export class Match {
       return;
     }
 
-    // Повтор гола: игра стоит, тела расставляет запись. Любая кнопка
-    // действия — пропустить (как в трансляции переключают обратно в эфир).
+    // Празднование гола: тела ведёт celebration.js, мозги AI молчат.
+    // Пишем его в буфер повтора — потом покажем крупным планом.
+    if (this.state === 'celebration') {
+      const alive = this.celebration.update(dt, this._all);
+      this.officials.update(dt, this._centerBall, this.teams);
+      this.replay.record(dt, -1);
+      if (!alive || this._actionPressed()) {
+        this.celebration.stop();
+        if (!this.startReplay()) {
+          this.goals.reset();
+          this.kickoff(this.kickoffTeam);
+        }
+      }
+      this.updateHUD();
+      return;
+    }
+
+    // Серия повторов: игра стоит, тела расставляет запись. Кнопка действия
+    // пропускает ТЕКУЩИЙ ракурс — как в трансляции режиссёр уходит дальше.
     if (this.state === 'replay') {
-      const skip =
-        this.input.pass.consume() !== null ||
-        this.input.through.consume() !== null ||
-        this.input.shot.consume() !== null ||
-        !!this.input.consumeCross() ||
-        !!this.input.consumeSwipe();
-      if (skip || !this.replay.update(dt)) this.endReplay();
+      const skip = this._actionPressed();
+      const alive = skip ? this.replay.skipSegment() : this.replay.update(dt);
+      if (!alive) this.endReplay();
+      else if (this.replayTag) {
+        this.replayTag.textContent = this.replay.segmentCount > 1
+          ? `ПОВТОР ${this.replay.segmentNumber}/${this.replay.segmentCount}`
+          : 'ПОВТОР';
+      }
       this.updateHUD();
       return;
     }
@@ -519,13 +540,13 @@ export class Match {
       if (this.clock >= M.gameMinutes * 60) this.fullTime();
     }
 
-    // Пауза после гола: мяч и волна сетки живут в кадре, потом — ПОВТОР,
-    // и только после него розыгрыш с центра
+    // Пауза после гола: мяч и волна сетки живут в кадре, дальше —
+    // ПРАЗДНОВАНИЕ (его тоже пишем), и только после него серия повторов
     if (this.state === 'goalpause' && this.stateTimer > CONFIG.goal.resetDelay) {
-      if (!this.startReplay()) {
-        this.goals.reset();
-        this.kickoff(this.kickoffTeam);
-      }
+      this.state = 'celebration';
+      this.stateTimer = 0;
+      this.celebration.start(this._scorerPlayer, this.teams[this._scorerIdx],
+        this.teams[1 - this._scorerIdx]);
     }
     // Финальный свисток: пауза и новый матч
     if (this.state === 'fulltime' && this.stateTimer > M.fulltimePause) {
@@ -626,9 +647,12 @@ export class Match {
     }
 
     // Кольцевая запись для повтора: пишем позы уже ПОСЛЕ движения всех тел,
-    // вместе с тем, чья была атака — по ней потом отматываем комбинацию
-    if (!paused) {
-      const owner = this.possession ? this.teams.indexOf(this.possession) : -1;
+    // вместе с тем, чья была атака — по ней потом отматываем комбинацию.
+    // Паузу после гола тоже пишем: мяч в сетке и первая реакция — часть эпизода.
+    if (this.state !== 'fulltime') {
+      const owner = this.state === 'goalpause'
+        ? -1
+        : (this.possession ? this.teams.indexOf(this.possession) : -1);
       this.replay.record(dt, owner);
     }
 
@@ -1486,6 +1510,11 @@ export class Match {
     for (const p of this._all) p.isToucher = false;
     this._releaseKeeperHolds();
     this._scorerIdx = scorerIdx;      // кого отматывать в повторе
+    // Автор гола: последний касавшийся из забившей команды. Он же побежит
+    // праздновать и его же покажет крупный план в конце серии повторов
+    this._scorerPlayer = this.lastTouch && this.lastTouch.team === this.teams[scorerIdx]
+      ? this.lastTouch : null;
+    this.replay.markGoal(this._scorerPlayer ? this._all.indexOf(this._scorerPlayer) : -1);
     // Стадион взрывается: рёв трибун, шквал фотовспышек, сектора светлеют
     crowdCheer(1);
     const flashes = this.scene && this.scene.userData.flashes;
@@ -1499,8 +1528,7 @@ export class Match {
     // командой: имя защитника в титре гола выглядело бы наградой)
     if (this.hud.card) {
       const min = Math.max(1, Math.min(90, Math.floor(this.clock / 60)));
-      const scorer = this.lastTouch && this.lastTouch.team === this.teams[scorerIdx]
-        ? this.lastTouch : null;
+      const scorer = this._scorerPlayer;
       this.hud.cardMark.style.background = this._teamColors[scorerIdx];
       this.hud.cardTeam.textContent = (scorer && scorer.name)
         ? scorer.name : this._teamNames[scorerIdx];
@@ -1508,6 +1536,15 @@ export class Match {
       this.hud.card.classList.add('show');
       this.goalCardTimer = CONFIG.match.goalCardTime;
     }
+  }
+
+  // Любая кнопка действия: «дальше» в заставке, празднике и повторах
+  _actionPressed() {
+    return this.input.pass.consume() !== null ||
+      this.input.through.consume() !== null ||
+      this.input.shot.consume() !== null ||
+      !!this.input.consumeCross() ||
+      !!this.input.consumeSwipe();
   }
 
   // ===== Повтор гола (26.07.2026) =====

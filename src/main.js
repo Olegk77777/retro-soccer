@@ -165,8 +165,9 @@ function frame() {
 
   input.update(dt);
   if (match) match.update(dt); // 22 игрока: человек + AI-мозги
-  // На повторе физика молчит: тела и мяч расставляет запись (src/replay.js)
-  const replaying = !!(match && match.state === 'replay');
+  // На повторе физика молчит: тела и мяч расставляет запись (src/replay.js).
+  // В празднование мяч уже в сетке — его физику тоже не трогаем.
+  const replaying = !!(match && (match.state === 'replay' || match.state === 'celebration'));
   const event = replaying ? null : ball.update(dt);
   if (!replaying) goals.update(dt);
   // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
@@ -222,11 +223,13 @@ function frame() {
     C.distance - C.farApproach * far01 - C.attackApproach * atk01,
   );
   camLookTarget.set(fx * 0.8, C.lookHeight, fz * C.followZ);
-  const rc = match && match.replay && match.replay.cam;
+  // Приоритет камер: повтор → празднование → ТВ-заставка → живая ТВ-камера.
+  // У повтора и празднования камеры свои и уже плавные, поэтому обычное
+  // сглаживание тут только смазало бы кадр.
+  const rc = (match && match.replay && match.replay.cam)
+    || (match && match.celebration && match.celebration.cam);
   const ic = match && match.introCam;
   if (rc) {
-    // Повтор ведёт своя камера — низкая, у бровки. Она уже плавная сама,
-    // поэтому обычное сглаживание тут только смазало бы кадр.
     camera.position.copy(rc.pos);
     camLook.copy(rc.look);
   } else if (ic) {
