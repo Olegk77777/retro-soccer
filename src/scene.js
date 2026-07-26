@@ -481,11 +481,31 @@ function buildBoards(scene) {
   }
 }
 
+// Ночное небо: не плоская чернота, а зарево стадиона — над чашей висит
+// подсвеченная прожекторами дымка, выше она гаснет. Низкие камеры повторов
+// смотрят прямо в него, и «дыра» из чёрного цвета выдавала бы примитив.
+function createSkyTexture() {
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 128;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, c.height);
+  g.addColorStop(0, '#04060e');     // зенит
+  g.addColorStop(0.55, '#0a1024');
+  g.addColorStop(0.82, '#18243d');
+  g.addColorStop(1, '#2b3552');     // зарево над трибунами
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, c.width, c.height);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export function buildStadium() {
   const F = CONFIG.field;
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b1020); // вечернее небо — матч под прожекторами
-  scene.fog = new THREE.Fog(0x0b1020, 130, 260);
+  scene.background = createSkyTexture(); // вечернее небо — матч под прожекторами
+  scene.fog = new THREE.Fog(0x141c33, 130, 260);
 
   // Газон с разметкой. MeshBasic = без освещения: яркая «запечённая» картинка,
   // как на PS1 — там свет на поле тоже был нарисован, а не посчитан.
