@@ -82,8 +82,68 @@ function meanQuat(v) {
   return _qAvg.normalize();
 }
 
+// Ось «отвести плечо от рёбер». Согнутый локоть поднимает кисти (без этого мах
+// вырождается в маятник у бедра), но прижатое к корпусу предплечье прячется в
+// силуэт — руки снова читаются культями. Разведение решает обе задачи разом.
+// Оси костей Mixamo повёрнуты, поэтому ось НЕ угадываем: крутим плечо по каждой
+// из трёх осей и смотрим, какая уводит локоть наружу от корпуса.
+const _qProbe = new THREE.Quaternion();
+const _vProbe = new THREE.Vector3();
+const AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+
+// ВАЖНО: пробовать надо в БЕГОВОЙ позе, а не в позе покоя. В T-позе рука и так
+// разведена до предела — там ни один поворот не уводит её дальше наружу, и
+// проба возвращает шум (проверено: разведение уходило внутрь, кисть вбок падала
+// с 0.27 до 0.21 м). Поэтому берём несколько кадров исходного клипа бега.
+export function probeSpread(rig, clip) {
+  const out = {};
+  const hips = rig.getObjectByName('mixamorigHips');
+  if (!hips || !clip) return out;
+  const mixer = new THREE.AnimationMixer(rig);
+  const action = mixer.clipAction(clip);
+  action.enabled = true;
+  action.setEffectiveWeight(1);
+  action.timeScale = 0;
+  action.play();
+  const times = [0, 0.25, 0.5, 0.75].map((k) => k * clip.duration);
+
+  for (const side of ['Left', 'Right']) {
+    const arm = rig.getObjectByName(`mixamorig${side}Arm`);
+    const hand = rig.getObjectByName(`mixamorig${side}Hand`);
+    if (!arm || !hand) continue;
+    const score = [0, 0, 0, 0, 0, 0];   // 3 оси × 2 знака
+    for (const t of times) {
+      action.time = t;
+      mixer.update(0);
+      rig.updateMatrixWorld(true);
+      const hipX = _vProbe.setFromMatrixPosition(hips.matrixWorld).x;
+      const pose = arm.quaternion.clone();
+      const base = _vProbe.setFromMatrixPosition(hand.matrixWorld).x - hipX;
+      const outward = Math.sign(base) || 1;   // в какую сторону от таза эта рука
+      for (let a = 0; a < 3; a++) {
+        for (let si = 0; si < 2; si++) {
+          _qProbe.setFromAxisAngle(AXES[a], (si ? -1 : 1) * 0.35);
+          arm.quaternion.copy(pose).multiply(_qProbe);
+          rig.updateMatrixWorld(true);
+          // Растёт ли ОТСТУП КИСТИ от корпуса — именно он вынимает предплечье
+          // из силуэта; локоть для этого мерить бесполезно
+          const gain = (_vProbe.setFromMatrixPosition(hand.matrixWorld).x - hipX - base) * outward;
+          score[a * 2 + si] += gain;
+        }
+      }
+      arm.quaternion.copy(pose);
+    }
+    let bi = 0;
+    for (let i = 1; i < 6; i++) if (score[i] > score[bi]) bi = i;
+    if (score[bi] > 0) out[`${side}Arm`] = { axis: bi >> 1, sign: (bi & 1) ? -1 : 1 };
+  }
+  mixer.stopAllAction();
+  mixer.uncacheAction(clip);
+  return out;
+}
+
 // Производный клип: та же хореография, но другой размах и другая частота шага.
-export function deriveClip(src, rest, spec, name) {
+export function deriveClip(src, rest, spec, name, spread = null) {
   const stretch = spec.stretch || 1;
   const tracks = [];
   for (const t of src.tracks) {
@@ -115,6 +175,13 @@ export function deriveClip(src, rest, spec, name) {
         // прячется в силуэт корпуса, и рука опять читается культёй (второй
         // фидбек Олега 26.07.2026). Множитель `forearm` меньше единицы
         // РАЗГИБАЕТ локоть к покою — рука снова видна целиком.
+        //
+        // Но разгибать локоть до конца тоже нельзя: прямая рука опускает кисти
+        // на высоту таза, и мах вырождается в маятник у бедра — «руки просто
+        // висят внизу» (третий фидбек Олега 26.07.2026; замер: кисть на
+        // −0.16 м от таза, ровно как в стойке покоя, против +0.06 в оригинале).
+        // Поэтому локоть держим согнутым (кисти высоко), а из силуэта корпуса
+        // предплечье выводим ОТДЕЛЬНОЙ ручкой `spread` — разведением плеча.
         const useMean = MEAN_PIVOT.has(boneGroup(bone));
         const r = useMean ? meanQuat(v) : rest.get(bone);
         if (r) {
@@ -139,6 +206,19 @@ export function deriveClip(src, rest, spec, name) {
           v[i] = mx + (v[i] - mx) * f;
           v[i + 1] = my + (v[i + 1] - my) * f;
           v[i + 2] = mz + (v[i + 2] - mz) * f;
+        }
+      }
+    }
+    // Разведение плеча: постоянный доворот поверх кадра. Умножаем СПРАВА —
+    // тогда поворот идёт в собственных осях плеча и «едет» вместе с махом,
+    // то есть рука остаётся отведённой на всей амплитуде, а не только в покое.
+    if (spread && spec.spread && prop === 'quaternion') {
+      const s = spread[bone.replace('mixamorig', '')];
+      if (s) {
+        _qProbe.setFromAxisAngle(AXES[s.axis], s.sign * spec.spread);
+        for (let i = 0; i < v.length; i += 4) {
+          _qOut.set(v[i], v[i + 1], v[i + 2], v[i + 3]).multiply(_qProbe).normalize();
+          v[i] = _qOut.x; v[i + 1] = _qOut.y; v[i + 2] = _qOut.z; v[i + 3] = _qOut.w;
         }
       }
     }
@@ -283,11 +363,22 @@ export function buildDerivedClips(gltf) {
   const byName = {};
   for (const c of gltf.animations) byName[c.name] = c;
 
+  // Ось разведения плеча ищем ДО сборки клипов — на отдельном клоне в позе
+  // покоя, чтобы ничего не испортить в общем gltf
+  let spread = null;
+  try {
+    const probeRig = cloneSkeleton(gltf.scene);
+    spread = probeSpread(probeRig, byName[(A.derive[0] && A.derive[0].from) || 'run']);
+    probeRig.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+  } catch (e) {
+    console.error('Ось разведения плеча не найдена, руки останутся прижатыми:', e);
+  }
+
   for (const spec of A.derive) {
     const src = byName[spec.from];
     if (!src) { console.warn(`Ф-98: нет исходного клипа ${spec.from} для ${spec.name}`); continue; }
     if (byName[spec.name]) continue;                 // уже есть в glb — не трогаем
-    const clip = deriveClip(src, rest, spec, spec.name);
+    const clip = deriveClip(src, rest, spec, spec.name, spread);
     gltf.animations.push(clip);
     byName[spec.name] = clip;
   }
