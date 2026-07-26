@@ -12,6 +12,7 @@ import {
 } from './atmosphere.js';
 
 const STADIUM_TEXTURES = Object.freeze({
+  pitch: './textures/stadium/pitch-worn-98.png',
   grass: './textures/stadium/grass-98.png',
   crowd: './textures/stadium/crowd-night-98.png',
   // Щиты — часть атрибутики: их назначает пак (src/pack.js). null = остаются
@@ -19,7 +20,8 @@ const STADIUM_TEXTURES = Object.freeze({
   boards: PACK.textures.boards,
 });
 
-// Один Image на файл: газон нужен и полю, и отбивке, но дважды качать PNG незачем.
+// Один Image на файл: текстуры грузятся и для поля, и для окружения асинхронно,
+// но один и тот же PNG дважды качать незачем.
 const imageCache = new Map();
 const textureClones = new WeakMap();
 function loadTextureImage(path) {
@@ -69,8 +71,9 @@ function drawMirroredTiles(ctx, img, width, height, tileSize) {
   }
 }
 
-// Текстура газона: живая фактура PNG + точные полосы покоса и разметка на canvas.
-// Линии остаются кодом: так их размеры всегда точны, а на дальней камере они не мигают.
+// Текстура газона: полноразмерная карта поля с естественным износом + точные
+// полосы покоса и разметка на canvas. Линии остаются кодом: так их размеры
+// всегда точны, а на дальней камере они не мигают.
 function createPitchTexture() {
   const F = CONFIG.field;
   const scale = 10; // пикселей на метр
@@ -89,38 +92,30 @@ function createPitchTexture() {
 
     if (grass) {
       ctx.imageSmoothingEnabled = true;
-      drawMirroredTiles(ctx, grass, w, h, m(18));
-      // Исходный albedo нарочно «земляной», но после sRGB → CRT становился слишком тёмным.
-      // Screen-подсветка имитирует мощные прожекторы и возвращает зелень, не стирая фактуру.
+      // В отличие от старой 18-метровой плитки это карта ВСЕГО поля:
+      // вытоптанные вратарские и центр не повторяются одинаковым узором.
+      ctx.drawImage(grass, 0, 0, w, h);
+      // Новый albedo уже светлее старой плитки, поэтому screen-подсветка лишь
+      // слегка возвращает зелень после sRGB → CRT, не выбеливая потёртости.
       ctx.save();
       ctx.globalCompositeOperation = 'screen';
-      ctx.fillStyle = 'rgba(95,185,65,0.46)';
+      ctx.fillStyle = 'rgba(70,140,55,0.12)';
       ctx.fillRect(0, 0, w, h);
       ctx.restore();
-      // Полосы слабее прежних: газон по-прежнему читается с камеры, но не выглядит линолеумом.
-      const stripes = 14;
-      const stripeW = w / stripes;
-      for (let i = 0; i < stripes; i++) {
-        ctx.fillStyle = i % 2 === 0 ? 'rgba(0,0,0,0.055)' : 'rgba(255,255,210,0.045)';
+      // Полосы не идеальная шахматка: сила каждой немного отличается, как после
+      // реальной стрижки и нескольких матчей, но ритм телеполя 90-х сохраняется.
+      const stripeTone = [
+        -0.035, 0.022, -0.024, 0.016, -0.032, 0.012, -0.020,
+        0.018, -0.028, 0.010, -0.018, 0.020, -0.030, 0.014,
+      ];
+      const stripeW = w / stripeTone.length;
+      for (let i = 0; i < stripeTone.length; i++) {
+        const tone = stripeTone[i];
+        ctx.fillStyle = tone < 0
+          ? `rgba(0,0,0,${-tone})`
+          : `rgba(255,255,215,${tone})`;
         ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
       }
-
-      // Чуть вытоптанные зоны там, где они естественно появляются: у ворот и в центре.
-      const wear = (x, y, rx, ry, opacity) => {
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.scale(rx, ry);
-        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-        g.addColorStop(0, `rgba(170,150,92,${opacity})`);
-        g.addColorStop(0.55, `rgba(120,115,70,${opacity * 0.5})`);
-        g.addColorStop(1, 'rgba(80,100,55,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(-1, -1, 2, 2);
-        ctx.restore();
-      };
-      wear(m(4), cy, m(5.5), m(7.5), 0.12);
-      wear(w - m(4), cy, m(5.5), m(7.5), 0.12);
-      wear(cx, cy, m(3.8), m(6.5), 0.055);
 
       // Свет мачт: четыре пятна и потемневшие края. Ровное зелёное сукно —
       // первый признак «примитивной» картинки, ночью так не бывает.
@@ -168,7 +163,7 @@ function createPitchTexture() {
 
   paint();
   const tex = configureColorTexture(new THREE.CanvasTexture(c));
-  loadTextureImage(STADIUM_TEXTURES.grass)
+  loadTextureImage(STADIUM_TEXTURES.pitch)
     .then((img) => { paint(img); markTextureDirty(tex); })
     .catch((e) => console.warn(e.message));
   return tex;

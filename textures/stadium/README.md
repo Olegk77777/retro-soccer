@@ -4,16 +4,32 @@
 
 ## Файлы в игре
 
-- `grass-98.png` — 512×512, база поля и тёмной отбивки за бровкой.
+- `grass-98.png` — 512×512, бесшовная база тёмной травы за пределами поля.
+- `pitch-worn-98.png` — 1024×663, полноразмерная карта поля с естественным износом у ворот и в центре.
 - `crowd-night-98.png` — 1024×128, дальняя толпа с флагами сборных эпохи.
 - `ads-france-98.png` — 1024×128, реальные печатные щиты; полный атлас повторяется раз примерно в 48 м.
 - `../ball/tricolore-98.png` — 256×128, цветовая карта мяча France 98.
 
-Разметка поля, полосы покоса, целевые потёртости и CRT не запечены в PNG. Их добавляет игра: так линии остаются точными, фильтры переключаются, а текстуры можно заменить без изменения физики.
+Разметка поля, слабые неровные полосы покоса, пятна прожекторов и CRT не запечены в PNG. Их добавляет игра: так линии остаются точными, фильтры переключаются, а текстуры можно заменить без изменения физики. Пространственный износ теперь хранится в отдельной карте всего поля: одинаковая 18-метровая плитка физически не могла правдоподобно отличать вратарские от центра.
 
 ## Финальные промпты
 
-### Газон
+### Полноразмерный газон с износом
+
+```text
+Use case: stylized-concept
+Asset type: full-field diffuse/albedo game texture for a low-resolution Three.js football pitch
+Primary request: create one authentic late-1990s European stadium football grass surface with believable imperfections and localized wear, designed for a 1996–98 television-broadcast / PS1-era football game
+Scene/backdrop: only the grass surface, filling the entire frame edge to edge
+Style/medium: realistic top-down diffuse texture, restrained enough to survive 320×240 rendering and CRT filtering; natural analog-broadcast colors, not a cinematic photograph
+Composition/framing: strict orthographic bird's-eye view at exactly 90 degrees; wide 3:2 landscape rectangle representing the whole 105×68 m pitch, with the goals conceptually at the exact left and right center edges; no perspective, no horizon
+Color palette: muted medium broadcast greens with olive and slightly yellow-green variation, no neon and no brown vintage wash
+Materials/textures: short late-summer stadium grass, slightly uneven density and mowing, subtle broad cloudy color variation; gently flattened and pale worn grass in both goalmouth traffic zones near the left and right center edges, modest wear through the central midfield corridor and around the unseen kickoff area, a few faint irregular scuffs and reseeded patches; damage is restrained and mostly grass-colored, with only tiny hints of dry soil; wear must look accumulated by football play, not decorative grunge
+Constraints: flat even albedo illumination; no painted field lines, no center circle, no penalty-box markings, no goalposts, no players, no ball, no stadium, no shadows, no spotlight gradients, no 3D relief, no objects, no text, no logos, no watermark; keep all important wear inside the image rather than cut off; natural irregularity, not bilateral mirror symmetry
+Avoid: pristine modern striped carpet, repeated tile motifs, checkerboard mowing, huge mud patches, bare dirt goalmouths, close-up macro blades, long grass, modern saturated FIFA-game look, sepia, fake film grain, scratches, vignette, dramatic lighting
+```
+
+### Бесшовная основа травы для отбивки
 
 ```text
 Use case: stylized-concept
