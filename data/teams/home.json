@@ -9,5 +9,19 @@
     "home": "./textures/kits/brazil-1998-home.png",
     "goalkeeper": "./textures/kits/brazil-1998-gk.png"
   },
-  "_комментарий": "Домашняя форма сборной Бразилии на ЧМ-98: жёлтая футболка с зелёной отделкой, синие шорты, белые гетры; у вратаря тёмно-зелёный комплект."
+  "_комментарий": "Домашняя форма сборной Бразилии на ЧМ-98: жёлтая футболка с зелёной отделкой, синие шорты, белые гетры; у вратаря тёмно-зелёный комплект.",
+  "_состав": "Стартовые 11 финала ЧМ-98 (12.07.1998). Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Рост и внешность — по духу эпохи: узнаваемость важнее паспортной точности (принцип PS1 — рост, телосложение, тон кожи, причёска).",
+  "squad": [
+    { "name": "ТАФФАРЕЛ",   "number": 1,  "height": 186, "build": 1.00, "skin": "#b98a63", "hair": "short", "hairColor": "#2a1c14" },
+    { "name": "КАФУ",       "number": 2,  "height": 176, "build": 1.00, "skin": "#6b4b34", "hair": "short", "hairColor": "#160f0c" },
+    { "name": "АЛДАИР",     "number": 3,  "height": 183, "build": 1.04, "skin": "#5e4130", "hair": "short", "hairColor": "#160f0c" },
+    { "name": "Ж. БАЯНО",   "number": 4,  "height": 183, "build": 1.06, "skin": "#57402f", "hair": "short", "hairColor": "#160f0c" },
+    { "name": "Р. КАРЛОС",  "number": 6,  "height": 168, "build": 1.12, "skin": "#6a4a33", "hair": "short", "hairColor": "#160f0c" },
+    { "name": "САМПАЙО",    "number": 5,  "height": 178, "build": 1.02, "skin": "#a4784f", "hair": "short", "hairColor": "#241812" },
+    { "name": "ДУНГА",      "number": 8,  "height": 176, "build": 1.00, "skin": "#c49b7c", "hair": "short", "hairColor": "#3a2a1c" },
+    { "name": "РИВАЛДО",    "number": 10, "height": 186, "build": 0.94, "skin": "#8a6242", "hair": "thin",  "hairColor": "#1d1410" },
+    { "name": "ЛЕОНАРДО",   "number": 11, "height": 177, "build": 0.98, "skin": "#c09070", "hair": "short", "hairColor": "#2e2118" },
+    { "name": "РОНАЛДО",    "number": 9,  "height": 183, "build": 1.08, "skin": "#7d5837", "hair": "short", "hairColor": "#160f0c" },
+    { "name": "БЕБЕТО",     "number": 7,  "height": 176, "build": 0.95, "skin": "#9a6f4a", "hair": "short", "hairColor": "#1d1410" }
+  ]
 }

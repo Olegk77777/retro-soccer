@@ -78,10 +78,19 @@ export class Match {
 
     const mkPlayers = (data) => CONFIG.formation.roles.map((r, i) => {
       const isKeeper = i === 0;
-      return new Player(scene, {
+      // Внешность и фамилия — из состава (data.squad[i]); нет состава —
+      // игрок остаётся «средним», как было до Фазы 5
+      const look = data.squad && data.squad[i] ? data.squad[i] : null;
+      const p = new Player(scene, {
         kitColor: isKeeper ? data.colors.gk : data.colors.primary,
         kitTexture: isKeeper ? data.kits?.goalkeeper : data.kits?.home,
+        look,
       });
+      if (look) {
+        p.name = look.name;
+        p.number = look.number;
+      }
+      return p;
     });
     this.teams = [
       new Team(this, +1, teamsData[0], mkPlayers(teamsData[0])),
@@ -1453,11 +1462,16 @@ export class Match {
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;
 
-    // Титр под криком: чья команда и на какой минуте — как плашка в эфире
+    // Титр под криком: автор гола и минута — как плашка в эфире. Автор —
+    // последний касавшийся из забившей команды (свой гол подписываем
+    // командой: имя защитника в титре гола выглядело бы наградой)
     if (this.hud.card) {
       const min = Math.max(1, Math.min(90, Math.floor(this.clock / 60)));
+      const scorer = this.lastTouch && this.lastTouch.team === this.teams[scorerIdx]
+        ? this.lastTouch : null;
       this.hud.cardMark.style.background = this._teamColors[scorerIdx];
-      this.hud.cardTeam.textContent = this._teamNames[scorerIdx];
+      this.hud.cardTeam.textContent = (scorer && scorer.name)
+        ? scorer.name : this._teamNames[scorerIdx];
       this.hud.cardMin.textContent = `${min}'`;
       this.hud.card.classList.add('show');
       this.goalCardTimer = CONFIG.match.goalCardTime;

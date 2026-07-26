@@ -88,7 +88,10 @@ export class Officials {
     this.lines[0].side = 1;
     this.lines[1].side = -1;
     const F = CONFIG.field;
-    this.referee.body.group.position.set(0, 0, 8);
+    // Стартовая точка судьи — по ДАЛЬНЮЮ сторону от ТВ-камеры и камеры
+    // заставки (они стоят на +Z): иначе на крупном плане мяча арбитр
+    // оказывается прямо перед объективом и закрывает пол-кадра.
+    this.referee.body.group.position.set(7, 0, -13);
     this.lines[0].body.group.position.set(20, 0, F.width / 2 + O.lineOffset);
     this.lines[1].body.group.position.set(-20, 0, -(F.width / 2 + O.lineOffset));
   }

@@ -86,6 +86,18 @@ function getKitTexture(gltf, texturePath, colorHex) {
   return tex;
 }
 
+// Причёска — сменная «шапка» на кости головы, как делали на PS1: отдельной
+// геометрии волос в модели нет, а разные головы в кадре видно сразу.
+// Размеры в МЕТРАХ; кость Mixamo живёт в своём масштабе, поэтому при посадке
+// делим на масштаб кости (см. attachHair).
+const HAIR_STYLES = {
+  none: null,                                              // лысина (Зидан, Бартез)
+  thin: { r: 0.108, top: 0.55, up: 0.175, flat: 0.5 },     // редеющие, лежат на макушке
+  short: { r: 0.118, top: 0.72, up: 0.185, flat: 0.62 },   // обычная короткая стрижка
+  afro: { r: 0.152, top: 1.0, up: 0.185, flat: 0.9 },      // копна
+  long: { r: 0.128, top: 0.95, up: 0.18, flat: 0.78, tail: true }, // с хвостом (Пети)
+};
+
 // Временные вектора для handsWorldPoint — без аллокаций в кадре
 const _handA = new THREE.Vector3();
 const _handB = new THREE.Vector3();
@@ -104,6 +116,9 @@ export class Player {
     const P = CONFIG.player;
     this.kitColor = opts.kitColor || null;
     this.kitTexture = opts.kitTexture || null;
+    // Внешность из JSON состава: рост, телосложение, тон кожи, причёска.
+    // Так Роберто Карлос ниже и коренастее Блана без единой новой модели.
+    this.look = opts.look || null;
     this.group = new THREE.Group();
 
     // Emissive-подсветка, чтобы фигура читалась на тёмном вечернем поле
@@ -188,8 +203,18 @@ export class Player {
   }
 
   attachModel(gltf) {
+    const P = CONFIG.player;
     this.model = cloneSkeleton(gltf.scene);
-    this.model.scale.setScalar(CONFIG.player.modelScale); // ноги в origin — растём вверх, не в землю
+    // Рост и телосложение — из JSON состава. Модель одна на всех, разными
+    // фигуры делают пропорции: вертикаль = рост, горизонталь = сложение.
+    const L = this.look;
+    const tall = L && L.height ? L.height / P.baseHeightCm : 1;
+    const wide = L && L.build ? L.build : 1;
+    this.model.scale.set(
+      P.modelScale * tall * wide,
+      P.modelScale * tall,      // ноги в origin — растём вверх, не в землю
+      P.modelScale * tall * wide,
+    );
 
     // Материалы — свои у каждого клона: форма перекрашена в цвет команды.
     // Lambert вместо Standard: быстрее на планшете, с плоскими гранями и
@@ -209,10 +234,19 @@ export class Player {
             emissive: src.color.clone().multiplyScalar(0.45),
           });
       mat.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
+      // Тон кожи из состава: смуглые бразильцы и бледные европейцы в одном
+      // кадре — это половина узнаваемости фигурок на PS1
+      if (L && L.skin && (src.name === 'skin' || src.name === 'head')) {
+        mat.color.set(L.skin);
+        mat.emissive.set(L.skin).multiplyScalar(0.45);
+      }
       o.material = mat;
     });
 
     this.group.add(this.model);
+    // Причёску сажаем ПОСЛЕ подключения модели: если тут что-то сломается,
+    // игрок останется с моделью и анимациями, а не свалится на капсулу
+    this.attachHair();
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
 
@@ -232,6 +266,49 @@ export class Player {
       }
     });
     this.playAction('idle', 0);
+  }
+
+  // Причёска: низкополигональная «шапка» на кости головы. Кость Mixamo живёт
+  // в своём масштабе (≈1 см на единицу), поэтому размеры в метрах делим на
+  // масштаб кости — тогда стрижка не зависит от роста игрока.
+  attachHair() {
+    // Внешности может не быть вовсе (арбитры, команды без состава) —
+    // тогда обычная короткая стрижка стандартного цвета
+    const L = this.look || {};
+    const style = HAIR_STYLES[L.hair || 'short'];
+    if (!style) return;                       // 'none' — лысина, и это тоже примета
+    const bone = this.model.getObjectByName('mixamorigHead');
+    if (!bone) return;
+
+    this.model.updateMatrixWorld(true);
+    const e = bone.matrixWorld.elements;
+    const boneScale = Math.hypot(e[0], e[1], e[2]) || 1;
+    const k = 1 / boneScale;
+
+    const color = new THREE.Color(L.hairColor || '#241812');
+    const mat = new THREE.MeshLambertMaterial({
+      color,
+      emissive: color.clone().multiplyScalar(0.4), // читается на вечернем поле
+    });
+
+    // Полусфера-шапка: 8×3 сегмента — ровно та грубость, что на PS1
+    const cap = new THREE.Mesh(
+      new THREE.SphereGeometry(style.r, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.5 * style.top),
+      mat,
+    );
+    cap.scale.set(k, k * style.flat, k);
+    cap.position.y = style.up * k;
+    cap.frustumCulled = false;
+    bone.add(cap);
+
+    if (style.tail) {
+      // Хвост на затылке (Пети-98) — короткий скошенный блок
+      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.07), mat);
+      tail.scale.setScalar(k);
+      tail.position.set(0, (style.up - 0.09) * k, -0.085 * k);
+      tail.frustumCulled = false;
+      bone.add(tail);
+    }
   }
 
   // Плавное переключение клипа (crossfade), повторный вызов того же клипа — no-op
