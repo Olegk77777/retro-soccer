@@ -165,29 +165,29 @@ export const CONFIG = {
       // человеческий, а не заводной игрушки.
       derive: [
         // Ходьба: короткий шаг, спокойный темп, спина сама выпрямляется
-        { name: 'walk', from: 'run', leg: 0.66, arm: 0.5, spine: 0.45, root: 0.55, stretch: 1.95 },
+        { name: 'walk', from: 'run', leg: 0.66, arm: 0.5, forearm: 0.55, spine: 0.45, root: 0.55, stretch: 1.95 },
         // Бег: шаг шире оригинала, темп спокойнее — «сильный», а не семенящий
-        { name: 'jog', from: 'run', leg: 1.28, arm: 1.2, spine: 1.1, root: 1.15, stretch: 1.32 },
+        { name: 'jog', from: 'run', leg: 1.28, arm: 1.2, forearm: 0.55, spine: 1.1, root: 1.15, stretch: 1.32 },
         // Спринт: широкий мах, завал корпуса вперёд, частый шаг
-        { name: 'sprint', from: 'run', leg: 1.55, arm: 1.7, spine: 1.5, root: 1.3, stretch: 1.0 },
+        { name: 'sprint', from: 'run', leg: 1.55, arm: 1.7, forearm: 0.62, spine: 1.5, root: 1.3, stretch: 1.0 },
         // Спиной и боком — размах почти оригинальный, поправляем только темп
-        { name: 'back', from: 'run_back', leg: 1.08, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.3 },
-        { name: 'side_l', from: 'strafe_l', leg: 1.05, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.28 },
-        { name: 'side_r', from: 'strafe_r', leg: 1.05, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.28 },
+        { name: 'back', from: 'run_back', leg: 1.08, arm: 1.0, forearm: 0.6, spine: 1.0, root: 1.0, stretch: 1.3 },
+        { name: 'side_l', from: 'strafe_l', leg: 1.05, arm: 1.0, forearm: 0.6, spine: 1.0, root: 1.0, stretch: 1.28 },
+        { name: 'side_r', from: 'strafe_r', leg: 1.05, arm: 1.0, forearm: 0.6, spine: 1.0, root: 1.0, stretch: 1.28 },
         // Медленные ступени для тех же направлений. Без них игрок, смещающийся
         // боком на 1 м/с, был на 94% стойкой и просто ЕХАЛ по газону стоя —
         // ровно то, что заказчик назвал «полупарализованные».
-        { name: 'back_slow', from: 'run_back', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
-        { name: 'side_l_slow', from: 'strafe_l', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
-        { name: 'side_r_slow', from: 'strafe_r', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
+        { name: 'back_slow', from: 'run_back', leg: 0.6, arm: 0.5, forearm: 0.55, spine: 0.55, root: 0.55, stretch: 1.9 },
+        { name: 'side_l_slow', from: 'strafe_l', leg: 0.6, arm: 0.5, forearm: 0.55, spine: 0.55, root: 0.55, stretch: 1.9 },
+        { name: 'side_r_slow', from: 'strafe_r', leg: 0.6, arm: 0.5, forearm: 0.55, spine: 0.55, root: 0.55, stretch: 1.9 },
         // Вратарь ходит по линии приставным шагом в НИЗКОЙ стойке — это своя
         // походка, а не полевой strafe. Клипы gk_step_* добавлены в модель
         // 26.07.2026; направление замерено по опорной стопе, а не по имени
         // файла (в паке они назывались наоборот).
-        { name: 'gk_side_l', from: 'gk_step_l', leg: 1.0, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
-        { name: 'gk_side_r', from: 'gk_step_r', leg: 1.0, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
-        { name: 'gk_side_l_slow', from: 'gk_step_l', leg: 0.6, arm: 0.6, spine: 0.7, root: 0.6, stretch: 1.85 },
-        { name: 'gk_side_r_slow', from: 'gk_step_r', leg: 0.6, arm: 0.6, spine: 0.7, root: 0.6, stretch: 1.85 },
+        { name: 'gk_side_l', from: 'gk_step_l', leg: 1.0, arm: 1.0, forearm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
+        { name: 'gk_side_r', from: 'gk_step_r', leg: 1.0, arm: 1.0, forearm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
+        { name: 'gk_side_l_slow', from: 'gk_step_l', leg: 0.6, arm: 0.6, forearm: 1.0, spine: 0.7, root: 0.6, stretch: 1.85 },
+        { name: 'gk_side_r_slow', from: 'gk_step_r', leg: 0.6, arm: 0.6, forearm: 1.0, spine: 0.7, root: 0.6, stretch: 1.85 },
       ],
       // Лестницы по направлениям. Порядок обязателен: от медленного к быстрому,
       // первый элемент 'idle' подменяется стойкой вратаря, если игрок в раме.
