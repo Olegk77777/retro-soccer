@@ -4,7 +4,10 @@
 // назначения, «головы» игроков (fieldplayer.js) их исполняют.
 
 import { CONFIG } from '../config.js';
-import { distToBall, passLaneClearance, passSafeMargin, freeSpace, isPassSafe, predictLanding } from './steering.js';
+import {
+  distToBall, freeSpace, isPassSafe, predictLanding,
+  xThreat, passPower, passTime, ROLL_LAMBDA,
+} from './steering.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -43,6 +46,11 @@ export class Team {
     this.overlapTarget = null;
     this.overlapTimer = 0;
 
+    // Приход в ноги (coming short): один игрок показывается накоротке
+    this.shortRunner = null;
+    this.shortTarget = null;
+    this.shortTimer = 0;
+
     // Врывания в штрафную под навес: игрок → точка рывка (ближняя/дальняя/11 м)
     this.boxRuns = new Map();
     this.crossAir = 0; // сек: наша подача в полёте — рывки живут, врывание на прилёт
@@ -60,6 +68,14 @@ export class Team {
     }
     this.bestSpot = null;
     this._spotTimer = 0;
+  }
+
+  // Счётчик статистики матча: команда сама не знает своего индекса,
+  // поэтому спрашивает его у матча (дёшево — вызывается на событиях)
+  bump(key, n = 1) {
+    const s = this.match && this.match.stats;
+    if (!s || !s[key]) return;
+    s[key][this.match.teams.indexOf(this)] += n;
   }
 
   get keeper() {
@@ -101,6 +117,10 @@ export class Team {
         (!inFlight && this.match.possession === this.match.otherTeam(this)) ||
         this.match.toucher === this.receiver;
       if (done) {
+        // Пас дошёл, если адресат реально взял мяч — это и есть точность передач
+        if (this._passLive && this._passLive === this.receiver &&
+            this.match.toucher === this.receiver) this.bump('passOk');
+        this._passLive = null;
         this.receiver = null;
         this.receiveTarget = null;
       }
@@ -141,6 +161,20 @@ export class Team {
         this.overlapTarget = null;
       }
     }
+    // Приход в ноги живёт короткое окно: не показался вовремя — вернулся
+    if (this.shortRunner) {
+      this.shortTimer -= dt;
+      if (this.shortTimer <= 0 || !this.attacking ||
+          this.match.toucher === this.shortRunner) {
+        this.shortRunner = null;
+        this.shortTarget = null;
+      }
+    }
+    // Кулдаун рывка у каждого: рывки не должны идти сплошным потоком
+    for (const p of this.players) {
+      if (p.runCd > 0) p.runCd -= dt;
+    }
+
     if (this._runCheckTimer > 0) this._runCheckTimer -= dt;
     if (this._spotTimer > 0) this._spotTimer -= dt;
 
@@ -164,6 +198,9 @@ export class Team {
       }
       // Мяч у широкого игрока — крайний защитник подключается по бровке
       if (!this.overlapper) this.tryOverlap();
+      // Владельца прессингуют, безопасного паса нет — партнёр показывается
+      // накоротке (главный источник передач под давлением)
+      this.tryComingShort(ball);
     }
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
@@ -179,35 +216,39 @@ export class Team {
     this.updateBoxRuns(ball);
   }
 
-  // Мяч во фланговом коридоре чужой трети (у нас) — форварды не стоят
-  // и не ждут, а ВРЫВАЮТСЯ в штрафную (фидбек Олега 18.07.2026): ближняя
-  // штанга, дальняя, подбор на 11 м. Цели живут, пока идёт фланговая атака.
+  // ЗАНЯТИЕ ШТРАФНОЙ (ресёрч 15, раздел 5.2). Атака дошла до финальной трети —
+  // четверо занимают ЧЕТЫРЕ РАЗНЫЕ точки: ближняя штанга, «золотая зона»
+  // между вратарской и точкой пенальти, дальняя штанга и ТРЕЙЛЕР у линии
+  // штрафной под прострел. Раньше врывания включались только из флангового
+  // коридора и только на три точки без трейлера — прострел было некому
+  // замыкать, и главное оружие финальной трети не работало вовсе.
   updateBoxRuns(ball) {
-    const AC = CONFIG.ai.attack.cross;
+    const B = CONFIG.ai.attack.offBall.box;
     const F = CONFIG.field;
-    // Подача уже в полёте: мяч покинул фланговый коридор, но рывки НЕ
-    // отменяем — штанги и подбор держатся до прилёта (иначе врывания
-    // умирали в момент удара по мячу — грабля 18.07.2026)
+    // Подача уже в полёте: рывки НЕ отменяем — штанги и подбор держатся до
+    // прилёта (иначе врывания умирали в момент удара по мячу, грабля 18.07)
     if (this.crossAir > 0) return;
     this.boxRuns.clear();
     if (!this.attacking) return;
     const bp = ball.mesh.position;
-    const inFlank = Math.abs(bp.z) > AC.flankZ - 2;
-    const inFinal = this.side * bp.x > F.length / 2 - AC.finalThird;
-    if (!inFlank || !inFinal) return;
-
     const goalX = this.attackGoalX;
-    const s = Math.sign(bp.z || 1);
+    if (Math.hypot(goalX - bp.x, bp.z) > B.fromGoal) return;
+
+    const s = Math.sign(bp.z || 1); // «ближняя» штанга — со стороны мяча
     const targets = [
-      { x: goalX - this.side * 6.5, z: s * 3.2 },    // ближняя штанга
-      { x: goalX - this.side * 8.0, z: -s * 4.8 },   // дальняя штанга
-      { x: goalX - this.side * 11.5, z: -s * 0.5 },  // подбор у 11 метров
+      { x: goalX - this.side * B.nearPost.x, z: s * B.nearPost.z },
+      { x: goalX - this.side * B.golden.x, z: B.golden.z },
+      { x: goalX - this.side * B.farPost.x, z: s * B.farPost.z },
+      { x: goalX - this.side * B.trailer.x, z: B.trailer.z },
     ];
-    // Кандидаты: оба форварда + открывающийся; занятые роли не трогаем
-    const pool = [this.players[9], this.players[10], this.supporter]
-      .filter((p, i, arr) => p && arr.indexOf(p) === i &&
-        p !== this.match.toucher && p !== this.match.controlled &&
-        p !== this.receiver && p !== this.chaser && p !== this.runner);
+    // Кандидаты: атакующая шестёрка, кроме занятых ролями. Поддерживающего
+    // НЕ забираем: если в штрафную уйдут все, владельцу некому отдать, он
+    // упрётся в защитника и потеряет мяч — замер показал падение ударов
+    // втрое, когда в коробку врывались четверо из шести
+    const pool = this.players.slice(5)
+      .filter((p) => p !== this.match.toucher && p !== this.match.controlled &&
+        p !== this.receiver && p !== this.chaser && p !== this.shortRunner &&
+        p !== this.supporter);
     for (const t of targets) {
       if (!pool.length) break;
       let bi = 0;
@@ -223,6 +264,81 @@ export class Team {
       this.boxRuns.set(pool[bi], t);
       pool.splice(bi, 1);
     }
+  }
+
+  // ПРИХОД В НОГИ (coming short, ресёрч 15, раздел 5.2 тип №4).
+  // Владельца прессингуют и безопасного паса нет — партнёр обязан ПОКАЗАТЬСЯ
+  // накоротке сам, а не ждать в своей зоне. Без этого владелец под прессингом
+  // вынужден вести мяч до потери: именно поэтому «легче самому бежать».
+  // Точка — на отрезке владелец→партнёр в short.dist метрах от владельца,
+  // сдвинутая прочь от ближайшего соперника (открыть угол передачи).
+  tryComingShort(ball) {
+    const C = CONFIG.ai.attack.offBall;
+    const S = C.short;
+    const owner = this.match.toucher;
+    if (this.shortRunner) return;
+    if (!owner || owner.team !== this || owner.isKeeper) return;
+    const op = owner.group.position;
+
+    // Прессингуют ли владельца
+    let press = Infinity;
+    let presser = null;
+    for (const o of this.opponents) {
+      if (o.isKeeper) continue;
+      const p2 = o.group.position;
+      const d = Math.hypot(p2.x - op.x, p2.z - op.z);
+      if (d < press) {
+        press = d;
+        presser = o;
+      }
+    }
+    if (press > S.pressDist) return;
+
+    // Уже есть надёжная опция — открываться накоротке незачем
+    const safe = this.choosePass(owner, ball);
+    if (safe && safe.score >= S.safeOption) return;
+
+    // Кандидат: ближний свободный партнёр, не занятый другой ролью
+    let best = null;
+    let bestD = Infinity;
+    for (const p of this.players) {
+      if (p === owner || p.isKeeper) continue;
+      if (p === this.match.controlled || p === this.runner ||
+          p === this.overlapper || p === this.receiver) continue;
+      if (p.runCd > 0) continue;
+      const pp = p.group.position;
+      const d = Math.hypot(pp.x - op.x, pp.z - op.z);
+      if (d < S.minGap || d > 22) continue;
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    if (!best) return;
+
+    const pp = best.group.position;
+    const dx = pp.x - op.x;
+    const dz = pp.z - op.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    let tx = op.x + (dx / dl) * S.dist;
+    let tz = op.z + (dz / dl) * S.dist;
+    // Сдвиг прочь от прессера — иначе показываемся ему же в ноги
+    if (presser) {
+      const ppx = presser.group.position;
+      const ax = tx - ppx.x;
+      const az = tz - ppx.z;
+      const al = Math.hypot(ax, az) || 1;
+      tx += (ax / al) * S.offset;
+      tz += (az / al) * S.offset;
+    }
+    const F = CONFIG.field;
+    this.shortRunner = best;
+    this.shortTarget = {
+      x: Math.max(-F.length / 2 + 3, Math.min(F.length / 2 - 3, tx)),
+      z: Math.max(-F.width / 2 + 2, Math.min(F.width / 2 - 2, tz)),
+    };
+    this.shortTimer = S.ttl;
+    best.runCd = C.cooldown;
   }
 
   // Подача исполнена (ресёрч 11): считаем точку приземления честной
@@ -597,77 +713,199 @@ export class Team {
     return { x, z };
   }
 
-  // Выбор паса для игрока с мячом: вперёд, в чистый коридор, на ход.
-  // Возвращает готовое решение {mate, dir, power, lift, target} или null.
+  // ===== Выбор паса (ресёрч 15, раздел 3) =====
+  // S = P_complete^safety · Q · V · F, где
+  //   P_complete — вероятность, что пас дойдёт (модель перехвата ПО ВРЕМЕНИ),
+  //   Q — качество приёма (скорость мяча, разворот корпуса, прессинг, высота),
+  //   V — прирост ценности позиции (xT: пас вперёд в центр дороже отката),
+  //   F — множитель семейства (разрез 2.2, ПРОСТРЕЛ 1.6, навес 0.6).
+  // Выбор — softmax по S, а не строгий максимум: предсказуемый пас читается
+  // соперником и выглядит роботом. Возвращает {mate, dir, power, lift, target}.
   choosePass(from, ball) {
     const AI = CONFIG.ai;
+    const PM = AI.passModel;
+    const F = CONFIG.field;
     const fp = from.group.position;
     const opponents = this.opponents;
-    let best = null;
-    let bestScore = -Infinity;
-    // Под прессингом пас обязателен: рискованный коридор лучше потери мяча
+
+    // Прессинг на пасующем — он же меняет и порог, и прощение перехвата
     let nearestOpp = Infinity;
     for (const o of opponents) {
       const op = o.group.position;
       nearestOpp = Math.min(nearestOpp, Math.hypot(op.x - fp.x, op.z - fp.z));
     }
     const underPressure = nearestOpp < AI.passPressure;
+    const xtFrom = xThreat(fp.x, fp.z, this.side);
+    const goalX = this.attackGoalX;
+    const boxX = F.length / 2 - 16.5;
 
+    const options = [];
     for (const mate of this.players) {
-      if (mate === from || mate.isKeeper) continue;
+      if (mate === from) continue;
+      if (mate.downT > 0 || mate.tackleT > 0) continue;
       const mp = mate.group.position;
-      const dist = Math.hypot(mp.x - fp.x, mp.z - fp.z);
-      if (dist < AI.passMin || dist > AI.passMax) continue;
+      const straight = Math.hypot(mp.x - fp.x, mp.z - fp.z);
+      if (straight < AI.passMin || straight > AI.passMax) continue;
 
-      // Упреждение: пас на ход бегущему, а не в точку, где он был.
-      // Раннеру за спину защиты мяч кладётся дальше в зону рывка (leadRun),
-      // подключающемуся фулбеку — в коридор у бровки
-      const isRunner = mate === this.runner;
-      const isOverlap = mate === this.overlapper;
-      const lead = isRunner ? CONFIG.ai.attack.runs.leadRun
-        : isOverlap ? CONFIG.ai.combo.overlap.leadRun : 0.7;
-      const speed = Math.min(AI.passSpeedMax,
-        Math.max(AI.passSpeedMin, dist * AI.passSpeedK + AI.passSpeedMin * 0.5));
-      const t = dist / speed;
-      const tx = mp.x + mate.vel.x * t * lead;
-      const tz = mp.z + mate.vel.z * t * lead;
+      // Два кандидата на каждого партнёра: «в ноги с упреждением» и «на ход».
+      // Пас на ход кладётся ПЕРЕД бегущим (+2 м фикс), иначе мяч приходит
+      // в пятки и адресат вынужден тормозить — ровно то, что убивает темп
+      const cands = [{ kind: 'feet', lead: 0.8, ahead: 0 }];
+      const runSpeed = Math.hypot(mate.vel.x, mate.vel.z);
+      if (runSpeed > 1.5 || mate === this.runner || mate === this.overlapper) {
+        cands.push({ kind: 'through', lead: 1.5, ahead: 2.0 });
+      }
 
-      const clearance = passLaneClearance(fp.x, fp.z, tx, tz, opponents);
-      const PI = AI.passIntercept;
-      // Соперник практически НА линии — коридор закрыт при любой скорости
-      if (clearance < PI.hardBlock) continue;
-      // Иначе решает модель перехвата по времени: успеет ли защитник на линию
-      // раньше мяча. Пас в разрез терпит более узкую щель (riskFactor,
-      // Gliders2d), под прессингом прощается ещё riskUnderPress — деваться
-      // некуда, отдавай. Плоский порог «чистого коридора 2.6 м» отсекал 80%
-      // вариантов, и AI не пасовал вовсе (замер 24.07)
-      const margin = passSafeMargin(fp.x, fp.z, tx, tz, speed, opponents, PI);
-      let allow = 0;
-      if (isRunner) allow += PI.body * (1 - CONFIG.ai.attack.runs.riskFactor);
-      if (underPressure) allow += PI.riskUnderPress;
-      if (margin < -allow) continue;
+      for (const c of cands) {
+        const arrive = c.kind === 'through' || underPressure
+          ? AI.passArriveDriven : AI.passArriveNormal;
+        // Две итерации неподвижной точки: цель зависит от времени полёта,
+        // время полёта — от дистанции до цели
+        let tx = mp.x;
+        let tz = mp.z;
+        let dist = straight;
+        let power = 0;
+        let flight = 0;
+        for (let it = 0; it < 2; it++) {
+          power = Math.max(AI.passSpeedMin,
+            Math.min(AI.passSpeedMax, passPower(dist, arrive)));
+          flight = passTime(dist, power);
+          if (!isFinite(flight)) break;
+          const ux = runSpeed > 0.3 ? mate.vel.x / runSpeed : 0;
+          const uz = runSpeed > 0.3 ? mate.vel.z / runSpeed : 0;
+          tx = mp.x + mate.vel.x * flight * c.lead + ux * c.ahead;
+          tz = mp.z + mate.vel.z * flight * c.lead + uz * c.ahead;
+          dist = Math.hypot(tx - fp.x, tz - fp.z) || 1;
+        }
+        if (!isFinite(flight)) continue;
+        if (Math.abs(tx) > F.length / 2 - 1.5 || Math.abs(tz) > F.width / 2 - 1.5) continue;
 
-      // Ценим продвижение к воротам, чистоту коридора, свободную зону на
-      // приёме (перевод из толпы на пустой фланг) и бегущего в разрез
-      const forward = this.side * (tx - fp.x);
-      const score = forward + clearance * 1.5 +
-        freeSpace(tx, tz, opponents) * 2 +
-        (isRunner ? CONFIG.ai.attack.runs.passBonus : 0) +
-        (isOverlap ? CONFIG.ai.combo.overlap.passBonus : 0) -
-        dist * 0.08;
-      if (score > bestScore) {
-        bestScore = score;
-        const d = Math.hypot(tx - fp.x, tz - fp.z) || 1;
-        best = {
+        // --- P_complete: перехват по времени ---
+        const p = this.passComplete(fp.x, fp.z, tx, tz, power, opponents,
+          underPressure ? PM.pressBonus : 0);
+        if (p <= 0.01) continue;
+
+        // --- Q: качество приёма ---
+        const vArrive = Math.max(0, power - ROLL_LAMBDA * dist);
+        let q = Math.max(PM.qSpeedMin,
+          Math.min(1, 1 - (vArrive - PM.qSpeedRef) / PM.qSpeedSpan));
+        // Разворот корпуса: мяч, приходящий в спину, принимать труднее
+        const nx = (tx - fp.x) / dist;
+        const nz = (tz - fp.z) / dist;
+        const face = mate.facing;
+        const cosB = -(nx * face.x + nz * face.z); // 1 = адресат лицом к мячу
+        q *= PM.qBodyBase + (1 - PM.qBodyBase) * (1 + cosB) / 2;
+        // Опекун рядом с точкой приёма
+        let dOpp = Infinity;
+        for (const o of opponents) {
+          if (o.isKeeper) continue;
+          const op = o.group.position;
+          dOpp = Math.min(dOpp, Math.hypot(op.x - tx, op.z - tz));
+        }
+        q *= 1 - PM.qPressDrop * Math.max(0, Math.min(1, 1 - dOpp / PM.qPressRange));
+        q *= PM.qHeightLow;
+        q *= c.kind === 'through' ? PM.qRunBonus
+          : (runSpeed > 3 ? PM.qFeetToRunner : 1);
+
+        // --- V: прирост ценности позиции ---
+        const dxt = xThreat(tx, tz, this.side) - xtFrom;
+        const v = Math.max(PM.valueMin, Math.min(PM.valueMax, 1 + PM.valueK * dxt));
+
+        // --- F: семейство передачи ---
+        let f = PM.fNormal;
+        const oppLine = this.match.otherTeam(this).defLineX;
+        const behindLine = this.side * (tx - oppLine) > 0;
+        const inBox = this.side * tx > boxX && Math.abs(tz) < 20.16;
+        // ПРОСТРЕЛ: мяч из глубины фланга НАЗАД в зону перед воротами.
+        // Второе по опасности действие в футболе после разреза — и главный
+        // недостающий инструмент нашей игры (ресёрч 15, раздел 9)
+        const fromDeepWide = this.side * fp.x > F.length / 2 - 13 && Math.abs(fp.z) > 13;
+        const isCutback = fromDeepWide && inBox &&
+          this.side * (fp.x - tx) > 0 && Math.abs(tz) < Math.abs(fp.z) - 4;
+        if (isCutback) f = PM.fCutback;
+        else if (behindLine && c.kind === 'through') f = PM.fThrough;
+        else if (this.side * (tx - fp.x) > 6) f = PM.fProgress;
+        if (mate.isKeeper) f *= PM.fKeeper;
+        if (mate === this.runner) f *= 1.25;
+        if (mate === this.overlapper) f *= 1.15;
+
+        const score = Math.pow(p, PM.safety) * q * v * f;
+        options.push({
+          score,
           mate,
           target: { x: tx, z: tz },
-          dir: { x: (tx - fp.x) / d, z: (tz - fp.z) / d },
-          power: speed,
-          lift: dist > AI.longPassDist ? AI.longPassLift : 0.6,
-        };
+          dir: { x: nx, z: nz },
+          power,
+          lift: dist > AI.longPassDist ? AI.longPassLift : 0.4,
+          kind: c.kind,
+        });
       }
     }
-    return best;
+
+    if (!options.length) return null;
+    const minScore = PM.minScore * (underPressure ? PM.pressScoreK : 1);
+    const live = options.filter((o) => o.score >= minScore);
+    if (!live.length) return null;
+
+    // Softmax по S: лучший вариант выигрывает примерно в 2/3 случаев,
+    // остальное достаётся близким по ценности — игра перестаёт быть роботом
+    let top = -Infinity;
+    for (const o of live) top = Math.max(top, o.score);
+    let sum = 0;
+    for (const o of live) {
+      o._w = Math.exp((o.score - top) / PM.temperature);
+      sum += o._w;
+    }
+    let r = Math.random() * sum;
+    for (const o of live) {
+      r -= o._w;
+      if (r <= 0) return o;
+    }
+    return live[live.length - 1];
+  }
+
+  // Вероятность, что наземный пас дойдёт: произведение (1 − p_перехвата) по
+  // ближайшим к линии соперникам. Перехват считается ПО ВРЕМЕНИ с честной
+  // кинематикой разгона (√(2s/a)), а не «плоским коридором в метрах»:
+  // защитник в двух метрах от линии тратит на них 0.94 с, а не полсекунды.
+  passComplete(fx, fz, tx, tz, power, opponents, forgive = 0) {
+    const PM = CONFIG.ai.passModel;
+    const dx = tx - fx;
+    const dz = tz - fz;
+    const D = Math.hypot(dx, dz) || 1;
+    const nx = dx / D;
+    const nz = dz / D;
+    const sprint = CONFIG.player.speed * CONFIG.ai.speedFactor * CONFIG.player.sprintFactor;
+
+    const near = [];
+    for (const o of opponents) {
+      if (o.downT > 0 || o.tackleT > 0) continue; // лежащий не перехватит
+      const op = o.group.position;
+      const a = (op.x - fx) * nx + (op.z - fz) * nz;
+      if (a < 0.5) continue;                       // за спиной пасующего
+      const b = Math.abs(-(op.x - fx) * nz + (op.z - fz) * nx);
+      if (a > D + 1.5) continue;                   // дальше цели — не по пути
+      if (b < PM.onLine && a < D) return 0;        // физически стоит на линии
+      near.push({ a: Math.max(0, Math.min(D, a)), b });
+    }
+    near.sort((p1, p2) => p1.b - p2.b);
+
+    let pass = 1;
+    for (let i = 0; i < Math.min(PM.maxCheck, near.length); i++) {
+      const { a, b } = near[i];
+      const tBall = passTime(a, power);
+      if (!isFinite(tBall)) continue;
+      const s = Math.max(0, b - PM.bodyWidth);
+      // Разгон из покоя, потом крейсерская скорость
+      const tAccel = Math.sqrt((2 * s) / PM.oppAccel);
+      const vEnd = PM.oppAccel * tAccel;
+      const tMove = vEnd <= sprint
+        ? tAccel
+        : sprint / PM.oppAccel + (s - (sprint * sprint) / (2 * PM.oppAccel)) / sprint;
+      const margin = PM.oppReact + tMove - tBall + forgive;
+      pass *= 1 - 1 / (1 + Math.exp(PM.interceptK * margin));
+    }
+    return pass;
   }
 
   // Зафиксировать пас: адресат бросается на мяч, тренер помнит назначение.
@@ -676,6 +914,8 @@ export class Team {
     this.receiver = pass.mate;
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
+    this.bump('pass');
+    this._passLive = pass.mate; // ждём, дойдёт ли (для статистики точности)
     // Верховой пас летит по баллистике и садится ЗАМЕТНО ДАЛЬШЕ наземной цели,
     // под которую считалась сила. Адресат обязан бежать в реальную точку
     // прилёта, иначе он ждёт там, где мяча не будет: замер 24.07 дал 9 верховых

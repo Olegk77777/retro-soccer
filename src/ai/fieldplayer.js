@@ -221,6 +221,13 @@ export function updateFieldPlayer(p, dt, ball) {
       sprint = r.sprint;
       face = r.face;
       speedCap = r.speedCap;
+    } else if (team.shortRunner === p && team.shortTarget) {
+      // Приход в ноги: показаться накоротке владельцу под прессингом.
+      // Спринтом и лицом к мячу — иначе пас придёт в спину и его не примут
+      const t = team.shortTarget;
+      move = arrive(pos.x, pos.z, t.x, t.z, 1.5);
+      sprint = Math.hypot(t.x - pos.x, t.z - pos.z) > 2;
+      if (!sprint) face = Math.atan2(bp.x - pos.x, bp.z - pos.z);
     } else if (team.runner === p && team.runnerTarget) {
       // Забегание за спину: спринт в зону за линией защиты — владелец
       // увидит рывок и положит мяч на ход (приоритет в choosePass).
@@ -432,10 +439,39 @@ function withBall(p, ball) {
   const canKick = p.kickCooldown <= 0 && distToBall(p, ball) < P.kickRadius && bp.y < P.kickMaxBallY;
   if (canKick && p.ai.decideCd <= 0) {
     p.ai.decideCd = AI.decideInterval;
+    // РЕШЕНИЕ БИТЬ — не «попал в радиус», а качество момента. Прежний код
+    // стрелял при первой же возможности с 28 м, и замер дал 7 ударов за матч,
+    // из них НИ ОДНОГО ближе 11 м: атака гибла на дальнем ударе, а вратарь
+    // спокойно забирал (0 голов за 4 матча). Теперь дальний удар — редкость,
+    // а команда доводит мяч до убойной зоны, где и живёт прострел.
     if (distGoal < AI.shootRange && Math.abs(pos.z) < AI.shootMaxZ) {
-      aiShoot(p, ball, goalX, distGoal);
-      p.ai.dribDir = null;
-      return { x: 0, z: 0 };
+      // Качество момента: 1 в убойной зоне, быстро тает с дистанцией и углом
+      let quality = Math.max(0, Math.min(1,
+        (AI.shootRange - distGoal) / Math.max(1, AI.shootRange - AI.shootBest)));
+      quality *= quality;
+      quality *= 1 - 0.55 * Math.min(1, Math.abs(pos.z) / AI.shootMaxZ);
+      // Защитник на линии удара — момент испорчен, ищем пас
+      let blocked = false;
+      for (const o of team.opponents) {
+        if (o.isKeeper) continue;
+        const op = o.group.position;
+        const ax = (op.x - pos.x) * ((goalX - pos.x) / distGoal) +
+          (op.z - pos.z) * (-pos.z / distGoal);
+        if (ax < 0.5 || ax > distGoal) continue;
+        const perp = Math.abs(-(op.x - pos.x) * (-pos.z / distGoal) +
+          (op.z - pos.z) * ((goalX - pos.x) / distGoal));
+        if (perp < AI.shotBlockWidth) { blocked = true; break; }
+      }
+      if (blocked) quality *= AI.shotBlockedK;
+      // В убойной зоне с чистой линией удар ОБЯЗАТЕЛЕН: вероятностный гейт
+      // иногда «прокатывал» момент из штрафной, и атака вырождалась в
+      // бесконечное перекатывание мяча (замер 26.07: 0 ударов за матч)
+      if (distGoal < AI.shootBest && !blocked) quality = 1;
+      if (Math.random() < quality) {
+        aiShoot(p, ball, goalX, distGoal);
+        p.ai.dribDir = null;
+        return { x: 0, z: 0 };
+      }
     }
     if (aiCross(p, ball, oppD)) {
       p.ai.dribDir = null;
@@ -521,6 +557,7 @@ function aiCross(p, ball, oppD) {
   let power = Math.sqrt((g * dist) / (2 * Math.tan(theta))) * 1.15;
   power = Math.max(14, Math.min(30, power));
   const lift = power * Math.tan(theta);
+  team.bump('cross');
   p.aiKick(ball, { x: dx / dist, z: dz / dist }, power, lift, 0,
     { name: 'kick', ts: 1.2, at: 0.16 }); // навес — с проводкой
   // Замыкающего назначает тренер по точке прилёта (врывание на прилёт)
@@ -600,17 +637,38 @@ function aerialPlay(p, ball, diving = false) {
 // Удар AI: случайная точка створа + шум промаха, растущий с дистанцией.
 // Шум (CONFIG.ai.shotNoise) — главный рычаг против дешёвых голов;
 // в Фазе 3 сюда встанет вероятностная модель (мини-xG).
+// Удар AI. ЦЕЛИТСЯ В УГОЛ МИМО ВРАТАРЯ, а не в случайную точку створа:
+// равномерный прицел давал в основном мячи по центру, которые кипер после
+// переработки берёт все подряд (замер 26.07: 4 удара — 4 сейва, 0 голов за
+// четыре матча). Реальный бьющий выбирает дальний от вратаря угол; шум
+// прицела остаётся главным рычагом «голы не дешевеют».
 function aiShoot(p, ball, goalX, distGoal) {
   const AI = CONFIG.ai;
+  if (p.team) p.team.bump('shot');
   const G = CONFIG.goal;
   const pos = p.group.position;
-  const inner = G.width / 2 - 0.6;
+  const inner = G.width / 2 - 0.5;
+
+  // Дальний от вратаря угол; кипера нет в поле зрения — выбираем сторону,
+  // противоположную своему сносу к бровке (уходим от острого угла)
+  const keeper = p.team ? p.team.match.otherTeam(p.team).keeper : null;
+  const kz = keeper ? keeper.group.position.z : 0;
+  let side = pos.z > kz ? 1 : -1;
+  if (Math.abs(kz) < 0.4) side = Math.random() < 0.5 ? -1 : 1;
+  // Иногда бьём в ближний — иначе вратарь читал бы удар по одной схеме
+  if (Math.random() < AI.shotNearSide) side = -side;
+
+  const aim = inner * (AI.shotCornerMin + (1 - AI.shotCornerMin) * Math.random());
   const noise = AI.shotNoise * (0.5 + distGoal / AI.shootRange);
-  const targetZ = (Math.random() * 2 - 1) * inner + (Math.random() * 2 - 1) * noise;
+  const targetZ = side * aim + (Math.random() * 2 - 1) * noise;
   const dx = goalX - pos.x;
   const dz = targetZ - pos.z;
   const d = Math.hypot(dx, dz) || 1;
   const power = Math.min(AI.shotPowerMax, AI.shotPowerBase + distGoal * AI.shotPowerPerM);
-  const lift = Math.min(7, 1.2 + distGoal * 0.12 + Math.random() * 1.5);
+  // Низом в угол — самый результативный удар в футболе; свечи оставляем редкими
+  const lowShot = Math.random() > AI.shotHighChance;
+  const lift = lowShot
+    ? Math.min(3.5, 0.4 + distGoal * 0.075)
+    : Math.min(7, 1.2 + distGoal * 0.12 + Math.random() * 1.5);
   p.aiKick(ball, { x: dx / d, z: dz / d }, power, lift);
 }

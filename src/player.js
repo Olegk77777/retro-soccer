@@ -418,6 +418,7 @@ export class Player {
     this.tackleFoul = false;
     this.tackleCd = 0;
     this.tackleSpeed = 0;
+    this.runCd = 0;          // кулдаун рывка без мяча (ресёрч 15: 5–6 с)
     this.slideRecover = false;
     this._tackleVictim = null;
     this.group.position.y = 0;
@@ -752,10 +753,14 @@ export class Player {
       }
     } else if (this.diveT > 0) {
       this.diveT -= dt;
-      tilt = (1 - Math.max(0, this.diveT) / DV.time) * DV.tiltMax;
+      // Длительность и время подъёма — свои у полевой ласточки и у броска
+      // вратаря (у кипера они из CONFIG.ai.keeper)
+      const dur = this.diveDur || DV.time;
+      const rec = this.diveRecover != null ? this.diveRecover : DV.recover;
+      tilt = (1 - Math.max(0, this.diveT) / dur) * DV.tiltMax;
       if (this.diveT <= 0) {
-        this.downT = DV.recover;
-        this.downDur = DV.recover;
+        this.downT = rec;
+        this.downDur = rec;
         this.downTiltAmp = DV.tiltMax;
         this._gotUp = false;
       }
@@ -841,7 +846,10 @@ export class Player {
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
     // Кап скорости от мозга: сдерживающий защитник зеркалит темп владельца
     if (opts.speedCap != null) maxSpeed = Math.min(maxSpeed, opts.speedCap);
-    if (this.diveT > 0) maxSpeed = Math.max(maxSpeed, P.aerial.dive.lunge);
+    // В броске скорость ЗАДАЁТСЯ, а не «берётся максимум»: у вратаря она своя
+    // и заметно ниже обычного бега. С Math.max кипер летел в броске 6.4 м/с
+    // вместо положенных 3.4 и накрывал руками весь створ (замер 26.07)
+    if (this.diveT > 0) maxSpeed = this.diveSpeed || P.aerial.dive.lunge;
     if (this.tackleT > 0) {
       const kT = Math.max(0, this.tackleT / P.tackle.time);
       const sTop = this.tackleSpeed || P.tackle.speedMin;
@@ -2420,11 +2428,36 @@ export class Player {
   startDive(dx, dz, contactY = 1.0) {
     const DV = CONFIG.player.aerial.dive;
     this.diveT = DV.time;
+    this.diveDur = DV.time;
+    this.diveSpeed = DV.lunge;
+    this.diveRecover = DV.recover;
     this.diveDir = { x: dx, z: dz };
     this.vel.x = dx * DV.lunge;
     this.vel.z = dz * DV.lunge;
     this.rot = Math.atan2(dx, dz); // корпус — в сторону броска
     this.playOneShot(contactY >= DV.headerY ? 'header' : 'kick', 1.0, 0.05);
+  }
+
+  // Бросок ВРАТАРЯ (ресёрч 16). Отличается от полевой «ласточки» тем, что
+  // длительность, скорость и время подъёма берутся из CONFIG.ai.keeper, а на
+  // верховой мяч кипер ещё и выпрыгивает: верхняя точка дуги ставится ровно
+  // на миг встречи с мячом (та же механика, что у замыкания головой).
+  // dirZ — вдоль линии ворот, dirX — вперёд/назад (обычно 0).
+  startKeeperDive(dx, dz, opts = {}) {
+    const K = CONFIG.ai.keeper;
+    const dur = opts.dur || K.diveTime;
+    this.diveT = dur;
+    this.diveDur = dur;
+    this.diveSpeed = opts.speed || K.diveSpeed;
+    this.diveRecover = opts.recover != null ? opts.recover : K.recover;
+    const l = Math.hypot(dx, dz) || 1;
+    this.diveDir = { x: dx / l, z: dz / l };
+    this.vel.x = this.diveDir.x * this.diveSpeed;
+    this.vel.z = this.diveDir.z * this.diveSpeed;
+    // Корпус разворачивается ЛИЦОМ к мячу (кипер летит боком, а не спиной)
+    if (opts.face != null) this.rot = opts.face;
+    if (opts.lift > 0.05) this.startJump(Math.max(0.06, opts.liftIn || 0.14), opts.lift);
+    this.playOneShot('gk_dive', opts.clipRate || 1.35, 0.12);
   }
 
   // Снос: игрок сбит и лежит dur секунд (клип fallen), потом встаёт.
