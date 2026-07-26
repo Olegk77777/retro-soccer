@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { PACK } from './pack.js';
 import { predictLanding } from './ai/steering.js';
 
 function createBallTexture() {
@@ -29,14 +30,19 @@ function createBallTexture() {
   tex.anisotropy = 2;
   tex.colorSpace = THREE.SRGBColorSpace;
 
-  const img = new Image();
-  img.decoding = 'async';
-  img.onload = () => {
-    ctx.drawImage(img, 0, 0, c.width, c.height);
-    tex.needsUpdate = true;
-  };
-  img.onerror = () => console.warn('Не загрузилась текстура мяча: ./textures/ball/tricolore-98.png');
-  img.src = './textures/ball/tricolore-98.png';
+  // Рисунок мяча — часть атрибутики: его назначает пак (src/pack.js).
+  // null = остаётся классический чёрно-белый мяч, нарисованный выше.
+  const skin = PACK.textures.ball;
+  if (skin) {
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      tex.needsUpdate = true;
+    };
+    img.onerror = () => console.warn(`Не загрузилась текстура мяча: ${skin}`);
+    img.src = skin;
+  }
   return tex;
 }
 

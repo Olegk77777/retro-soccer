@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { PACK } from './pack.js';
 import { Player } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
@@ -170,7 +171,7 @@ export class Match {
     const mcVenue = document.getElementById('mc-venue');
     if (mcHome) mcHome.textContent = teamsData[0].name;
     if (mcAway) mcAway.textContent = teamsData[1].name;
-    if (mcVenue) mcVenue.textContent = CONFIG.match.venue;
+    if (mcVenue) mcVenue.textContent = PACK.venue || CONFIG.match.venue;
     this._teamNames = teamsData.map((t) => t.name);
     this.goalCardTimer = 0;
     this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';

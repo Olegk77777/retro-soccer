@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { PACK } from './pack.js';
 import { buildStadium } from './scene.js';
 import { Ball } from './ball.js';
 import { Match } from './match.js';
@@ -18,18 +19,14 @@ const ball = new Ball(scene, goals);
 const input = new Input();
 const crt = new CRTPipeline(renderer);
 
-// Матч 11×11: команды — файлы данных (правило «данные ≠ код»).
-// Пока JSON не догрузился, кадры идут без матча (доли секунды).
+// Матч 11×11: команды приходят из пака атрибутики (см. src/pack.js).
+// Пак уже загружен к этому моменту — модуль ждёт его на верхнем уровне.
 let match = null;
-Promise.all([
-  fetch('./data/teams/home.json').then((r) => r.json()),
-  fetch('./data/teams/away.json').then((r) => r.json()),
-])
-  .then((teamsData) => {
-    match = new Match(scene, ball, goals, input, teamsData);
-    window.DBG.match = match;
-  })
-  .catch((e) => console.error('Не удалось загрузить команды:', e));
+if (PACK.teams) {
+  match = new Match(scene, ball, goals, input, PACK.teams);
+} else {
+  console.error('Пак без составов: матч не запущен.');
+}
 
 const camera = new THREE.PerspectiveCamera(CONFIG.camera.fov, 16 / 9, 0.5, 400);
 // Сразу ставим камеру на позицию ТВ-оператора (lerp в цикле — только для слежения за мячом)
@@ -254,6 +251,6 @@ function frame() {
 
 // Отладка: ?nocrt в адресе — рендер без CRT-прохода
 const NO_CRT = location.search.includes('nocrt');
-window.DBG = { scene, camera, camLook, ball, input, crt, renderer, goals, CONFIG };
+window.DBG = { scene, camera, camLook, ball, input, crt, renderer, goals, CONFIG, match, PACK };
 
 frame();

@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { PACK } from './pack.js';
 import { GoalSystem } from './goal.js';
 import {
   mastPositions, paintPitchLight, buildFloodlightHalos,
@@ -13,7 +14,9 @@ import {
 const STADIUM_TEXTURES = Object.freeze({
   grass: './textures/stadium/grass-98.png',
   crowd: './textures/stadium/crowd-night-98.png',
-  boards: './textures/stadium/ads-france-98.png',
+  // Щиты — часть атрибутики: их назначает пак (src/pack.js). null = остаются
+  // процедурные щиты с выдуманными марками эпохи, нарисованные ниже на canvas.
+  boards: PACK.textures.boards,
 });
 
 // Один Image на файл: газон нужен и полю, и отбивке, но дважды качать PNG незачем.
@@ -431,12 +434,14 @@ function createBoardTexture() {
   tex.minFilter = THREE.LinearMipmapNearestFilter;
   tex.wrapS = THREE.RepeatWrapping;
   textureClones.set(tex, []);
-  loadTextureImage(STADIUM_TEXTURES.boards)
-    .then((img) => {
-      ctx.drawImage(img, 0, 0, c.width, c.height);
-      markTextureDirty(tex);
-    })
-    .catch((e) => console.warn(e.message));
+  if (STADIUM_TEXTURES.boards) {
+    loadTextureImage(STADIUM_TEXTURES.boards)
+      .then((img) => {
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        markTextureDirty(tex);
+      })
+      .catch((e) => console.warn(e.message));
+  }
   return tex;
 }
 
