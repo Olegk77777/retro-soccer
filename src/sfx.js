@@ -26,6 +26,105 @@ for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
   }, { passive: true });
 }
 
+// ===== Гул трибун (синтез, без единого mp3) =====
+// Стадион звучит как отфильтрованный шум: ровный гул + всплески на моментах.
+// Синтез, а не сэмплы: файлов качать не надо, зацикливать нечего, и звук
+// живой — громкость и тембр ведёт сама игра. Комментатор (ElevenLabs) придёт
+// отдельно, он про голос, а не про фон.
+
+let crowd = null;
+
+// Розовый шум (спад ~3 дБ/октаву) — ближе к голосу толпы, чем белый
+function makeNoiseBuffer(c, seconds = 4) {
+  const len = Math.floor(c.sampleRate * seconds);
+  const buf = c.createBuffer(1, len, c.sampleRate);
+  const d = buf.getChannelData(0);
+  let b0 = 0, b1 = 0, b2 = 0;
+  for (let i = 0; i < len; i++) {
+    const w = Math.random() * 2 - 1;
+    b0 = 0.99765 * b0 + w * 0.0990460;
+    b1 = 0.96300 * b1 + w * 0.2965164;
+    b2 = 0.57000 * b2 + w * 1.0526913;
+    d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.22;
+  }
+  // Сшиваем края кроссфейдом, иначе на стыке петли слышен щелчок
+  const fade = Math.floor(c.sampleRate * 0.05);
+  for (let i = 0; i < fade; i++) {
+    const k = i / fade;
+    d[i] = d[i] * k + d[len - fade + i] * (1 - k);
+  }
+  return buf;
+}
+
+// Заводится сама при первом же звуке: до жеста пользователя браузер молчит
+function ensureCrowd() {
+  const c = getCtx();
+  if (!c || c.state !== 'running') return null;
+  if (crowd) return crowd;
+
+  const src = c.createBufferSource();
+  src.buffer = makeNoiseBuffer(c);
+  src.loop = true;
+
+  // Тембр: далёкая трибуна — почти без верха
+  const lp = c.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 760;
+  lp.Q.value = 0.6;
+  const hp = c.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 120;
+
+  const gain = c.createGain();
+  gain.gain.value = 0.055;   // ровный фон
+
+  // Медленное «дыхание» зала: гул никогда не стоит на месте
+  const lfo = c.createOscillator();
+  lfo.frequency.value = 0.08;
+  const lfoDepth = c.createGain();
+  lfoDepth.gain.value = 0.016;
+  lfo.connect(lfoDepth);
+  lfoDepth.connect(gain.gain);
+
+  src.connect(hp);
+  hp.connect(lp);
+  lp.connect(gain);
+  gain.connect(c.destination);
+  src.start();
+  lfo.start();
+
+  crowd = { ctx: c, gain, lp, base: 0.055 };
+  return crowd;
+}
+
+// Напряжение эпизода 0..1: атака у ворот — зал гудит громче и «ближе»
+export function setCrowdIntensity(x) {
+  const cr = ensureCrowd();
+  if (!cr) return;
+  const k = Math.max(0, Math.min(1, x));
+  const t = cr.ctx.currentTime;
+  cr.gain.gain.setTargetAtTime(cr.base * (1 + k * 1.6), t, 0.6);
+  cr.lp.frequency.setTargetAtTime(760 + k * 900, t, 0.8);
+}
+
+// Взрыв трибун: гол (strength 1), опасный момент (0.4–0.6).
+// Резкая атака и долгий спад — так и ревёт стадион.
+export function crowdCheer(strength = 1) {
+  const cr = ensureCrowd();
+  if (!cr) return;
+  const s = Math.max(0.2, Math.min(1, strength));
+  const t = cr.ctx.currentTime;
+  const peak = cr.base * (1 + s * 7);
+  cr.gain.gain.cancelScheduledValues(t);
+  cr.gain.gain.setValueAtTime(cr.gain.gain.value, t);
+  cr.gain.gain.linearRampToValueAtTime(peak, t + 0.18 + (1 - s) * 0.4);
+  cr.gain.gain.setTargetAtTime(cr.base, t + 0.5 + s * 1.5, 1.2 + s * 2.5);
+  cr.lp.frequency.cancelScheduledValues(t);
+  cr.lp.frequency.setValueAtTime(cr.lp.frequency.value, t);
+  cr.lp.frequency.linearRampToValueAtTime(760 + s * 2400, t + 0.2); // рёв ярче гула
+  cr.lp.frequency.setTargetAtTime(760, t + 1.2, 2.2);
+}
+
 // Свисток длиной duration сек. Возвращает true, если реально зазвучал.
 export function playWhistle(duration = 0.8) {
   const c = getCtx();

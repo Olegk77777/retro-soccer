@@ -10,7 +10,7 @@ import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace } from './ai/steering.js';
-import { playWhistle } from './sfx.js';
+import { playWhistle, setCrowdIntensity, crowdCheer } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
 
@@ -72,6 +72,7 @@ function createControlledMarker() {
 export class Match {
   // teamsData: [home.json, away.json]. Человек — команда 0, атакует +X.
   constructor(scene, ball, goals, input, teamsData) {
+    this.scene = scene;   // нужна для атмосферы: вспышки трибун реагируют на гол
     this.ball = ball;
     this.goals = goals;
     this.input = input;
@@ -605,6 +606,16 @@ export class Match {
     // Бригада арбитров живёт своей жизнью — на паузах тоже (они не замирают,
     // пока мяч в сетке), но в повторе стоят: там кадром правит запись
     this.officials.update(dt, aiBall, this.teams);
+
+    // Гул трибун ведёт САМА игра: чем ближе мяч к воротам и чем быстрее
+    // эпизод, тем громче и «ближе» зал. Ровный фон — это радио, а не стадион.
+    if (!paused) {
+      const F = CONFIG.field;
+      const bx = Math.abs(this.ball.mesh.position.x) / (F.length / 2);
+      const near = Math.max(0, (bx - CONFIG.match.crowdFrom) / (1 - CONFIG.match.crowdFrom));
+      const tempo = Math.min(1, this.ball.vel.length() / 26);
+      setCrowdIntensity(Math.min(1, near * 0.85 + tempo * 0.3));
+    }
 
     // Кольцевая запись для повтора: пишем позы уже ПОСЛЕ движения всех тел,
     // вместе с тем, чья была атака — по ней потом отматываем комбинацию
@@ -1458,6 +1469,10 @@ export class Match {
     for (const p of this._all) p.isToucher = false;
     this._releaseKeeperHolds();
     this._scorerIdx = scorerIdx;      // кого отматывать в повторе
+    // Стадион взрывается: рёв трибун, шквал фотовспышек, сектора светлеют
+    crowdCheer(1);
+    const flashes = this.scene && this.scene.userData.flashes;
+    if (flashes) flashes.cheer();
     this.hud.flash.textContent = 'ГОЛ!';
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;

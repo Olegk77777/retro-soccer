@@ -154,6 +154,9 @@ export class CameraFlashes {
   constructor(scene, stands) {
     const A = CONFIG.atmosphere.flashes;
     this.cfg = A;
+    this.stands = stands || [];
+    this.burst = 0;      // всплеск после гола: щёлкают все разом
+    this.mood = 0;       // подсветка секторов: трибуна «встаёт» на голе
     this.spots = collectStandSpots(stands, 600);
 
     const n = Math.min(A.count, Math.max(1, this.spots.length));
@@ -200,7 +203,14 @@ export class CameraFlashes {
 
   _nextPause(n) {
     const A = this.cfg;
-    return (n / Math.max(0.1, A.rate)) * (0.35 + Math.random() * 1.3);
+    const rate = A.rate * (1 + this.burst * (A.burstRate - 1));
+    return (n / Math.max(0.1, rate)) * (0.35 + Math.random() * 1.3);
+  }
+
+  // Гол: трибуна вскакивает — щёлкают все разом, сектора светлеют
+  cheer() {
+    this.burst = 1;
+    this.mood = 1;
   }
 
   _place(i) {
@@ -215,6 +225,21 @@ export class CameraFlashes {
   update(dt) {
     if (!this.count) return;
     const A = this.cfg;
+
+    // Реакция трибун после гола: всплеск щелчков и подсветка секторов
+    // спадают за несколько секунд — зал успокаивается не мгновенно
+    if (this.burst > 0) this.burst = Math.max(0, this.burst - dt / A.burstTime);
+    if (this.mood > 0) {
+      this.mood = Math.max(0, this.mood - dt / A.burstTime);
+      const lift = 1 + this.mood * A.moodLift;
+      for (const s of this.stands) {
+        const mats = Array.isArray(s.material) ? s.material : [s.material];
+        for (const m of mats) {
+          if (m.map) m.color.setScalar(lift); // толпа светлеет, торцы не трогаем
+        }
+      }
+    }
+
     const alpha = this.points.geometry.attributes.aAlpha;
     for (let i = 0; i < this.count; i++) {
       if (this.life[i] > 0) {
