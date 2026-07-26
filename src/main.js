@@ -168,8 +168,10 @@ function frame() {
 
   input.update(dt);
   if (match) match.update(dt); // 22 игрока: человек + AI-мозги
-  const event = ball.update(dt);
-  goals.update(dt);
+  // На повторе физика молчит: тела и мяч расставляет запись (src/replay.js)
+  const replaying = !!(match && match.state === 'replay');
+  const event = replaying ? null : ball.update(dt);
+  if (!replaying) goals.update(dt);
   // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
   if (scene.userData.shadows) scene.userData.shadows.update();
   if (scene.userData.flashes) scene.userData.flashes.update(dt);
@@ -223,8 +225,14 @@ function frame() {
     C.distance - C.farApproach * far01 - C.attackApproach * atk01,
   );
   camLookTarget.set(fx * 0.8, C.lookHeight, fz * C.followZ);
+  const rc = match && match.replay && match.replay.cam;
   const ic = match && match.introCam;
-  if (ic) {
+  if (rc) {
+    // Повтор ведёт своя камера — низкая, у бровки. Она уже плавная сама,
+    // поэтому обычное сглаживание тут только смазало бы кадр.
+    camera.position.copy(rc.pos);
+    camLook.copy(rc.look);
+  } else if (ic) {
     // ТВ-заставка: камеру ведёт параметрический путь интро; на выходе
     // (mix 1→0) кадр плавно перетекает в живую игровую ТВ-камеру
     const k = smooth01(ic.mix);

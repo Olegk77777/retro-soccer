@@ -101,6 +101,34 @@
       background: rgba(0,0,0,0.4); border-left: 1px solid rgba(255,255,255,0.25);
     }
 
+    /* Повтор: плашка с красным «глазом» записи и полосы видеомагнитофона */
+    #replay-tag {
+      position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 9px;
+      font-family: var(--tv-font); font-size: 15px; letter-spacing: 4px;
+      color: #fff; padding: 3px 13px 2px;
+      background: linear-gradient(180deg, rgba(43,53,102,0.92), rgba(8,12,34,0.92));
+      border: 1px solid rgba(255,255,255,0.45);
+      text-shadow: 1px 1px 0 #000; pointer-events: none; z-index: 10;
+    }
+    #replay-tag.show { display: flex; }
+    #replay-tag::before {
+      content: ''; width: 10px; height: 10px; border-radius: 50%;
+      background: #e0332a; box-shadow: 0 0 7px rgba(224,51,42,0.9);
+      animation: rec-blink 1s steps(1, end) infinite;
+    }
+    @keyframes rec-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0.15; } }
+    /* Тонкие бегущие полосы поверх кадра — «лента прокручивается» */
+    body.replaying::after {
+      content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9;
+      background: repeating-linear-gradient(
+        180deg,
+        rgba(255,255,255,0.05) 0px, rgba(255,255,255,0.05) 1px,
+        rgba(0,0,0,0) 1px, rgba(0,0,0,0) 5px);
+      animation: tape-roll 1.4s linear infinite;
+    }
+    @keyframes tape-roll { from { background-position-y: 0; } to { background-position-y: 40px; } }
+
     /* Заставка перед матчем: кто с кем, где и когда — как титр в начале эфира */
     #matchcard {
       position: fixed; left: 50%; bottom: 12%;
@@ -278,6 +306,7 @@
   <div id="scoreboard"><span class="sb-mark" id="sb-home-mark"></span><span class="sb-team" id="sb-home">КРА</span><span id="sb-score">0:0</span><span class="sb-team" id="sb-away">СИН</span><span class="sb-mark" id="sb-away-mark"></span><span id="sb-time">0'</span></div>
   <div id="goal-flash">ГОЛ!</div>
   <div id="goal-card"><span class="gc-mark" id="gc-mark"></span><span class="gc-team" id="gc-team"></span><span class="gc-min" id="gc-min"></span></div>
+  <div id="replay-tag">ПОВТОР</div>
   <div id="matchcard">
     <div id="mc-teams">
       <span class="mc-mark" id="mc-home-mark"></span><span id="mc-home"></span><span class="mc-dash">—</span><span id="mc-away"></span><span class="mc-mark" id="mc-away-mark"></span>

@@ -11,6 +11,7 @@ import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace } from './ai/steering.js';
 import { playWhistle } from './sfx.js';
+import { Replay } from './replay.js';
 
 // Плавная кривая 0..1 (smoothstep): кино-движение камеры интро без рывков
 function smooth01(t) {
@@ -169,6 +170,10 @@ export class Match {
     for (const p of this.humanTeam.players) {
       p.passAssist = (player, type, power) => this.resolvePass(player, type, power);
     }
+
+    // Повтор гола: кольцевая запись поз всех тел, включается после гола
+    this.replay = new Replay(this._all, ball);
+    this.replayTag = document.getElementById('replay-tag');
 
     this.kickoff(0);
     this.startIntro(); // премьера матча — ТВ-заставка с крупного плана мяча
@@ -471,6 +476,20 @@ export class Match {
       return;
     }
 
+    // Повтор гола: игра стоит, тела расставляет запись. Любая кнопка
+    // действия — пропустить (как в трансляции переключают обратно в эфир).
+    if (this.state === 'replay') {
+      const skip =
+        this.input.pass.consume() !== null ||
+        this.input.through.consume() !== null ||
+        this.input.shot.consume() !== null ||
+        !!this.input.consumeCross() ||
+        !!this.input.consumeSwipe();
+      if (skip || !this.replay.update(dt)) this.endReplay();
+      this.updateHUD();
+      return;
+    }
+
     // Игровые часы: 90 минут сжаты в realMinutes реальных.
     // На стандартах время идёт — как в настоящей трансляции
     if (this.state === 'kickoff' || this.state === 'play' || this.state === 'restart') {
@@ -478,10 +497,13 @@ export class Match {
       if (this.clock >= M.gameMinutes * 60) this.fullTime();
     }
 
-    // Пауза после гола: дать сетке и повтору «подышать», потом — с центра
+    // Пауза после гола: мяч и волна сетки живут в кадре, потом — ПОВТОР,
+    // и только после него розыгрыш с центра
     if (this.state === 'goalpause' && this.stateTimer > CONFIG.goal.resetDelay) {
-      this.goals.reset();
-      this.kickoff(this.kickoffTeam);
+      if (!this.startReplay()) {
+        this.goals.reset();
+        this.kickoff(this.kickoffTeam);
+      }
     }
     // Финальный свисток: пауза и новый матч
     if (this.state === 'fulltime' && this.stateTimer > M.fulltimePause) {
@@ -565,6 +587,13 @@ export class Match {
       const cp = this.controlled.group.position;
       this.controlledMarker.position.x = cp.x;
       this.controlledMarker.position.z = cp.z;
+    }
+
+    // Кольцевая запись для повтора: пишем позы уже ПОСЛЕ движения всех тел,
+    // вместе с тем, чья была атака — по ней потом отматываем комбинацию
+    if (!paused) {
+      const owner = this.possession ? this.teams.indexOf(this.possession) : -1;
+      this.replay.record(dt, owner);
     }
 
     this.updateHUD();
@@ -1411,6 +1440,7 @@ export class Match {
     this.toucher = null;
     for (const p of this._all) p.isToucher = false;
     this._releaseKeeperHolds();
+    this._scorerIdx = scorerIdx;      // кого отматывать в повторе
     this.hud.flash.textContent = 'ГОЛ!';
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;
@@ -1424,6 +1454,29 @@ export class Match {
       this.hud.card.classList.add('show');
       this.goalCardTimer = CONFIG.match.goalCardTime;
     }
+  }
+
+  // ===== Повтор гола (26.07.2026) =====
+  // Показываем всю комбинацию: запись отматывается до момента, когда мяч
+  // забрала забившая команда. Не набралось истории — молча пропускаем.
+  startReplay() {
+    if (!this.replay || !this.replay.start(this._scorerIdx)) return false;
+    this.state = 'replay';
+    this.stateTimer = 0;
+    this.goals.reset();               // сетка перестаёт колыхаться от «того» мяча
+    this.controlledMarker.visible = false; // курсор игрока — не эфирная графика
+    if (this.replayTag) this.replayTag.classList.add('show');
+    document.body.classList.add('replaying'); // полосы видеомагнитофона
+    return true;
+  }
+
+  endReplay() {
+    this.replay.stop();
+    if (this.replayTag) this.replayTag.classList.remove('show');
+    document.body.classList.remove('replaying');
+    this.controlledMarker.visible = true;
+    this.goals.reset();
+    this.kickoff(this.kickoffTeam);
   }
 
   fullTime() {

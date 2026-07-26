@@ -273,6 +273,36 @@ export class Player {
     this.oneShotUntil = endAt;
   }
 
+  // --- Поза для повтора (src/replay.js) ---
+  // Повтор не пересчитывает игру: он расставляет тела и вручную ставит кадр
+  // анимации. Клип не «играет», а замирает на записанном времени — поэтому
+  // замедление остаётся замедлением, а не ускоренной перемоткой ног.
+  setReplayPose(clipName, clipTime) {
+    if (!this.mixer) return;
+    const a = this.actions[clipName];
+    if (!a) return;
+    if (this.currentAction && this.currentAction !== a) {
+      this.currentAction.stop();
+    }
+    a.enabled = true;
+    a.setEffectiveWeight(1);
+    a.paused = true;
+    a.play();
+    a.time = clipTime;
+    this.currentAction = a;
+    this.currentName = clipName;
+    this.mixer.update(0); // применить позу без продвижения времени
+  }
+
+  // Выход из повтора: клипы снова играют сами
+  endReplayPose() {
+    if (!this.mixer) return;
+    for (const name in this.actions) this.actions[name].paused = false;
+    this.oneShot = null;
+    this.oneShotUntil = null;
+    this.currentName = null; // следующий кадр сам выберет бег/idle
+  }
+
   reset(x = -3, z = 0, rot = Math.PI / 2) {
     this.group.position.set(x, 0, z);
     this.vel.set(0, 0, 0);
