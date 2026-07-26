@@ -5,6 +5,15 @@
 import { CONFIG } from '../config.js';
 
 // Полный ход к точке: единичный вектор на цель
+// Вид касания по выбору тренера: он уже различает пас в ноги и пас на ход
+// (choosePass → kind), а высокий lift означает наброс. Анимация обязана это
+// показывать — иначе все передачи выглядят одним движением.
+export function passStrikeKind(pass) {
+  if (!pass) return 'pass';
+  if (pass.lift > 1) return 'cross';
+  return pass.kind === 'through' ? 'through' : 'pass';
+}
+
 export function seek(px, pz, tx, tz) {
   const dx = tx - px;
   const dz = tz - pz;

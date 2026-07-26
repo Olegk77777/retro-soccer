@@ -180,6 +180,14 @@ export const CONFIG = {
         { name: 'back_slow', from: 'run_back', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
         { name: 'side_l_slow', from: 'strafe_l', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
         { name: 'side_r_slow', from: 'strafe_r', leg: 0.6, arm: 0.5, spine: 0.55, root: 0.55, stretch: 1.9 },
+        // Вратарь ходит по линии приставным шагом в НИЗКОЙ стойке — это своя
+        // походка, а не полевой strafe. Клипы gk_step_* добавлены в модель
+        // 26.07.2026; направление замерено по опорной стопе, а не по имени
+        // файла (в паке они назывались наоборот).
+        { name: 'gk_side_l', from: 'gk_step_l', leg: 1.0, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
+        { name: 'gk_side_r', from: 'gk_step_r', leg: 1.0, arm: 1.0, spine: 1.0, root: 1.0, stretch: 1.25 },
+        { name: 'gk_side_l_slow', from: 'gk_step_l', leg: 0.6, arm: 0.6, spine: 0.7, root: 0.6, stretch: 1.85 },
+        { name: 'gk_side_r_slow', from: 'gk_step_r', leg: 0.6, arm: 0.6, spine: 0.7, root: 0.6, stretch: 1.85 },
       ],
       // Лестницы по направлениям. Порядок обязателен: от медленного к быстрому,
       // первый элемент 'idle' подменяется стойкой вратаря, если игрок в раме.
@@ -187,6 +195,10 @@ export const CONFIG = {
       ladderBack: ['idle', 'back_slow', 'back'],
       ladderSideL: ['idle', 'side_l_slow', 'side_l'],
       ladderSideR: ['idle', 'side_r_slow', 'side_r'],
+      // Вратарь вдоль линии ходит своим приставным шагом (низкая стойка).
+      // Вперёд/назад (выход из ворот и обратно) он бегает обычными ступенями.
+      ladderSideLKeeper: ['idle', 'gk_side_l_slow', 'gk_side_l'],
+      ladderSideRKeeper: ['idle', 'gk_side_r_slow', 'gk_side_r'],
 
       // Выбор направления с гистерезисом: без него на грани (движение под ~60°
       // к взгляду) режим дребезжал, и в позе одновременно висели шаг влево и
@@ -240,8 +252,9 @@ export const CONFIG = {
       // `kick_run` и `penalty` — лежали в модели и не проигрывались НИ РАЗУ.
       //
       // Кадры контакта вымерены по риггу (пик скорости носка):
-      //   kick     — 0.131 с (длина 0.333), ЛЕВАЯ
-      //   kick_run — 0.262 с (длина 0.767), ПРАВАЯ, с шагом в мяч
+      //   kick     — 0.131 с (длина 0.333), ЛЕВАЯ, компактный тычок
+      //   kick_r   — 0.467 с (длина 0.533), ПРАВАЯ, с места (добавлен 26.07)
+      //   kick_run — 0.262 с (длина 0.767), ПРАВАЯ, с шагом в мяч на бегу
       //   penalty  — 0.467 с (длина 0.933), ПРАВАЯ, с места, полный замах
       // `at` ставится НА 2–3 КАДРА РАНЬШЕ контакта: короткий замах читается как
       // удар, а не как судорога. `end` обрезает проводку, чтобы любое касание
@@ -250,11 +263,13 @@ export const CONFIG = {
         // Пас в ноги: коротко и резко
         pass: [
           { clip: 'kick', foot: 'L', rate: 1.7, at: 0.05, end: 0.30 },
-          { clip: 'kick_run', foot: 'R', rate: 2.0, at: 0.17, end: 0.46 },
+          { clip: 'kick_r', foot: 'R', rate: 1.5, at: 0.38, end: 0.53 },
         ],
-        // Пас на ход: чуть больше проводки
+        // Пас на ход: чуть больше проводки. У правой ноги два варианта —
+        // с места и с шагом в мяч, чтобы два паса подряд не были копией
         through: [
           { clip: 'kick', foot: 'L', rate: 1.5, at: 0.04, end: 0.32 },
+          { clip: 'kick_r', foot: 'R', rate: 1.3, at: 0.36, end: 0.53 },
           { clip: 'kick_run', foot: 'R', rate: 1.8, at: 0.16, end: 0.50 },
         ],
         // Навес: широкий мах под мяч
@@ -265,7 +280,7 @@ export const CONFIG = {
         // Тычок носком «в касание»: почти без замаха
         toe: [
           { clip: 'kick', foot: 'L', rate: 2.2, at: 0.09, end: 0.28 },
-          { clip: 'kick_run', foot: 'R', rate: 2.5, at: 0.21, end: 0.42 },
+          { clip: 'kick_r', foot: 'R', rate: 2.1, at: 0.41, end: 0.53 },
         ],
         // Удар подъёмом на скорости
         instep: [
@@ -275,6 +290,7 @@ export const CONFIG = {
         // Щёчка с места: прицельный, читаемый замах
         side: [
           { clip: 'kick', foot: 'L', rate: 1.25, at: 0.03, end: 0.33 },
+          { clip: 'kick_r', foot: 'R', rate: 1.15, at: 0.34, end: 0.53 },
           { clip: 'penalty', foot: 'R', rate: 1.6, at: 0.33, end: 0.70 },
         ],
         // Стандарты (аут-удар, от ворот, штрафной): игрок стоит, время есть —

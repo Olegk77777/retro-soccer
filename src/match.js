@@ -10,7 +10,7 @@ import { Player, setLookTarget } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
-import { distToBall, freeSpace, passPower } from './ai/steering.js';
+import { distToBall, freeSpace, passPower, passStrikeKind } from './ai/steering.js';
 import { playWhistle, setCrowdIntensity, crowdCheer } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
@@ -575,7 +575,7 @@ export class Match {
         const st = kt.players[9];
         const pass = kt.choosePass(st, this.ball);
         if (pass) {
-          st.aiKick(this.ball, pass.dir, pass.power, pass.lift);
+          st.aiKick(this.ball, pass.dir, pass.power, pass.lift, 0, passStrikeKind(pass));
           kt.commitPass(pass, st);
         } else {
           st.aiKick(this.ball, { x: -kt.side * 0.5, z: 0.86 }, 12, 0.5);
@@ -1088,12 +1088,7 @@ export class Match {
     // (иначе играет хвост с шагами — «кидает невидимый мяч») и продолжаем игру
     if (r.phase === 'follow') {
       if (r.t >= R.throwIn.followTime) {
-        const taker = r.taker;
-        if (taker.oneShot) {
-          taker.oneShot.fadeOut(0.15);
-          taker.oneShot = null;
-          taker.currentName = null; // следующий кадр выберет run/idle
-        }
+        r.taker.cancelOneShot(); // хвост клипа с шагами — «кидает невидимый мяч»
         this._finishRestart();
       }
       return;

@@ -480,8 +480,13 @@ export class Player {
       next = 'back';
     }
     this.locoMode = next;
+    // Вратарь вдоль линии ходит своим приставным шагом в низкой стойке
+    const gk = this.isKeeper && L.gk_side_l;
     const LADDER = {
-      fwd: A.ladder, back: A.ladderBack, sideL: A.ladderSideL, sideR: A.ladderSideR,
+      fwd: A.ladder,
+      back: A.ladderBack,
+      sideL: gk ? A.ladderSideLKeeper : A.ladderSideL,
+      sideR: gk ? A.ladderSideRKeeper : A.ladderSideR,
     };
     const rungs = (LADDER[next] || A.ladder).map((n) => (n === 'idle' ? bottom : n));
     const avail = rungs.filter((n) => L[n]);
@@ -640,6 +645,18 @@ export class Player {
     _poseEuler.set(pitch, yaw, roll, 'YXZ');
     _poseQuat.setFromEuler(_poseEuler);
     bone.quaternion.multiply(_poseQuat);
+  }
+
+  // Досрочно погасить одноразовый клип (вбрасывание доиграло, вратарь выпустил
+  // мяч). Гасим ЧЕРЕЗ менеджер весов: если обнулить `oneShot` снаружи, его вес
+  // останется висеть, а шаговые ступени начнут подниматься независимо —
+  // суммарный вес просядет ниже единицы, и three.js подмешает позу покоя.
+  cancelOneShot() {
+    if (!this.oneShot) return;
+    this.fadingOneShot = this.oneShot;
+    this.oneShot = null;
+    this.oneShotUntil = null;
+    this.currentName = null; // следующий кадр сам выберет бег/стойку
   }
 
   // Клип касания по ВИДУ действия и по бьющей ноге.

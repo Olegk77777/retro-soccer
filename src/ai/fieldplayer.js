@@ -5,7 +5,7 @@
 // Решения — здесь, само движение исполняет player.aiUpdate («ноги»).
 
 import { CONFIG } from '../config.js';
-import { arrive, seek, pursuitBall, separation, distToBall, freeSpace, predictLanding } from './steering.js';
+import { arrive, seek, pursuitBall, separation, distToBall, freeSpace, predictLanding, passStrikeKind } from './steering.js';
 
 export function updateFieldPlayer(p, dt, ball) {
   const AI = CONFIG.ai;
@@ -522,7 +522,7 @@ function withBall(p, ball) {
       return { x: 0, z: 0 };
     }
     if (pass && (oppD < AI.passPressure || Math.random() < AI.passUrge)) {
-      p.aiKick(ball, pass.dir, pass.power, pass.lift);
+      p.aiKick(ball, pass.dir, pass.power, pass.lift, 0, passStrikeKind(pass));
       team.commitPass(pass, p); // короткий пас под прессингом → стеночка
       p.ai.dribDir = null;
       return { x: 0, z: 0 };
