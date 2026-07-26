@@ -88,7 +88,9 @@ function isScreened(p, ball, match, K) {
 // удар в живот. Считаем классическую точку наибольшего сближения двух тел
 // (tca) по относительной скорости и играем мяч ровно там.
 // Возвращает { dist, rel, y, t } или null.
-function sweptContact(p, ball, dt, reach, maxY) {
+// reachAt — функция высоты мяча: тянуться вверх дороже, чем вбок, а пока идёт
+// время реакции руки вообще не работают (играет только корпус).
+function sweptContact(p, ball, dt, reachAt, maxY) {
   const bp = ball.mesh.position;
   const kp = p.group.position;
   const rx = bp.x - kp.x;
@@ -102,12 +104,13 @@ function sweptContact(p, ball, dt, reach, maxY) {
   const cx = rx + vx * tca;
   const cz = rz + vz * tca;
   const d = Math.hypot(cx, cz);
-  if (d >= reach) return null;
   // Высота рук: стоя кипер играет от газона до вытянутых рук, в прыжке
   // (group.position.y > 0) зона поднимается вместе с ним
   const lift = p.group.position.y || 0;
   const by = bp.y + ball.vel.y * tca;
   if (by > maxY + lift || by < -0.05) return null;
+  const reach = reachAt(by - lift);
+  if (d >= reach) return null;
   return { dist: d, rel: d / reach, y: by, t: tca };
 }
 
@@ -197,6 +200,9 @@ function resolveContact(p, ball, match, gk, ctx) {
   ball.afterTouch = 0;
   p.kickCooldown = Math.max(p.kickCooldown, K.catchCooldown);
   if (p.diveT <= 0) p.playOneShot('gk_dive', 1.5, 0.25);
+  // Удачно отбил — встаёт быстрее: лежать 0.8 с после чистого отбоя значит
+  // подарить добивание (константа recoverHold существовала, но не читалась)
+  if (good && p.downT > 0) p.downT = Math.min(p.downT, K.recoverHold);
   team.bump(good ? 'parry' : 'loose');
   return good ? 'parry' : 'loose';
 }
@@ -278,8 +284,16 @@ export function updateKeeper(p, dt, ball) {
     match.state !== 'restart';
   if (canTouch) {
     const diving = p.diveT > 0;
-    const reach = K.handReach + (diving ? K.diveHandBonus : 0); // в броске руки вытянуты
-    const ctx = sweptContact(p, ball, dt, reach, K.handleMaxY);
+    // Зона контакта — не цилиндр в полный рост. Пока не истекла реакция,
+    // играет только КОРПУС; выше метра боковая досягаемость тает; стоя выше
+    // standMaxY мяч не берётся вовсе — за верхними углами надо прыгать
+    const reacted = gk.reactLeft <= 0;
+    const base = diving ? K.handReach + K.diveHandBonus
+      : (reacted ? K.handReach : K.bodyReach);
+    const reachAt = (y) => base * Math.max(0.25,
+      1 - K.reachHighCost * Math.max(0, y - 1.0));
+    const maxY = diving || p.jumpT > 0 ? K.handleMaxY : K.standMaxY;
+    const ctx = sweptContact(p, ball, dt, reachAt, maxY);
     if (ctx) {
       // Мяч под контролем СВОЕГО полевого — вратарь его не отнимает
       const owner = match.toucher;
@@ -335,7 +349,11 @@ export function updateKeeper(p, dt, ball) {
   // ---- Дом: дуга вратаря ----
   const t = homeSpot(p, ball, K);
   const ballNear = Math.hypot(bp.x - goalX, bp.z) < K.setDist;
-  const cap = shot || ballNear ? K.setSpeed : K.stepSpeed;
+  let cap = shot || ballNear ? K.setSpeed : K.stepSpeed;
+  // …но если кипер ЗАМЕТНО не на своей точке (сбило рикошетом, вернулся с
+  // выхода, мяч резко пошёл к воротам с 40 м), он возвращается полным ходом.
+  // «Стойка готовности» 2.6 м/с посреди дороги к линии — это гол в пустые
+  if (Math.hypot(t.x - pos.x, t.z - pos.z) > K.recoverGap) cap = K.stepSpeed;
   const move = arrive(pos.x, pos.z, t.x, t.z, 2.0);
   p.aiUpdate(dt, move, {
     face: Math.atan2(bp.x - pos.x, bp.z - pos.z),
@@ -359,7 +377,7 @@ function readShot(p, ball, gk, dt, match, K, G) {
   const onTarget = cross &&
     Math.abs(cross.z) < (G.width / 2) * panic &&
     cross.y < G.height * panic &&
-    cross.speed > 4;
+    cross.speed > K.onTargetSpeed;
   if (!onTarget) {
     if (gk.reactLeft > 0) gk.reactLeft -= dt;
     gk.diving = false;
@@ -387,12 +405,23 @@ function readShot(p, ball, gk, dt, match, K, G) {
   }
   if (gk.reactLeft > 0) gk.reactLeft -= dt;
 
+  // Решение принимается по СВОЕЙ ПЛОСКОСТИ, а не по линии ворот. Вратарь стоит
+  // в нескольких метрах впереди, и мяч проходит мимо него РАНЬШЕ и в ДРУГОЙ
+  // точке: на типовых траекториях расхождение по z доходило до 2.3 м, по
+  // времени — до 0.21 с (почти всё время реакции), по высоте — до двух метров.
+  // Из-за этого часть мячей проходила просто над вратарём, а бросок стартовал
+  // тогда, когда мяч уже был позади. Линия ворот остаётся только для ответа
+  // «летит ли вообще в створ».
+  const kp = p.group.position;
+  const own = predictGoalPlane(ball, kp.x, 1.8, Math.sign(p.team.ownGoalX));
+  const at = own || cross;
   return {
-    z: cross.z + gk.readErrZ,
-    y: Math.max(CONFIG.ball.radius, cross.y + gk.readErrY),
-    trueZ: cross.z,
-    t: cross.t,
-    speed: cross.speed,
+    z: at.z + gk.readErrZ,
+    y: Math.max(CONFIG.ball.radius, at.y + gk.readErrY),
+    trueZ: at.z,
+    t: at.t,
+    speed: at.speed,
+    goalZ: cross.z,
   };
 }
 
@@ -403,10 +432,15 @@ function decideSave(p, ball, gk, shot, K, G) {
   const dz = shot.z - pos.z;
   const need = Math.abs(dz);
   // Переступать можно лишь чуть-чуть от точки, где кипер стоял в момент
-  // удара: бросок идёт ИЗ СТОЙКИ, а не после полутора метров разбега
+  // удара: бросок идёт ИЗ СТОЙКИ, а не после полутора метров разбега.
+  // Но «чуть-чуть» — это БЮДЖЕТ ПО ВРЕМЕНИ, а не фиксированные полметра:
+  // ограничение писалось под удар в упор, а применялось и к мячу, летящему
+  // полторы секунды. С 30 м вратарь честно успевает пройти 2.5 м, и без этого
+  // почти треть дальних мячей уходила в ветку «безнадёжно, не бросаюсь»
   const base = gk.setZ != null ? gk.setZ : pos.z;
+  const budget = Math.max(K.setStepMax, K.setSpeed * Math.max(0, shot.t - K.react));
   const step = {
-    step: Math.max(base - K.setStepMax, Math.min(base + K.setStepMax, shot.z)),
+    step: Math.max(base - budget, Math.min(base + budget, shot.z)),
   };
 
   // Верховой мяч съедает боковую дальность: тянуться вверх и вбок
@@ -422,7 +456,7 @@ function decideSave(p, ball, gk, shot, K, G) {
   // Это и есть «сейв на месте»: лучший сейв тот, что не выглядит сейвом.
   const stepRoom = Math.abs(step.step - pos.z); // остаток разрешённого шага
   const stepSpan = Math.min(stepRoom, K.setSpeed * Math.max(0, shot.t - 0.05));
-  if (need <= stepSpan + K.handReach * 0.30) return step;
+  if (need <= stepSpan + K.standReach * 0.5) return step;
 
   const spanFull = K.diveSpeed * K.diveTime * highK;
   const travel = Math.max(0, need - K.handReach);
@@ -435,7 +469,13 @@ function decideSave(p, ball, gk, shot, K, G) {
   // безнадёжный полёт в угол всё равно надо ИЗОБРАЗИТЬ, иначе кипер стоит
   // столбом при голе, и это выглядит как поломка, а не как красивый гол
   if (need > K.handReach + spanFull + 0.9) return step;
-  if (need < K.diveMinSpan + K.handReach) return step;
+  // Мёртвая щель: раньше здесь стояло `need < diveMinSpan + handReach` = 1.30 м,
+  // хотя стоя вратарь достаёт ровно handReach = 0.95 м. Мяч, проходящий в
+  // 0.95–1.30 м, объявлялся «не броском, а шагом» — и не отбивался ничем:
+  // 0.7 м мёртвой полосы, почти 15% всех пропущенных. Порог сравнивал need с
+  // СУММОЙ, хотя diveMinSpan — это минимальная длина полёта КОРПУСА.
+  // Правило простое: не достаёт стоя — бросается
+  if (need < K.handReach) return step;
 
   // Бросок: длительность подгоняется под оставшееся время, чтобы руки
   // пришли к мячу в момент его выхода на линию, а не после
@@ -528,10 +568,16 @@ function tryRush(p, dt, ball, match, gk, K) {
     }
     if (cover > K.rushGap) {
       const dOpp = Math.hypot(bp.x - pos.x, bp.z - pos.z);
-      if (dOpp > K.rushStop) {
-        // Идём на сокращение угла — по линии мяч→центр ворот
+      // Стоп-дистанция НЕ константа. Раскрытый вплотную вратарь проецируется
+      // на линию ворот как стена: с 8 м он накрывал 92% створа, с 10 м и
+      // дальше — все 100%, и мимо него было физически не попасть. Держим
+      // накрытие около половины створа: чем дальше от ворот, тем раньше стоп
+      const stop = Math.max(K.rushStop, K.rushCoverK * dGoal);
+      if (dOpp > stop) {
+        // Идём на сокращение угла — по линии мяч→центр ворот, но не дальше
+        // rushMaxDepth от линии: вратарь у центрального круга — это не выход
         const t = interposePoint(goalX, 0, bp.x, bp.z,
-          Math.max(K.depthNear, dGoal - dOpp * 0.55));
+          Math.min(K.rushMaxDepth, Math.max(K.depthNear, dGoal - dOpp * 0.55)));
         const mv = seek(pos.x, pos.z, t.x, t.z);
         p.aiUpdate(dt, mv, {
           sprint: true,

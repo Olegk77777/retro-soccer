@@ -121,10 +121,12 @@ export function predictLanding(ball, h = CONFIG.ball.radius, maxT = 4) {
 // Нужна вратарю: он обязан знать, КУДА и КОГДА мяч придёт на линию, иначе
 // «сейв» — это магнит радиусом полтора метра, а не чтение удара.
 // Возвращает { z, y, t, speed } или null (мяч не идёт в створ за maxT).
-export function predictGoalPlane(ball, goalX, maxT = 2.0) {
+// dirX — с какой стороны мяч подходит к плоскости. По умолчанию знак самой
+// координаты (ворота всегда далеко от центра поля), но вратарь спрашивает и
+// про СВОЮ плоскость, которая может стоять где угодно, — там знак задаётся явно.
+export function predictGoalPlane(ball, goalX, maxT = 2.0, dirX = Math.sign(goalX)) {
   const B = CONFIG.ball;
   const p = ball.mesh.position;
-  const dirX = Math.sign(goalX);
   // Мяч уже за линией или летит от ворот — предсказывать нечего
   if ((goalX - p.x) * dirX <= 0) return null;
   if (ball.vel.x * dirX <= 0.1) return null;

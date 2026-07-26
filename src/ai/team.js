@@ -51,6 +51,18 @@ export class Team {
     this.shortTarget = null;
     this.shortTimer = 0;
 
+    // Игра третьего (third man): связка взводится на пасе А→В и СТАРТУЕТ
+    // по первому касанию В. До касания живёт только «заряд» (_thirdArm)
+    this.thirdMan = null;
+    this.thirdManTarget = null;
+    this.thirdManTimer = 0;
+    this._thirdArm = null;
+
+    // Ложный рывок: уводит опекуна из зоны, куда бежит настоящий раннер
+    this.decoy = null;
+    this.decoyTarget = null;
+    this.decoyTimer = 0;
+
     // Врывания в штрафную под навес: игрок → точка рывка (ближняя/дальняя/11 м)
     this.boxRuns = new Map();
     this.crossAir = 0; // сек: наша подача в полёте — рывки живут, врывание на прилёт
@@ -170,6 +182,37 @@ export class Team {
         this.shortTarget = null;
       }
     }
+    // Игра третьего: заряд ждёт ПЕРВОГО КАСАНИЯ адресата первого паса —
+    // именно этот миг и обманывает оборону, а не сам пас
+    if (this._thirdArm) {
+      this._thirdArm.t -= dt;
+      if (this._thirdArm.t <= 0 || !this.attacking) {
+        this._thirdArm = null;
+      } else if (this.match.toucher === this._thirdArm.b) {
+        const a = this._thirdArm;
+        this.thirdMan = a.c;
+        this.thirdManTarget = a.target;
+        this.thirdManTimer = CONFIG.ai.combo.thirdMan.ttl;
+        a.c.runCd = CONFIG.ai.attack.offBall.cooldown;
+        this._thirdArm = null;
+      }
+    }
+    if (this.thirdMan) {
+      this.thirdManTimer -= dt;
+      if (this.thirdManTimer <= 0 || !this.attacking ||
+          this.match.toucher === this.thirdMan) {
+        this.thirdMan = null;
+        this.thirdManTarget = null;
+      }
+    }
+    // Ложный рывок живёт своё окно и НИКОГДА не просит мяч (см. choosePass)
+    if (this.decoy) {
+      this.decoyTimer -= dt;
+      if (this.decoyTimer <= 0 || !this.attacking) {
+        this.decoy = null;
+        this.decoyTarget = null;
+      }
+    }
     // Кулдаун рывка у каждого: рывки не должны идти сплошным потоком
     for (const p of this.players) {
       if (p.runCd > 0) p.runCd -= dt;
@@ -201,6 +244,8 @@ export class Team {
       // Владельца прессингуют, безопасного паса нет — партнёр показывается
       // накоротке (главный источник передач под давлением)
       this.tryComingShort(ball);
+      // Настоящий рывок уже назначен — кто-то обязан увести его опекуна
+      if (!this.decoy) this.tryDecoy(ball);
     }
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
@@ -210,6 +255,7 @@ export class Team {
     // (sweeper/cover из PES Defence System) и персональный разбор в своей трети
     this.coverer = this.attacking ? null : this.pickCoverer(ball);
     this.updateMarks(ball);
+    this.trackRunners();
 
     // Врывания под навес: мяч на нашем фланге в финальной трети —
     // форварды рывками занимают штанги и точку 11 м
@@ -228,34 +274,58 @@ export class Team {
     // Подача уже в полёте: рывки НЕ отменяем — штанги и подбор держатся до
     // прилёта (иначе врывания умирали в момент удара по мячу, грабля 18.07)
     if (this.crossAir > 0) return;
+    const prev = new Map(this.boxRuns);
     this.boxRuns.clear();
     if (!this.attacking) return;
     const bp = ball.mesh.position;
     const goalX = this.attackGoalX;
-    if (Math.hypot(goalX - bp.x, bp.z) > B.fromGoal) return;
+    // Триггер — по ГЛУБИНЕ мяча, а не радиусом от центра ворот: радиус съедала
+    // ширина, и с фланга финальной трети (классическая позиция для подачи)
+    // штрафную не занимал НИКТО — подавать было некому
+    if (this.side * bp.x < F.length / 2 - B.fromGoal) return;
+    if (Math.abs(bp.z) > B.maxZ) return;
 
     const s = Math.sign(bp.z || 1); // «ближняя» штанга — со стороны мяча
+    // Порядок = ценность. Кандидатов почти всегда меньше четырёх, и раньше
+    // пустым оставался ИМЕННО трейлер — тот, кто замыкает прострел (6.4 гола
+    // на 100 против 2.5 у навеса). Теперь первым занимают его
     const targets = [
-      { x: goalX - this.side * B.nearPost.x, z: s * B.nearPost.z },
-      { x: goalX - this.side * B.golden.x, z: B.golden.z },
-      { x: goalX - this.side * B.farPost.x, z: s * B.farPost.z },
       { x: goalX - this.side * B.trailer.x, z: B.trailer.z },
+      { x: goalX - this.side * B.golden.x, z: B.golden.z },
+      { x: goalX - this.side * B.nearPost.x, z: s * B.nearPost.z },
+      { x: goalX - this.side * B.farPost.x, z: s * B.farPost.z },
     ];
     // Кандидаты: атакующая шестёрка, кроме занятых ролями. Поддерживающего
     // НЕ забираем: если в штрафную уйдут все, владельцу некому отдать, он
     // упрётся в защитника и потеряет мяч — замер показал падение ударов
-    // втрое, когда в коробку врывались четверо из шести
+    // втрое, когда в коробку врывались четверо из шести.
+    // Раннера и подключившегося фулбека тоже исключаем: их ветки в
+    // fieldplayer.js стоят ВЫШЕ boxRuns, и назначенная точка просто пропадала.
+    // А вот догоняющего (chaser) исключать нельзя: при мяче у партнёра его
+    // ветка всё равно не работает, а игрока из штрафной он забирал
     const pool = this.players.slice(5)
       .filter((p) => p !== this.match.toucher && p !== this.match.controlled &&
-        p !== this.receiver && p !== this.chaser && p !== this.shortRunner &&
-        p !== this.supporter);
+        p !== this.receiver && p !== this.shortRunner && p !== this.supporter &&
+        p !== this.runner && p !== this.overlapper);
+    // Мяч у самой лицевой — подключаем и крайних защитников: в штрафной
+    // должны быть тела, иначе подача уходит в никуда
+    if (this.side * bp.x > F.length / 2 - 20) {
+      for (const i of [1, 4]) {
+        const fb = this.players[i];
+        if (fb && fb !== this.match.toucher && fb !== this.overlapper) pool.push(fb);
+      }
+    }
     for (const t of targets) {
       if (!pool.length) break;
       let bi = 0;
       let bd = Infinity;
       pool.forEach((p, i) => {
         const pp = p.group.position;
-        const d = Math.hypot(pp.x - t.x, pp.z - t.z);
+        // Фора прежнему исполнителю ЭТОЙ ЖЕ точки: назначения пересчитываются
+        // каждые coachTick, и без гистерезиса игроки меняются точками на бегу
+        const was = prev.get(p);
+        const same = was && Math.abs(was.x - t.x) < 0.6 && Math.abs(was.z - t.z) < 0.6;
+        const d = Math.hypot(pp.x - t.x, pp.z - t.z) - (same ? B.stickBonus : 0);
         if (d < bd) {
           bd = d;
           bi = i;
@@ -294,9 +364,12 @@ export class Team {
     }
     if (press > S.pressDist) return;
 
-    // Уже есть надёжная опция — открываться накоротке незачем
-    const safe = this.choosePass(owner, ball);
-    if (safe && safe.score >= S.safeOption) return;
+    // Уже есть надёжная опция — открываться накоротке незачем. Смотрим ЛУЧШИЙ
+    // счёт последней оценки (this._passBest), а не результат нового вызова:
+    // choosePass возвращает вариант, вытянутый софтмаксом, и сравнение с
+    // порогом превращалось в бросок монеты (плюс лишний полный проход по
+    // одиннадцати партнёрам каждый такт тренера)
+    if ((this._passBest || 0) >= S.safeOption) return;
 
     // Кандидат: ближний свободный партнёр, не занятый другой ролью
     let best = null;
@@ -339,6 +412,109 @@ export class Team {
     };
     this.shortTimer = S.ttl;
     best.runCd = C.cooldown;
+  }
+
+  // ИГРА ТРЕТЬЕГО (third man run). Взводится в момент паса А→В: если пас
+  // короткий и «в ноги», а на В висит опекун, то мяч дальше пойдёт не назад к
+  // А (это читается), а ТРЕТЬЕМУ — С, который стартует по первому касанию В.
+  // По Coaches' Voice: «игрок, получающий решающий пас, — не тот, на кого
+  // пасующий смотрел первым». Против низкого блока это работает там, где
+  // забегание за спину бессмысленно: пространства за линией просто нет.
+  armThirdMan(a, b, dist) {
+    const C = CONFIG.ai.combo.thirdMan;
+    if (this.thirdMan || this._thirdArm) return;
+    if (!a || !b || b.isKeeper || dist > C.maxFirstPass) return;
+    const bp = b.group.position;
+    const ap = a.group.position;
+
+    // Комбинация нужна только когда В под опекой — иначе он развернётся сам
+    let marker = Infinity;
+    for (const o of this.opponents) {
+      if (o.isKeeper) continue;
+      const op = o.group.position;
+      marker = Math.min(marker, Math.hypot(op.x - bp.x, op.z - bp.z));
+    }
+    if (marker > C.markerDist) return;
+
+    // Третий — свободный атакующий, не занятый другой ролью
+    let best = null;
+    let bestD = Infinity;
+    for (const p of this.players.slice(5)) {
+      if (p === a || p === b || p.runCd > 0) continue;
+      if (p === this.receiver || p === this.runner || p === this.overlapper ||
+          p === this.shortRunner || p === this.match.controlled) continue;
+      const d = Math.hypot(p.group.position.x - bp.x, p.group.position.z - bp.z);
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    if (!best) return;
+
+    // Цель — вперёд от В по линии паса, довёрнутой к воротам: третий выходит
+    // ЗА спину опекуну В, а не бежит в ту же точку
+    const dx = bp.x - ap.x;
+    const dz = bp.z - ap.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    const turn = (C.turnDeg * Math.PI) / 180 * (bp.z > 0 ? -1 : 1);
+    const cos = Math.cos(turn);
+    const sin = Math.sin(turn);
+    const ux = (dx / dl) * cos - (dz / dl) * sin;
+    const uz = (dx / dl) * sin + (dz / dl) * cos;
+    const F = CONFIG.field;
+    this._thirdArm = {
+      b,
+      c: best,
+      t: C.armTtl,
+      target: {
+        x: Math.max(-F.length / 2 + 5,
+          Math.min(F.length / 2 - 5, bp.x + ux * C.runAhead)),
+        z: Math.max(-F.width / 2 + 4,
+          Math.min(F.width / 2 - 4, bp.z + uz * C.runAhead)),
+      },
+    };
+  }
+
+  // ЛОЖНЫЙ РЫВОК. Единственное движение в игре, которое оптимизирует
+  // пространство ПАРТНЁРА: обманщик уводит своего опекуна вбок из канала, куда
+  // бежит настоящий раннер. Мяч он не просит НИКОГДА (choosePass его
+  // пропускает) — иначе обман превращается в обычное открывание.
+  tryDecoy(ball) {
+    const C = CONFIG.ai.combo.decoy;
+    const F = CONFIG.field;
+    const main = this.runner || this.thirdMan || this.overlapper;
+    const target = this.runnerTarget || this.thirdManTarget || this.overlapTarget;
+    if (!main || !target) return;
+    const bp = ball.mesh.position;
+    if (this.side * bp.x < F.length / 2 - 40) return; // только у чужих ворот
+
+    let best = null;
+    let bestD = Infinity;
+    for (const p of this.players.slice(5)) {
+      if (p === main || p.runCd > 0 || p === this.match.toucher) continue;
+      if (p === this.receiver || p === this.shortRunner ||
+          p === this.match.controlled || this.boxRuns.has(p)) continue;
+      const pp = p.group.position;
+      const d = Math.hypot(pp.x - target.x, pp.z - target.z);
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    if (!best) return;
+
+    // Уводим ПРОЧЬ от канала настоящего рывка и вперёд — опекун идёт следом
+    const pp = best.group.position;
+    const away = Math.sign(pp.z - target.z) || (Math.random() < 0.5 ? -1 : 1);
+    this.decoy = best;
+    this.decoyTarget = {
+      x: Math.max(-F.length / 2 + 5,
+        Math.min(F.length / 2 - 5, pp.x + this.side * C.dist * 0.6)),
+      z: Math.max(-F.width / 2 + 3,
+        Math.min(F.width / 2 - 3, pp.z + away * C.awayZ)),
+    };
+    this.decoyTimer = C.ttl;
+    best.runCd = CONFIG.ai.attack.offBall.cooldown;
   }
 
   // Подача исполнена (ресёрч 11): считаем точку приземления честной
@@ -440,10 +616,20 @@ export class Team {
     const rp = runner.group.position;
     const dOwner = Math.hypot(rp.x - op.x, rp.z - op.z);
     const distanceRating = Math.sqrt(Math.max(0, 1 - dOwner / R.maxDist));
-    // Плотность защитников за спиной раннера глушит рывок
-    const px = rp.x - this.side * 10;
+
+    // Цель — за фактическую линию защиты соперника, ближе к центру (канал)
+    const oppTeam = this.match.otherTeam(this);
+    let tx = oppTeam.defLineX + this.side * R.behindLine;
+    const maxDepth = F.length / 2 - 8; // не в объятия вратаря
+    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
+    const tz = Math.max(-18, Math.min(18, rp.z * 0.6));
+
+    // Плотность считаем В ЦЕЛИ РЫВКА, а не за спиной раннера: прежний замер
+    // стоял ровно там, ОТКУДА игрок уходит, — то есть в самой гуще блока, и
+    // произведение выходило втрое ниже порога. Рывок за спину не запускался
+    // в финальной трети никогда
     const nearest = this.opponents
-      .map((o) => Math.hypot(o.group.position.x - px, o.group.position.z - rp.z))
+      .map((o) => Math.hypot(o.group.position.x - tx, o.group.position.z - tz))
       .sort((a, b) => a - b)
       .slice(0, 4);
     let density = 1;
@@ -452,13 +638,8 @@ export class Team {
     }
     if (distanceRating * density < R.trigger) return;
 
-    // Цель — за фактическую линию защиты соперника, ближе к центру (канал)
-    const oppTeam = this.match.otherTeam(this);
-    let tx = oppTeam.defLineX + this.side * R.behindLine;
-    const maxDepth = F.length / 2 - 8; // не в объятия вратаря
-    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
     this.runner = runner;
-    this.runnerTarget = { x: tx, z: Math.max(-18, Math.min(18, rp.z * 0.6)) };
+    this.runnerTarget = { x: tx, z: tz };
     this.runnerTimer = R.durationSec;
   }
 
@@ -528,12 +709,18 @@ export class Team {
     const fp = fb.group.position;
     if (Math.hypot(fp.x - op.x, fp.z - op.z) > C.triggerDist) return;
     if (this.side * (fp.x - op.x) > 2) return;  // фулбек уже глубже владельца
+    const tx = Math.max(-F.length / 2 + 6,
+      Math.min(F.length / 2 - 6, op.x + this.side * C.ahead));
+    // ОВЕРЛАП ИЛИ АНДЕРЛАП — по занятости коридоров (ресёрч 14 §1.4): занята
+    // бровка → забегаем ВНУТРЬ, в полупространство; занято полупространство →
+    // идём снаружи. Внешнее подключение кончается подачей, внутреннее — УДАРОМ,
+    // и именно оно работает против низкого блока
+    const wideZ = Math.sign(op.z) * (F.width / 2 - C.wideZ);
+    const innerZ = Math.sign(op.z) * C.underlapZ;
+    const tz = freeSpace(tx, innerZ, this.opponents) + C.underlapBias >=
+      freeSpace(tx, wideZ, this.opponents) ? innerZ : wideZ;
     this.overlapper = fb;
-    this.overlapTarget = {
-      x: Math.max(-F.length / 2 + 6,
-        Math.min(F.length / 2 - 6, op.x + this.side * C.ahead)),
-      z: Math.sign(op.z) * (F.width / 2 - C.wideZ),
-    };
+    this.overlapTarget = { x: tx, z: tz };
     this.overlapTimer = C.durationSec;
   }
 
@@ -558,11 +745,16 @@ export class Team {
   // Страхующий (cover): второй по близости к мячу полевой — встаёт за спиной
   // прессингующего под углом к центру, ловит обыгрыш и прострел
   pickCoverer(ball) {
+    const D = CONFIG.ai.defence;
     let best = null;
     let bestD = Infinity;
     for (const p of this.fieldPlayers) {
       if (p === this.match.controlled || p === this.chaser) continue;
-      const d = distToBall(p, ball);
+      // Роль входит в стоимость: раньше страхующим становился просто второй по
+      // близости к мячу, то есть регулярно НАПАДАЮЩИЙ — он уезжал за спину
+      // прессингующему, и при отборе впереди не оставалось никого, кому отдать
+      const d = distToBall(p, ball) +
+        CONFIG.formation.roles[p.homeIdx].defOff * D.coverRoleK;
       if (d < bestD) {
         bestD = d;
         best = p;
@@ -610,18 +802,97 @@ export class Team {
     }
   }
 
+  // ТРЕКИНГ ЗАБЕГАЮЩИХ (ресёрч 09). Персональный разбор (updateMarks) включался
+  // только когда мяч уже ближе markThird к нашим воротам и разбирал БЛИЖНИХ К
+  // ВОРОТАМ соперников. Игрока, который в этот момент спринтует из середины
+  // поля за спину линии, не брал никто: он далеко от ворот — значит в сортировке
+  // последний, а мяч ещё дальше порога, значит функция вообще не работала.
+  // Ровно поэтому поднятая линия обороны без этого прохода = тир.
+  // Пишем в ту же карту marks — исполнение в fieldplayer.js не меняется.
+  trackRunners() {
+    const T = CONFIG.ai.defence.track;
+    if (this.attacking) return;
+    const gx = this.ownGoalX;
+    const opp = this.match.otherTeam(this);
+
+    // Угроза — соперник, РЕАЛЬНО сближающийся с нашими воротами, плюс явно
+    // назначенные тренером соперника раннер и подключившийся фулбек
+    const threats = [];
+    for (const o of opp.players) {
+      if (o.isKeeper || o.downT > 0) continue;
+      if (this.marks.size && [...this.marks.values()].includes(o)) continue;
+      const op = o.group.position;
+      const dx = gx - op.x;
+      const dz = -op.z;
+      const l = Math.hypot(dx, dz) || 1;
+      if (l > T.range) continue;
+      const closing = (o.vel.x * dx + o.vel.z * dz) / l;
+      if (closing < T.speed && o !== opp.runner && o !== opp.overlapper) continue;
+      threats.push({ o, l });
+    }
+    if (!threats.length) return;
+    threats.sort((a, b) => a.l - b.l);
+
+    // Свободные игроки оборонительных линий (форварды назад не возвращаются —
+    // они и есть выход из обороны)
+    const free = this.players.slice(1).filter((p) =>
+      !this.marks.has(p) && p !== this.chaser && p !== this.coverer &&
+      p !== this.match.controlled && p.downT <= 0 &&
+      CONFIG.formation.roles[p.homeIdx].defOff <= 12);
+
+    const prev = this._trackPrev || new Map();
+    const next = new Map();
+    for (const t of threats) {
+      if (!free.length) break;
+      const tp = t.o.group.position;
+      let bi = 0;
+      let bd = Infinity;
+      free.forEach((d, i) => {
+        const dp = d.group.position;
+        // Фора прежнему опекуну: без гистерезиса защитники меняются
+        // подопечными каждые coachTick прямо на бегу
+        const cost = Math.hypot(dp.x - tp.x, dp.z - tp.z) -
+          (prev.get(d) === t.o ? T.hold : 0);
+        if (cost < bd) {
+          bd = cost;
+          bi = i;
+        }
+      });
+      this.marks.set(free[bi], t.o);
+      next.set(free[bi], t.o);
+      free.splice(bi, 1);
+    }
+    this._trackPrev = next;
+  }
+
   // Кто бежит к мячу: ближний полевой игрок. Управляемого человеком не
   // назначаем — за него решает Олег (авто-переключение и так отдаст ему
   // ближнего). Вратарь гонится только по своей логике (goalkeeper.js).
   pickChaser(ball) {
     if (this.match.state === 'restart') return null; // мёртвый мяч не догоняют
+    const D = CONFIG.ai.defence;
+    const bp = ball.mesh.position;
+    const gx = this.ownGoalX;
     let best = null;
-    let bestD = Infinity;
+    let bestCost = Infinity;
     for (const p of this.fieldPlayers) {
       if (p === this.match.controlled) continue;
       const d = distToBall(p, ball);
-      if (d < bestD) {
-        bestD = d;
+      // В ОБОРОНЕ роль первого защитника — не «кто ближе», а «кто между мячом и
+      // воротами». Раньше обыгранный защитник, бегущий за спиной у владельца,
+      // оставался ближайшим и держал роль, а страхующий пассивно стоял позади:
+      // страховки при обыгрыше не было вовсе. Плюс гистерезис — два
+      // равноудалённых защитника мигали ролью каждый кадр
+      let cost = d;
+      if (!this.attacking) {
+        const pp = p.group.position;
+        const goalSide =
+          (gx - bp.x) * (pp.x - bp.x) + (0 - bp.z) * (pp.z - bp.z) > 0;
+        if (!goalSide) cost += D.chaseBehindPen;
+        if (p === this.chaser) cost -= D.chaseHold;
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
         best = p;
       }
     }
@@ -692,8 +963,11 @@ export class Team {
     if (this.attacking) {
       x = this.side * (base.x + AI.attackShift) * (F.length / 2) + bp.x * AI.ballPullX;
       // Вингеры держат ширину у бровки и НЕ стягиваются к мячу — растяжка
-      // обороны и адресат для перевода на пустой фланг (ресёрч 10 + PES)
+      // обороны и адресат для перевода на пустой фланг (ресёрч 10 + PES).
+      // Плюс они стоят ГЛУБЖЕ остальных: без этого домашняя точка вингера
+      // не доходила до зоны подачи, и навешивать он мог, только сам ведя мяч
       if (base.id === 'LM' || base.id === 'RM') {
+        x += this.side * CONFIG.ai.attack.wingerPush;
         z = base.z * (F.width / 2) * CONFIG.ai.attack.wingerWide;
       } else {
         z = base.z * (F.width / 2) * 0.92 + bp.z * AI.ballPullZ;
@@ -705,7 +979,9 @@ export class Team {
       if (base.defOff === 0) {
         z = Math.max(-D.defWidth / 2, Math.min(D.defWidth / 2, z));
       }
-      z += bp.z * AI.ballPullZ;
+      // Блок СПОЛЗАЕТ к мячу заметнее, чем строится атака (своя константа):
+      // при мяче у бровки сдвиг 9.5 м вместо 5.5 — так и открывается перевод
+      z += bp.z * D.ballShiftZ;
     }
 
     x = Math.max(-F.length / 2 + 2, Math.min(F.length / 2 - 2, x));
@@ -736,13 +1012,16 @@ export class Team {
     }
     const underPressure = nearestOpp < AI.passPressure;
     const xtFrom = xThreat(fp.x, fp.z, this.side);
-    const goalX = this.attackGoalX;
-    const boxX = F.length / 2 - 16.5;
+    // Владелец уже в финальной трети — порог риска мягче (см. finalThirdK)
+    const inFinalThird = this.side * fp.x > F.length / 2 - 32;
 
     const options = [];
     for (const mate of this.players) {
       if (mate === from) continue;
       if (mate.downT > 0 || mate.tackleT > 0) continue;
+      // Обманщик мяч НЕ просит: получи он пас — и весь смысл ложного рывка
+      // (увести опекуна из чужой зоны) исчезает
+      if (mate === this.decoy) continue;
       const mp = mate.group.position;
       const straight = Math.hypot(mp.x - fp.x, mp.z - fp.z);
       if (straight < AI.passMin || straight > AI.passMax) continue;
@@ -815,19 +1094,26 @@ export class Team {
         let f = PM.fNormal;
         const oppLine = this.match.otherTeam(this).defLineX;
         const behindLine = this.side * (tx - oppLine) > 0;
-        const inBox = this.side * tx > boxX && Math.abs(tz) < 20.16;
+        // ЗОНА ЗАВЕРШЕНИЯ шире штрафной: трейлер у её линии (16–18 м) — тот,
+        // кто замыкает прострел, — иначе выпадал из семейства и получал
+        // скромный fProgress вместо fIntoBox/fCutback
+        const inFinish = this.side * tx > F.length / 2 - PM.finishZone &&
+          Math.abs(tz) < 20.16;
         // ПРОСТРЕЛ: мяч из глубины фланга НАЗАД в зону перед воротами.
         // Второе по опасности действие в футболе после разреза — и главный
-        // недостающий инструмент нашей игры (ресёрч 15, раздел 9)
-        const fromDeepWide = this.side * fp.x > F.length / 2 - 13 && Math.abs(fp.z) > 13;
-        const isCutback = fromDeepWide && inBox &&
+        // недостающий инструмент нашей игры (ресёрч 15, раздел 9). Геометрия
+        // ослаблена до полуфланга: прежние «угол штрафной» (13 м от лицевой,
+        // 13 м от оси) не выполнялись ни разу за матч
+        const fromDeepWide = this.side * fp.x > F.length / 2 - 20 && Math.abs(fp.z) > 10;
+        const isCutback = fromDeepWide && inFinish &&
           this.side * (fp.x - tx) > 0 && Math.abs(tz) < Math.abs(fp.z) - 4;
         if (isCutback) f = PM.fCutback;
         else if (behindLine && c.kind === 'through') f = PM.fThrough;
+        else if (inFinish && this.side * (tx - fp.x) > 0) f = PM.fIntoBox;
         else if (this.side * (tx - fp.x) > 6) f = PM.fProgress;
         if (mate.isKeeper) f *= PM.fKeeper;
-        if (mate === this.runner) f *= 1.25;
-        if (mate === this.overlapper) f *= 1.15;
+        if (mate === this.runner || mate === this.thirdMan) f *= PM.fRunner;
+        if (mate === this.overlapper) f *= PM.fOverlap;
 
         const score = Math.pow(p, PM.safety) * q * v * f;
         options.push({
@@ -842,8 +1128,16 @@ export class Team {
       }
     }
 
+    // Лучший счёт запоминаем ДО отсева и софтмакса: им пользуются
+    // tryComingShort («есть ли надёжная опция») и aiCross («стоит ли навес
+    // дороже передачи»). Раньше они спрашивали choosePass повторно и
+    // сравнивали с порогом СЛУЧАЙНО вытянутый софтмаксом вариант
+    this._passBest = 0;
+    for (const o of options) this._passBest = Math.max(this._passBest, o.score);
+
     if (!options.length) return null;
-    const minScore = PM.minScore * (underPressure ? PM.pressScoreK : 1);
+    const minScore = PM.minScore * (underPressure ? PM.pressScoreK : 1) *
+      (inFinalThird ? PM.finalThirdK : 1);
     const live = options.filter((o) => o.score >= minScore);
     if (!live.length) return null;
 
@@ -884,9 +1178,14 @@ export class Team {
       const a = (op.x - fx) * nx + (op.z - fz) * nz;
       if (a < 0.5) continue;                       // за спиной пасующего
       const b = Math.abs(-(op.x - fx) * nz + (op.z - fz) * nx);
-      if (a > D + 1.5) continue;                   // дальше цели — не по пути
-      if (b < PM.onLine && a < D) return 0;        // физически стоит на линии
-      near.push({ a: Math.max(0, Math.min(D, a)), b });
+      // ПОСЛЕДНИЙ МЕТР ПРИНАДЛЕЖИТ АДРЕСАТУ. Персональный опекун стоит
+      // goal-side, то есть ЗА адресатом; раньше он попадал в окно проверки,
+      // получал зажатую координату a = D и «время добегания ноль» — модель
+      // выдавала 69% перехвата на мяч, который придёт к адресату РАНЬШЕ.
+      // Это и был главный кран воронки: пас в штрафную отвергался всегда
+      if (a > D - PM.receiverOwn) continue;
+      if (b < PM.onLine) return 0;                 // физически стоит на линии
+      near.push({ a, b });
     }
     near.sort((p1, p2) => p1.b - p2.b);
 
@@ -939,8 +1238,11 @@ export class Team {
     }
     if (from) {
       const fp = from.group.position;
-      this.tryFollowRun(from,
-        Math.hypot(pass.target.x - fp.x, pass.target.z - fp.z));
+      const dist = Math.hypot(pass.target.x - fp.x, pass.target.z - fp.z);
+      this.tryFollowRun(from, dist);
+      // Пас в ноги под опекой — заготовка «игры третьего»: мяч пойдёт дальше,
+      // а не назад пасующему (стеночку взводит tryFollowRun выше)
+      if (pass.kind === 'feet') this.armThirdMan(from, pass.mate, dist);
     }
   }
 }

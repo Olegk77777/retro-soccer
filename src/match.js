@@ -232,6 +232,11 @@ export class Match {
       team.runnerTarget = null;
       team.overlapper = null;
       team.overlapTarget = null;
+      team.thirdMan = null;
+      team.thirdManTarget = null;
+      team._thirdArm = null;
+      team.decoy = null;
+      team.decoyTarget = null;
       team.bestSpot = null;
       team.boxRuns.clear();
       team.crossAir = 0;
@@ -927,6 +932,11 @@ export class Match {
       t.runnerTarget = null;
       t.overlapper = null;
       t.overlapTarget = null;
+      t.thirdMan = null;
+      t.thirdManTarget = null;
+      t._thirdArm = null;
+      t.decoy = null;
+      t.decoyTarget = null;
       t.crossAir = 0;
       t.boxRuns.clear();
     }

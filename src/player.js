@@ -407,6 +407,7 @@ export class Player {
     this.trapCushion = 0;
     this.diveT = 0;
     this.diveDir = null;
+    this.diveTilt = null;    // амплитуда РУЧНОГО наклона корпуса в броске
     this.downT = 0;
     this.downDur = 0;
     this.downTiltAmp = null;
@@ -757,17 +758,27 @@ export class Player {
       // вратаря (у кипера они из CONFIG.ai.keeper)
       const dur = this.diveDur || DV.time;
       const rec = this.diveRecover != null ? this.diveRecover : DV.recover;
-      tilt = (1 - Math.max(0, this.diveT) / dur) * DV.tiltMax;
+      // Амплитуда наклона — СВОЙСТВО БРОСКА, а не общая константа. Полевая
+      // «ласточка» играет СТОЯЧИЙ клип (kick/header), и весь силуэт падения
+      // даёт именно этот наклон. А вратарский gk_dive уже содержит и падение,
+      // и подъём (промер по риггу: бёдра 0.95 → 0.18 → 0.92 м) — второй
+      // поворот складывался с первым, и вратарь уходил головой на 1.44 м ПОД
+      // ГАЗОН на целую секунду (фидбек Олега 26.07: «проваливается и исчезает»)
+      const amp = this.diveTilt != null ? this.diveTilt : DV.tiltMax;
+      tilt = (1 - Math.max(0, this.diveT) / dur) * amp;
       if (this.diveT <= 0) {
         this.downT = rec;
         this.downDur = rec;
-        this.downTiltAmp = DV.tiltMax;
+        this.downTiltAmp = amp;
         this._gotUp = false;
       }
     } else if (this.downT > 0) {
       this.downT -= dt;
       const k = Math.max(0, this.downT) / (this.downDur || DV.recover);
-      if (k < 0.55 && !this._gotUp) {
+      // Подъём клипом getup нужен только тому, кого мы САМИ положили наклоном.
+      // У вратаря и у сбитого игрока клип уже лежачий и встаёт сам — getup
+      // обрывал бы его на середине и дёргал фигуру из полуприседа
+      if (k < 0.55 && !this._gotUp && (this.downTiltAmp || 0) > 0) {
         this._gotUp = true;
         this.playOneShot('getup', 1.4, 0);
       }
@@ -2431,6 +2442,7 @@ export class Player {
     this.diveDur = DV.time;
     this.diveSpeed = DV.lunge;
     this.diveRecover = DV.recover;
+    this.diveTilt = DV.tiltMax;  // клипы kick/header стоячие — падение рисуем сами
     this.diveDir = { x: dx, z: dz };
     this.vel.x = dx * DV.lunge;
     this.vel.z = dz * DV.lunge;
@@ -2450,6 +2462,9 @@ export class Player {
     this.diveDur = dur;
     this.diveSpeed = opts.speed || K.diveSpeed;
     this.diveRecover = opts.recover != null ? opts.recover : K.recover;
+    // Клип gk_dive самодостаточен: сам кладёт вратаря и сам поднимает.
+    // Наш наклон поверх него топил фигуру под газон (см. _updateAnim)
+    this.diveTilt = opts.tilt != null ? opts.tilt : K.diveTilt;
     const l = Math.hypot(dx, dz) || 1;
     this.diveDir = { x: dx / l, z: dz / l };
     this.vel.x = this.diveDir.x * this.diveSpeed;
@@ -2457,7 +2472,9 @@ export class Player {
     // Корпус разворачивается ЛИЦОМ к мячу (кипер летит боком, а не спиной)
     if (opts.face != null) this.rot = opts.face;
     if (opts.lift > 0.05) this.startJump(Math.max(0.06, opts.liftIn || 0.14), opts.lift);
-    this.playOneShot('gk_dive', opts.clipRate || 1.35, 0.12);
+    // Темп клипа подобран так, чтобы (2.067 − 0.12) / rate ≈ diveTime + recover:
+    // теперь клип — единственный источник силуэта, и обрывать его подъём нельзя
+    this.playOneShot('gk_dive', opts.clipRate || 1.44, 0.12);
   }
 
   // Снос: игрок сбит и лежит dur секунд (клип fallen), потом встаёт.
@@ -2465,7 +2482,9 @@ export class Player {
   startFall(dur) {
     this.downT = dur;
     this.downDur = dur;
-    this.downTiltAmp = CONFIG.player.aerial.dive.tiltMax;
+    // Клип fallen уже лежачий (бёдра держатся на 0.215 м по риггу) — свой
+    // наклон загонял бы сбитого игрока наполовину в газон
+    this.downTiltAmp = 0;
     this.slideRecover = false;
     this._gotUp = false;
     this.controlling = false;
