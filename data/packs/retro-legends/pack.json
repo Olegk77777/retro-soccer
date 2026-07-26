@@ -1,0 +1,16 @@
+{
+  "id": "retro-legends",
+  "title": "РЕТРО-ЛЕГЕНДЫ 98",
+  "licensing": "clean",
+  "_licensing": "clean = ни реальных фамилий, ни эмблем, ни марок спонсоров. Этот пак идёт в публичный релиз и в ролики на YouTube.",
+  "_собрано": "Автоматически из пака wc98-real скриптом tools/build-anon-pack.mjs. Руками не править.",
+  "venue": "НАЦИОНАЛЬНЫЙ СТАДИОН · 12 ИЮЛЯ 1998",
+  "teams": {
+    "home": "teams/home.json",
+    "away": "teams/away.json"
+  },
+  "textures": {
+    "boards": null,
+    "ball": null
+  }
+}

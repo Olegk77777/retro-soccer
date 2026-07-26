@@ -26,6 +26,14 @@ const C = {
   keeperGreenShade: '#10472c',
   keeperBlack: '#17191c',
   keeperBlackShade: '#0d0f11',
+  // Публичный пак retro-legends: те же цвета эпохи, но без эмблем федераций
+  // и без полос/галочек производителя (см. Исследования/17).
+  goldMain: '#efc622',
+  goldShade: '#d6ae17',
+  goldTrim: '#1f6b3e',
+  blueMain: '#1b3f8c',
+  blueShade: '#152f6c',
+  blueTrim: '#cf2c3a',
 };
 
 function rgb(hex) {
@@ -251,14 +259,33 @@ function png(image) {
   ]);
 }
 
+// --- Публичный пак: силуэт эпохи без охраняемой атрибутики ---
+// Ворот, манжеты, кант — те же приёмы 90-х, но ни эмблемы федерации,
+// ни трёх полос, ни галочки. Узнаваем цвет, а не знак.
+function legendsKit(main, shade, trim, accent, collar) {
+  const image = atlas();
+  baseOutfield(image, main, shade, trim, accent);
+  rect(image, 12, 61, 20, 64, collar); // круглый ворот
+  rect(image, 44, 61, 52, 64, collar);
+  rect(image, 13, 16, 16, 32, collar); // манжеты
+  rect(image, 32, 16, 34, 32, collar); // кант шорт
+  rect(image, 62, 16, 64, 32, collar);
+  rect(image, 0, 13, 16, 16, collar);  // отворот гетр
+  return image;
+}
+
 mkdirSync(OUT, { recursive: true });
 for (const [name, image] of Object.entries({
   'brazil-1998-home.png': brazilHome(),
   'brazil-1998-gk.png': brazilKeeper(),
   'france-1998-home.png': franceHome(),
   'france-1998-gk.png': franceKeeper(),
+  'legends-gold-home.png': legendsKit(C.goldMain, C.goldShade, C.blueMain, C.white, C.goldTrim),
+  'legends-gold-gk.png': legendsKit(C.keeperGreen, C.keeperGreenShade, C.keeperGreenShade, C.keeperGreen, C.goldMain),
+  'legends-blue-home.png': legendsKit(C.blueMain, C.blueShade, C.white, C.blueTrim, C.white),
+  'legends-blue-gk.png': legendsKit(C.keeperBlack, C.keeperBlackShade, C.keeperBlack, C.keeperBlack, C.white),
 })) {
   writeFileSync(resolve(OUT, name), png(image));
 }
 
-console.log('Готово: 4 атласа форм записаны в textures/kits/');
+console.log("Готово: 8 атласов форм записаны в textures/kits/");
