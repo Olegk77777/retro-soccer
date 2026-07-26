@@ -1,0 +1,15 @@
+{
+  "id": "wc98-real",
+  "title": "ЧМ-98 · ФИНАЛ",
+  "licensing": "real",
+  "_licensing": "real = внутри реальные имена, формы и бренды. НЕ для публичного релиза и НЕ для роликов на YouTube: этим паком играем сами (см. База-знаний/Исследования/17).",
+  "venue": "СТАД ДЕ ФРАНС · СЕН-ДЕНИ · 12 ИЮЛЯ 1998",
+  "teams": {
+    "home": "teams/home.json",
+    "away": "teams/away.json"
+  },
+  "textures": {
+    "boards": "./textures/stadium/ads-france-98.png",
+    "ball": "./textures/ball/tricolore-98.png"
+  }
+}

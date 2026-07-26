@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { PACK } from './pack.js';
 import { Player } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
@@ -172,7 +173,7 @@ export class Match {
     const mcVenue = document.getElementById('mc-venue');
     if (mcHome) mcHome.textContent = teamsData[0].name;
     if (mcAway) mcAway.textContent = teamsData[1].name;
-    if (mcVenue) mcVenue.textContent = CONFIG.match.venue;
+    if (mcVenue) mcVenue.textContent = PACK.venue || CONFIG.match.venue;
     this._teamNames = teamsData.map((t) => t.name);
     this.goalCardTimer = 0;
     this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';
@@ -234,6 +235,11 @@ export class Match {
       team.runnerTarget = null;
       team.overlapper = null;
       team.overlapTarget = null;
+      team.thirdMan = null;
+      team.thirdManTarget = null;
+      team._thirdArm = null;
+      team.decoy = null;
+      team.decoyTarget = null;
       team.bestSpot = null;
       team.boxRuns.clear();
       team.crossAir = 0;
@@ -959,6 +965,11 @@ export class Match {
       t.runnerTarget = null;
       t.overlapper = null;
       t.overlapTarget = null;
+      t.thirdMan = null;
+      t.thirdManTarget = null;
+      t._thirdArm = null;
+      t.decoy = null;
+      t.decoyTarget = null;
       t.crossAir = 0;
       t.boxRuns.clear();
     }
