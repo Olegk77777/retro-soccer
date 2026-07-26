@@ -1,20 +1,35 @@
 # Texture pack «France 98»
 
-Сгенерировано 18 июля 2026 встроенным генератором изображений Codex. Исходники сохранены в каталоге генератора; в игру положены уменьшенные степени двойки, чтобы не тратить память iPad и не заставлять детали мерцать в рендере 320×240.
+Сгенерировано 18–26 июля 2026 встроенным генератором изображений Codex. Исходники сохранены в каталоге генератора; игровые версии уменьшены до разумного размера, чтобы не тратить память iPad и не заставлять детали мерцать в рендере 320×240.
 
 ## Файлы в игре
 
-- `grass-98.png` — 512×512, бесшовная база тёмной травы за пределами поля.
-- `pitch-worn-98.png` — 1024×663, полноразмерная карта поля с естественным износом у ворот и в центре.
+- `grass-98.png` — 512×512, ухоженный край шкалы 0 % и бесшовная трава за пределами поля.
+- `pitch-balanced-98.png` — 1024×663, умеренный износ 50 %; золотая середина и значение по умолчанию.
+- `pitch-worn-98.png` — 1024×663, сильно вытоптанный край шкалы 100 %.
 - `crowd-night-98.png` — 1024×128, дальняя толпа с флагами сборных эпохи.
 - `ads-france-98.png` — 1024×128, реальные печатные щиты; полный атлас повторяется раз примерно в 48 м.
 - `../ball/tricolore-98.png` — 256×128, цветовая карта мяча France 98.
 
-Разметка поля, слабые неровные полосы покоса, пятна прожекторов и CRT не запечены в PNG. Их добавляет игра: так линии остаются точными, фильтры переключаются, а текстуры можно заменить без изменения физики. Пространственный износ теперь хранится в отдельной карте всего поля: одинаковая 18-метровая плитка физически не могла правдоподобно отличать вратарские от центра.
+Ползунок в настройках плавно смешивает 0→50→100 % на canvas; выбор хранится в `f98.pitchWear`. Яркость трёх источников калибруется отдельно, поэтому меняется степень износа, а не экспозиция поля. Разметка, слабые неровные полосы покоса, пятна прожекторов и CRT не запечены в PNG — их добавляет игра, чтобы линии оставались точными, а фильтры переключались независимо.
 
 ## Финальные промпты
 
-### Полноразмерный газон с износом
+### Умеренный газон — золотая середина
+
+```text
+Use case: precise-object-edit
+Asset type: balanced-wear full-field diffuse/albedo texture for a low-resolution Three.js football pitch
+Input images: Image 1 is the edit target and defines the exact full-pitch composition, orthographic viewpoint, scale, broad color distribution and localized wear map. Image 2 is a supporting reference for healthier dense grass texture and deeper late-1990s broadcast green; do not copy its square framing or repeated details.
+Primary request: create the golden-middle version between these two surfaces. Reduce the visible wear of Image 1 by roughly half while keeping the same natural locations: both goalmouth traffic zones near the left and right center edges, the midfield corridor and kickoff area. Replace much of the pale flattened grass with healthy grass matching Image 2, but retain subtle uneven density, faint reseeded patches, a few soft scuffs and restrained signs of match use. It must clearly be less worn than Image 1, yet clearly less pristine and uniform than Image 2.
+Style/medium: realistic flat diffuse/albedo texture for a 1996–98 TV-broadcast / PS1-era football game; broad calm variation that survives 320×240 rendering, not a cinematic photograph.
+Composition/framing: preserve Image 1 exactly — strict 90-degree orthographic bird's-eye view, full wide 105×68 m pitch surface filling the frame, goals conceptually at left and right center edges, no perspective.
+Color palette: preserve restrained olive broadcast greens; slightly deepen the healthy grass toward Image 2 without making it dark, neon or modern.
+Constraints: change only the intensity and density of grass wear; preserve the full-field layout and natural irregularity. Flat even albedo illumination. No painted field lines, center circle, penalty-box markings, goalposts, players, ball, stadium, shadows, spotlight gradients, objects, text, logos or watermark. No bilateral mirror symmetry.
+Avoid: pristine modern carpet, obvious checkerboard mowing, huge mud patches, bare soil, repeated tile motifs, macro blades, modern saturated FIFA look, sepia, grain overlay, scratches, vignette or dramatic lighting.
+```
+
+### Сильно вытоптанный газон
 
 ```text
 Use case: stylized-concept

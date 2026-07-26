@@ -12,7 +12,8 @@ import {
 } from './atmosphere.js';
 
 const STADIUM_TEXTURES = Object.freeze({
-  pitch: './textures/stadium/pitch-worn-98.png',
+  pitchBalanced: './textures/stadium/pitch-balanced-98.png',
+  pitchWorn: './textures/stadium/pitch-worn-98.png',
   grass: './textures/stadium/grass-98.png',
   crowd: './textures/stadium/crowd-night-98.png',
   // Щиты — часть атрибутики: их назначает пак (src/pack.js). null = остаются
@@ -71,9 +72,10 @@ function drawMirroredTiles(ctx, img, width, height, tileSize) {
   }
 }
 
-// Текстура газона: полноразмерная карта поля с естественным износом + точные
-// полосы покоса и разметка на canvas. Линии остаются кодом: так их размеры
-// всегда точны, а на дальней камере они не мигают.
+// Текстура газона: три степени износа плавно смешиваются на canvas.
+// 0% — прежняя ухоженная плитка; 50% — умеренная карта всего поля;
+// 100% — сильно вытоптанная. Разметка остаётся кодом: так её размеры всегда
+// точны, а на дальней камере линии не мигают.
 function createPitchTexture() {
   const F = CONFIG.field;
   const scale = 10; // пикселей на метр
@@ -86,22 +88,66 @@ function createPitchTexture() {
   const m = (v) => v * scale;
   const cx = w / 2;
   const cy = h / 2;
+  const layers = { clean: null, balanced: null, worn: null };
+  let wear = Math.max(0, Math.min(1, CONFIG.atmosphere.pitchWear.default));
 
-  const paint = (grass = null) => {
+  // Каждую исходную карту заранее приводим к одной яркости. Старая плитка
+  // темнее полноразмерных карт и требует той же подсветки, что была у неё
+  // до появления ползунка; иначе ползунок менял бы не износ, а экспозицию.
+  const buildLayer = (img, kind) => {
+    const layer = document.createElement('canvas');
+    layer.width = w;
+    layer.height = h;
+    const lctx = layer.getContext('2d');
+    lctx.imageSmoothingEnabled = true;
+    if (kind === 'clean') drawMirroredTiles(lctx, img, w, h, m(18));
+    else lctx.drawImage(img, 0, 0, w, h);
+
+    lctx.save();
+    lctx.globalCompositeOperation = 'screen';
+    if (kind === 'clean') lctx.fillStyle = 'rgba(95,185,65,0.46)';
+    else if (kind === 'balanced') lctx.fillStyle = 'rgba(95,150,65,0.42)';
+    else lctx.fillStyle = 'rgba(70,140,55,0.12)';
+    lctx.fillRect(0, 0, w, h);
+    lctx.restore();
+    return layer;
+  };
+
+  const drawWearBase = () => {
+    const clean = layers.clean || layers.balanced || layers.worn;
+    const balanced = layers.balanced || clean || layers.worn;
+    const worn = layers.worn || balanced || clean;
+    if (!clean && !balanced && !worn) return false;
+
+    let from;
+    let to;
+    let mix;
+    if (wear <= 0.5) {
+      from = clean;
+      to = balanced;
+      mix = wear * 2;
+    } else {
+      from = balanced;
+      to = worn;
+      mix = (wear - 0.5) * 2;
+    }
+
+    const first = from || to;
+    const second = to || from;
+    ctx.globalAlpha = 1;
+    ctx.drawImage(first, 0, 0);
+    if (second && second !== first && mix > 0) {
+      ctx.globalAlpha = mix;
+      ctx.drawImage(second, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+    return true;
+  };
+
+  const paint = () => {
     ctx.clearRect(0, 0, w, h);
 
-    if (grass) {
-      ctx.imageSmoothingEnabled = true;
-      // В отличие от старой 18-метровой плитки это карта ВСЕГО поля:
-      // вытоптанные вратарские и центр не повторяются одинаковым узором.
-      ctx.drawImage(grass, 0, 0, w, h);
-      // Новый albedo уже светлее старой плитки, поэтому screen-подсветка лишь
-      // слегка возвращает зелень после sRGB → CRT, не выбеливая потёртости.
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      ctx.fillStyle = 'rgba(70,140,55,0.12)';
-      ctx.fillRect(0, 0, w, h);
-      ctx.restore();
+    if (drawWearBase()) {
       // Полосы не идеальная шахматка: сила каждой немного отличается, как после
       // реальной стрижки и нескольких матчей, но ритм телеполя 90-х сохраняется.
       const stripeTone = [
@@ -163,9 +209,27 @@ function createPitchTexture() {
 
   paint();
   const tex = configureColorTexture(new THREE.CanvasTexture(c));
-  loadTextureImage(STADIUM_TEXTURES.pitch)
-    .then((img) => { paint(img); markTextureDirty(tex); })
-    .catch((e) => console.warn(e.message));
+  tex.userData.setWear = (value) => {
+    wear = Math.max(0, Math.min(1, Number(value) || 0));
+    paint();
+    markTextureDirty(tex);
+  };
+  tex.userData.getWear = () => wear;
+
+  const sources = [
+    ['clean', STADIUM_TEXTURES.grass],
+    ['balanced', STADIUM_TEXTURES.pitchBalanced],
+    ['worn', STADIUM_TEXTURES.pitchWorn],
+  ];
+  for (const [kind, path] of sources) {
+    loadTextureImage(path)
+      .then((img) => {
+        layers[kind] = buildLayer(img, kind);
+        paint();
+        markTextureDirty(tex);
+      })
+      .catch((e) => console.warn(e.message));
+  }
   return tex;
 }
 
@@ -509,12 +573,15 @@ export function buildStadium() {
 
   // Газон с разметкой. MeshBasic = без освещения: яркая «запечённая» картинка,
   // как на PS1 — там свет на поле тоже был нарисован, а не посчитан.
+  const pitchTexture = createPitchTexture();
   const pitch = new THREE.Mesh(
     new THREE.PlaneGeometry(F.length, F.width),
-    new THREE.MeshBasicMaterial({ map: createPitchTexture() }),
+    new THREE.MeshBasicMaterial({ map: pitchTexture }),
   );
   pitch.rotation.x = -Math.PI / 2;
   scene.add(pitch);
+  scene.userData.setPitchWear = (value) => pitchTexture.userData.setWear(value);
+  scene.userData.getPitchWear = () => pitchTexture.userData.getWear();
 
   // Газон-отбивка вокруг разметки: большой, чтобы низ кадра при наклоне камеры
   // к ближней бровке всегда был травой, а не чёрной пустотой. Дальний край

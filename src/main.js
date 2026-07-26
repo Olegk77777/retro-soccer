@@ -76,6 +76,38 @@ document.getElementById('settings-close').addEventListener('click', (e) => {
   settingsPanel.classList.remove('show');
 });
 
+// Износ газона: три карты плавно смешиваются прямо в CanvasTexture.
+// По умолчанию — золотая середина; выбор переживает перезапуск игры.
+const wearSlider = document.getElementById('set-pitch-wear');
+const wearVal = document.getElementById('set-pitch-wear-val');
+const savedWearRaw = localStorage.getItem('f98.pitchWear');
+const savedWear = Number(savedWearRaw);
+const defaultWear = Math.round(CONFIG.atmosphere.pitchWear.default * 100);
+const initialWear = savedWearRaw !== null && Number.isFinite(savedWear) &&
+  savedWear >= 0 && savedWear <= 100 ? savedWear : defaultWear;
+
+function wearLabel(value) {
+  if (value === 50) return 'Золотая середина';
+  if (value <= 15) return 'Ухоженный';
+  if (value <= 35) return 'Лёгкий износ';
+  if (value <= 65) return 'Умеренный';
+  if (value <= 85) return 'Поношенный';
+  return 'Сильно изношенный';
+}
+
+function applyPitchWear(value, remember = false) {
+  const safe = Math.max(0, Math.min(100, Number(value) || 0));
+  wearSlider.value = safe;
+  wearVal.textContent = `${safe}% · ${wearLabel(safe)}`;
+  scene.userData.setPitchWear(safe / 100);
+  if (remember) {
+    try { localStorage.setItem('f98.pitchWear', String(safe)); } catch (e) { /* приватный режим */ }
+  }
+}
+
+applyPitchWear(initialWear);
+wearSlider.addEventListener('input', () => applyPitchWear(wearSlider.value, true));
+
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
 const assistSlider = document.getElementById('set-assist');
