@@ -278,8 +278,8 @@ function createShadowAlphaMap() {
   const img = ctx.createImageData(w, h);
   for (let y = 0; y < h; y++) {
     const v = y / (h - 1);                 // 0 у ног → 1 в конце тени
-    const spread = 1 + 0.55 * v;           // хвост расплывается, как настоящая полутень
-    const fade = Math.pow(1 - v, 2.2);     // и быстро тает: чёткая тень только под ногами
+    const spread = 1 + 0.75 * v;           // хвост расплывается, как настоящая полутень
+    const fade = Math.pow(1 - v, 2.6);     // и быстро тает: чёткая тень только под ногами
     for (let x = 0; x < w; x++) {
       const u = (x / (w - 1) - 0.5) * 2 / spread;
       const core = Math.max(0, 1 - u * u);

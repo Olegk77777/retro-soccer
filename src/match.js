@@ -12,6 +12,7 @@ import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace } from './ai/steering.js';
 import { playWhistle } from './sfx.js';
 import { Replay } from './replay.js';
+import { Officials } from './officials.js';
 
 // Плавная кривая 0..1 (smoothstep): кино-движение камеры интро без рывков
 function smooth01(t) {
@@ -170,6 +171,9 @@ export class Match {
     for (const p of this.humanTeam.players) {
       p.passAssist = (player, type, power) => this.resolvePass(player, type, power);
     }
+
+    // Бригада арбитров: чисто визуальные фигуры, в игру не вмешиваются
+    this.officials = new Officials(scene);
 
     // Повтор гола: кольцевая запись поз всех тел, включается после гола
     this.replay = new Replay(this._all, ball);
@@ -588,6 +592,10 @@ export class Match {
       this.controlledMarker.position.x = cp.x;
       this.controlledMarker.position.z = cp.z;
     }
+
+    // Бригада арбитров живёт своей жизнью — на паузах тоже (они не замирают,
+    // пока мяч в сетке), но в повторе стоят: там кадром правит запись
+    this.officials.update(dt, aiBall, this.teams);
 
     // Кольцевая запись для повтора: пишем позы уже ПОСЛЕ движения всех тел,
     // вместе с тем, чья была атака — по ней потом отматываем комбинацию
