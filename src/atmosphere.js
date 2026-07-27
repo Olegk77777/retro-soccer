@@ -121,6 +121,83 @@ export function buildFloodlightHalos(scene) {
   }
 }
 
+// --- Конусы света под лампами --------------------------------------------
+
+// Толщина «воздуха» вдоль луча зрения, посчитанная по нормали конуса: в
+// середине видимой стенки луч смотрит на камеру (N·V→1) и проходит сквозь
+// максимум дымки, у силуэта N перпендикулярна взгляду (N·V→0) — там прозрачно.
+// Это даёт мягкий объёмный столб без единого лишнего пикселя расчёта.
+const SHAFT_VERT = /* glsl */ `
+  varying vec3 vNormalV;
+  varying vec3 vViewDir;
+  varying float vT;           // 0 у лампы → 1 у нижнего среза
+  uniform float uLength;
+  void main() {
+    vNormalV = normalize(normalMatrix * normal);
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vViewDir = normalize(-mv.xyz);
+    vT = clamp(-position.y / uLength, 0.0, 1.0);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const SHAFT_FRAG = /* glsl */ `
+  precision mediump float;
+  varying vec3 vNormalV;
+  varying vec3 vViewDir;
+  varying float vT;
+  uniform float uOpacity;
+  uniform float uFade;
+  uniform float uEdge;
+  void main() {
+    float thickness = pow(abs(dot(normalize(vNormalV), normalize(vViewDir))), uEdge);
+    // Луч ОБЯЗАН погаснуть в воздухе: дошедший до газона конус упирается в
+    // него резким срезом и сразу читается как мультик, а не как свет.
+    float fall = pow(1.0 - vT, uFade) * smoothstep(0.0, 0.07, vT);
+    float a = uOpacity * thickness * fall;
+    if (a <= 0.002) discard;
+    // Цвет на альфу НЕ умножаем: аддитивный бленд three.js — это
+    // src.rgb * src.a + dst, множитель уже внутри. Домножишь сам — получишь
+    // квадрат прозрачности, и луч исчезнет (проверено 27.07.2026).
+    gl_FragColor = vec4(1.0, 0.96, 0.86, a);
+  }
+`;
+
+export function buildLightShafts(scene) {
+  const S = CONFIG.atmosphere.shafts;
+  if (!S.enabled) return;
+  // 48 сегментов, а не 22: на гранях конуса |N·V| меняется скачком, и при
+  // заметной яркости грубая сетка читается спицами колеса.
+  const geo = new THREE.ConeGeometry(S.radius, S.length, 48, 1, true);
+  geo.translate(0, -S.length / 2, 0); // вершина конуса — ровно в лампе
+  const down = new THREE.Vector3(0, -1, 0);
+  const aim = new THREE.Vector3();
+
+  for (const m of mastPositions()) {
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: SHAFT_VERT,
+      fragmentShader: SHAFT_FRAG,
+      uniforms: {
+        uLength: { value: S.length },
+        uOpacity: { value: S.opacity },
+        uFade: { value: S.fade },
+        uEdge: { value: S.edge },
+      },
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const cone = new THREE.Mesh(geo, mat);
+    cone.position.set(m.x, m.y, m.z);
+    // Лампа бьёт внутрь стадиона, а не строго вниз — иначе четыре столба
+    // стоят по углам сами по себе и поле между ними остаётся без причины
+    aim.set(-m.x * 0.65, -m.y, -m.z * 0.65).normalize();
+    cone.quaternion.setFromUnitVectors(down, aim);
+    scene.add(cone);
+  }
+}
+
 // --- Вспышки фотокамер на трибунах ---------------------------------------
 
 const FLASH_VERT = /* glsl */ `
@@ -199,6 +276,14 @@ export class CameraFlashes {
       this._place(i);
     }
     this.count = n;
+  }
+
+  // Размер вспышки задан в МЕТРАХ, а gl_PointSize считается в пикселях
+  // буфера. Сменили чёткость картинки — пересчитываем, иначе на 720p
+  // вспышки станут вдвое крупнее прежних.
+  setRenderHeight(h) {
+    this.material.uniforms.uScale.value = h
+      / (2 * Math.tan(THREE.MathUtils.degToRad(CONFIG.camera.fov) / 2));
   }
 
   _nextPause(n) {
@@ -292,28 +377,75 @@ function collectStandSpots(stands, want) {
 
 // --- Веер теней от четырёх мачт ------------------------------------------
 
-// Мягкое пятно, вытянутое от ног игрока: у начала плотное, к хвосту тает.
+// ВАЖНО (грабля 27.07.2026): three.js читает alphaMap из ЗЕЛЁНОГО канала
+// (`diffuseColor.a *= texture2D(alphaMap, uv).g`), а НЕ из альфы картинки.
+// Прежняя карта клала градиент в альфу, оставляя RGB белыми — зелёный всегда
+// был единицей, и весь мягкий рисунок пропадал: под каждым игроком рисовались
+// четыре СПЛОШНЫХ ПРЯМОУГОЛЬНИКА. Маску пишем в RGB, альфу держим на 255.
+
+// Мягкое пятно, вытянутое от ног игрока: под ногами плотное контактное ядро,
+// дальше — расходящаяся полутень, которая тает в ноль.
 function createShadowAlphaMap() {
-  const w = 32;
-  const h = 96;
+  const S = CONFIG.atmosphere.shadows;
+  const w = 64;
+  const h = 160;
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   const ctx = c.getContext('2d');
   const img = ctx.createImageData(w, h);
+  const core = Math.max(0.02, S.core);
   for (let y = 0; y < h; y++) {
-    const v = y / (h - 1);                 // 0 у ног → 1 в конце тени
-    const spread = 1 + 0.75 * v;           // хвост расплывается, как настоящая полутень
-    const fade = Math.pow(1 - v, 2.6);     // и быстро тает: чёткая тень только под ногами
+    const v = y / (h - 1);                       // 0 у ног → 1 в конце тени
+    // Ядро контакта: почти не расплывается и держит плотность, дальше —
+    // полутень, которая и шире, и слабее. Настоящая тень от лампы устроена так.
+    const k = Math.max(0, (v - core) / (1 - core));
+    const spread = 1 + S.spread * k * k;
+    const fade = v < core
+      ? 1 - 0.25 * (v / core)                    // лёгкий спад уже внутри ядра
+      : 0.75 * Math.pow(1 - k, S.tail);
     for (let x = 0; x < w; x++) {
       const u = (x / (w - 1) - 0.5) * 2 / spread;
-      const core = Math.max(0, 1 - u * u);
-      const a = core * core * fade;
+      // Косинусный профиль поперёк: у гауссианы нет резкой границы, поэтому
+      // «прямоугольности» не остаётся даже у самого плотного места.
+      const across = Math.exp(-S.feather * u * u);
+      const a = Math.min(1, across * fade);
       const idx = (y * w + x) * 4;
-      img.data[idx] = 255;
-      img.data[idx + 1] = 255;
-      img.data[idx + 2] = 255;
-      img.data[idx + 3] = Math.round(255 * Math.min(1, a));
+      const g = Math.round(255 * a);
+      img.data[idx] = g;
+      img.data[idx + 1] = g;                     // three берёт ИМЕННО этот канал
+      img.data[idx + 2] = g;
+      img.data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
+}
+
+// Круглое мягкое пятно — тень мяча и любой другой «контакт с газоном».
+// Тот же канал-подвох, что и выше: маска живёт в RGB.
+export function createBlobAlphaMap(size = 64, falloff = 2.4) {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const r = (size - 1) / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const d = Math.hypot(x - r, y - r) / r;
+      const a = d >= 1 ? 0 : Math.pow(1 - d * d, falloff);
+      const idx = (y * size + x) * 4;
+      const g = Math.round(255 * Math.min(1, a));
+      img.data[idx] = g;
+      img.data[idx + 1] = g;
+      img.data[idx + 2] = g;
+      img.data[idx + 3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);

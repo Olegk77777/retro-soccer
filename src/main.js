@@ -108,6 +108,35 @@ function applyPitchWear(value, remember = false) {
 applyPitchWear(initialWear);
 wearSlider.addEventListener('input', () => applyPitchWear(wearSlider.value, true));
 
+// Чёткость: высота внутреннего рендера. Строчность кинескопа и зерно к ней
+// НЕ привязаны (CONFIG.render.scanLines / grainRes), поэтому 720p не съедает
+// ретро-дух — он только перестаёт мылить дальнего игрока.
+const qualitySelect = document.getElementById('set-quality');
+for (const [h, label] of CONFIG.render.heights) {
+  const opt = document.createElement('option');
+  opt.value = String(h);
+  opt.textContent = label;
+  qualitySelect.appendChild(opt);
+}
+
+function applyQuality(height, remember = false) {
+  const known = CONFIG.render.heights.map(([h]) => h);
+  const h = known.includes(height) ? height : CONFIG.render.targetHeight;
+  qualitySelect.value = String(h);
+  crt.setHeight(h);
+  // Вспышки меряют себя в метрах, а рисуются в пикселях буфера — им нужно
+  // знать новую высоту, иначе на 720p они станут вдвое крупнее.
+  if (scene.userData.flashes) scene.userData.flashes.setRenderHeight(h);
+  if (remember) {
+    try { localStorage.setItem('f98.renderHeight', String(h)); } catch (e) { /* приватный режим */ }
+  }
+}
+
+const savedQuality = Number(localStorage.getItem('f98.renderHeight'));
+applyQuality(Number.isFinite(savedQuality) && savedQuality > 0
+  ? savedQuality : CONFIG.render.targetHeight);
+qualitySelect.addEventListener('change', () => applyQuality(Number(qualitySelect.value), true));
+
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
 const assistSlider = document.getElementById('set-assist');

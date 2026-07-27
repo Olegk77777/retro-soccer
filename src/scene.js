@@ -7,7 +7,7 @@ import { CONFIG } from './config.js';
 import { PACK } from './pack.js';
 import { GoalSystem } from './goal.js';
 import {
-  mastPositions, paintPitchLight, buildFloodlightHalos,
+  mastPositions, paintPitchLight, buildFloodlightHalos, buildLightShafts,
   CameraFlashes, GroundShadows,
 } from './atmosphere.js';
 
@@ -456,6 +456,7 @@ function buildFloodlights(scene) {
     scene.add(lamp);
   }
   buildFloodlightHalos(scene);
+  buildLightShafts(scene);
 }
 
 // До публичного релиза используем настоящие бренды эпохи: они сразу продают кадр как трансляцию 1998-го.
@@ -569,7 +570,12 @@ export function buildStadium() {
   const F = CONFIG.field;
   const scene = new THREE.Scene();
   scene.background = createSkyTexture(); // вечернее небо — матч под прожекторами
-  scene.fog = new THREE.Fog(0x141c33, 130, 260);
+  // Дымка. Прежние 130 м начинались ДАЛЬШЕ всего, что видно с ТВ-камеры
+  // (дальняя трибуна — метров 120), поэтому воздушной перспективы не было
+  // вовсе: дальняя половина поля читалась так же контрастно, как ближняя,
+  // и кадр выглядел макетом. Теперь дымка стартует сразу за дальней бровкой.
+  const HZ = CONFIG.atmosphere.haze;
+  scene.fog = new THREE.Fog(HZ.color, HZ.near, HZ.far);
 
   // Газон с разметкой. MeshBasic = без освещения: яркая «запечённая» картинка,
   // как на PS1 — там свет на поле тоже был нарисован, а не посчитан.

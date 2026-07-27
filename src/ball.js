@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { PACK } from './pack.js';
 import { predictLanding } from './ai/steering.js';
+import { createBlobAlphaMap } from './atmosphere.js';
 
 function createBallTexture() {
   const c = document.createElement('canvas');
@@ -54,10 +55,18 @@ export class Ball {
       new THREE.SphereGeometry(B.radius, 10, 8),
       new THREE.MeshBasicMaterial({ map: createBallTexture() }),
     );
-    // Классическая ретро-тень: плоский тёмный кружок под мячом
+    // Тень мяча: не 12-угольник с жёстким краем, а мягкое пятно с полутенью —
+    // тот же принцип, что у веера теней игроков (src/atmosphere.js).
+    // Квадрат вдвое шире мяча: карта прозрачности сама скругляет и растушёвывает.
     this.shadow = new THREE.Mesh(
-      new THREE.CircleGeometry(B.radius * 1.15, 12),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
+      new THREE.PlaneGeometry(B.radius * 4.4, B.radius * 4.4),
+      new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        alphaMap: createBlobAlphaMap(48, 2.1),
+        transparent: true,
+        opacity: 0.42,
+        depthWrite: false,
+      }),
     );
     this.shadow.rotation.x = -Math.PI / 2;
     this.shadow.position.y = 0.02;
@@ -205,9 +214,12 @@ export class Ball {
     this.shadow.position.x = p.x;
     this.shadow.position.z = p.z;
     const hgt = Math.max(0, p.y - B.radius);
-    const sc = Math.max(0.5, 1 - hgt / 12);
+    // Чем выше мяч, тем ШИРЕ и слабее пятно: полутень расходится с высотой.
+    // Прежняя тень, наоборот, сжималась — из-за этого мяч в воздухе читался
+    // как маленький мяч на газоне, а не как высоко летящий.
+    const sc = 1 + Math.min(1.2, hgt / 8);
     this.shadow.scale.set(sc, sc, 1);
-    this.shadow.material.opacity = 0.35 * Math.max(0.35, 1 - hgt / 15);
+    this.shadow.material.opacity = 0.42 * Math.max(0.12, 1 - hgt / 13);
 
     this._updateMark(dt);
 
