@@ -15,7 +15,7 @@ const STADIUM_TEXTURES = Object.freeze({
   pitchBalanced: './textures/stadium/pitch-balanced-98.png',
   pitchWorn: './textures/stadium/pitch-worn-98.png',
   grass: './textures/stadium/grass-98.png',
-  crowd: './textures/stadium/crowd-night-98.png',
+  crowd: './textures/stadium/crowd-night-98-fine.png',
   // Щиты — часть атрибутики: их назначает пак (src/pack.js). null = остаются
   // процедурные щиты с выдуманными марками эпохи, нарисованные ниже на canvas.
   boards: PACK.textures.boards,
@@ -341,7 +341,8 @@ function createApronTexture() {
   return tex;
 }
 
-// Текстура толпы: шумные цветные точки — с ТВ-дистанции читается как трибуна
+// Текстура толпы: тысячи МЕЛКИХ фигур. Крупные лица превращали дальнюю трибуну
+// в стену великанов — в кадре зритель был почти одного роста с футболистом.
 function createCrowdTexture() {
   const c = document.createElement('canvas');
   c.width = 1024;
@@ -355,7 +356,10 @@ function createCrowdTexture() {
     ctx.fillRect(Math.random() * c.width, Math.random() * c.height, 2, 3);
   }
   const tex = configureColorTexture(new THREE.CanvasTexture(c), { anisotropy: 2 });
-  tex.wrapS = THREE.RepeatWrapping;
+  // Зеркальный повтор сшивает край пиксель-в-пиксель, даже если генератор
+  // картинки не сделал математически бесшовную текстуру.
+  tex.wrapS = THREE.MirroredRepeatWrapping;
+  textureClones.set(tex, []);
   loadTextureImage(STADIUM_TEXTURES.crowd)
     .then((img) => {
       ctx.drawImage(img, 0, 0, c.width, c.height);
@@ -373,69 +377,82 @@ function createCrowdTexture() {
 
 // Возвращает четыре сектора: по ним потом рассыпаются вспышки фотокамер.
 function buildStands(scene) {
-  const F = CONFIG.field;
+  const T = CONFIG.track;
+  const S = CONFIG.atmosphere.stands;
   const crowd = createCrowdTexture();
-  // Свет уже «запечён» в изображении сектора; Basic не даёт наклону бокса
-  // случайно погасить толпу и стоит дешевле на планшете.
-  const standMat = new THREE.MeshBasicMaterial({ map: crowd });
-  const sideMat = new THREE.MeshLambertMaterial({ color: 0x232838 });
 
-  const standH = 17;
-  const standD = 18;
-  const tilt = -0.42; // наклон трибуны к полю
+  const standH = S.height;
+  const tilt = S.tilt;
   const a = Math.abs(tilt);
-  // Нижний ряд сам доходит до поверхности y=-0.02, без отдельного забора.
-  // Размер сектора не растягиваем: толпа сохраняет прежний масштаб.
-  const standY = -0.02
-    + (standH / 2) * Math.cos(a)
-    - (standD / 2) * Math.sin(a);
+  // Трибуна — видимое наклонное полотно, а не закрытый бокс. Невидимые торцы,
+  // задник и низ прежнего бокса давали по шесть draw call на сектор и сами же
+  // выглядывали в стыках чёрными полосами. Плоскость рисуется одним вызовом.
+  const standY = -0.02 + (standH / 2) * Math.cos(a);
+  const faceInset = (standH / 2) * Math.sin(a);
+  const trackOuter = T.innerRadius + T.lanes * T.laneWidth + T.shoulder;
+  const bowlRadius = trackOuter - S.trackInset;
+  const stands = [];
+  let texturePhase = 0;
 
-  const make = (len) => {
-    const geo = new THREE.BoxGeometry(len, standH, standD);
-    // Толпа — только на широкой грани, торцы тёмные
-    return new THREE.Mesh(geo, [sideMat, sideMat, sideMat, sideMat, standMat, standMat]);
+  // boundary — точка НИЖНЕГО ряда; inward — единичный вектор к полю.
+  // Центр полотна уходит наружу на faceInset, поэтому геометрия не залезает
+  // на дорожку. Соседние хорды слегка перекрываются и закрывают тёмные торцы.
+  const addSection = (boundaryX, boundaryZ, inwardX, inwardZ, rawLen) => {
+    const len = rawLen + S.seamOverlap;
+    const phase = texturePhase;
+    const tex = crowd.clone();
+    tex.needsUpdate = true;
+    tex.repeat.set(len / S.textureWorldWidth, 1);
+    tex.offset.set(phase / S.textureWorldWidth, 0);
+    textureClones.get(crowd).push(tex);
+    texturePhase += rawLen;
+
+    // Свет уже «запечён» в изображении; Basic не гасит наклонный сектор.
+    const standMat = new THREE.MeshBasicMaterial({
+      map: tex,
+      side: THREE.DoubleSide,
+    });
+    const stand = new THREE.Mesh(new THREE.PlaneGeometry(len, standH), standMat);
+    stand.rotation.order = 'YXZ';
+    stand.rotation.y = Math.atan2(inwardX, inwardZ);
+    stand.rotation.x = tilt;
+    stand.position.set(
+      boundaryX - inwardX * faceInset,
+      standY,
+      boundaryZ - inwardZ * faceInset,
+    );
+    scene.add(stand);
+    stands.push(stand);
   };
 
-  // Овал шире футбольной коробки у ворот. Чаша подстраивается под его внешний
-  // край, иначе торцевые сектора срезали бы белые линии на рабочих кадрах.
-  const faceInset = (standH / 2) * Math.sin(a) + (standD / 2) * Math.cos(a);
-  const trackOuter = CONFIG.track.innerRadius
-    + CONFIG.track.lanes * CONFIG.track.laneWidth
-    + CONFIG.track.shoulder;
-  const trackEnd = CONFIG.track.straightHalf + trackOuter;
-  const bowlOverlap = 2.5;
-  const long = (trackEnd + bowlOverlap) * 2;
-  const short = F.width + 46;
-  // Трибуны вынесены наружу так, чтобы ТВ-камера (z≈58) была ВНУТРИ ближней
-  // трибуны, как настоящая телекамера, а не за ней (иначе видно её тёмную изнанку)
-  const dz = F.width / 2 + F.apron + 20;
-  const dx = trackEnd + faceInset;
+  // Две прямые и две многогранные полуокружности повторяют олимпийский овал.
+  // Прежние четыре прямоугольника сходились торцами и раскрывали в углах
+  // чёрные щели. Теперь у чаши нет открытых углов.
+  const straightLen = T.straightHalf * 2;
+  addSection(0, -bowlRadius, 0, 1, straightLen);
 
-  const north = make(long);
-  north.position.set(0, standY, -dz);
-  north.rotation.x = tilt;
-  scene.add(north);
+  const step = Math.PI / S.curveSegments;
+  const chord = 2 * bowlRadius * Math.sin(step / 2);
+  const addCap = (centerX, fromAngle) => {
+    for (let i = 0; i < S.curveSegments; i++) {
+      const angle = fromAngle + (i + 0.5) * step;
+      const outwardX = Math.cos(angle);
+      const outwardZ = Math.sin(angle);
+      addSection(
+        centerX + bowlRadius * outwardX,
+        bowlRadius * outwardZ,
+        -outwardX,
+        -outwardZ,
+        chord,
+      );
+    }
+  };
 
-  const south = make(long);
-  south.position.set(0, standY, dz);
-  south.rotation.x = -tilt;
-  scene.add(south);
+  addCap(T.straightHalf, -Math.PI / 2);
+  addSection(0, bowlRadius, 0, -1, straightLen);
+  addCap(-T.straightHalf, Math.PI / 2);
 
-  const west = make(short);
-  west.rotation.order = 'YXZ'; // сначала развернуть торец, затем наклонить весь ряд ровно
-  west.rotation.y = Math.PI / 2;
-  west.rotation.x = tilt;
-  west.position.set(-dx, standY, 0);
-  scene.add(west);
-
-  const east = make(short);
-  east.rotation.order = 'YXZ';
-  east.rotation.y = -Math.PI / 2;
-  east.rotation.x = tilt;
-  east.position.set(dx, standY, 0);
-  scene.add(east);
-
-  return [north, south, west, east];
+  return stands;
 }
 
 function buildFloodlights(scene) {

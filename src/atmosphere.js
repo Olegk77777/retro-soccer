@@ -226,7 +226,7 @@ const FLASH_FRAG = /* glsl */ `
 `;
 
 export class CameraFlashes {
-  // stands — меши трибун (боксы). Вспышки садятся на ту грань каждого
+  // stands — наклонные полотна секторов. Вспышки садятся на ту сторону каждого
   // сектора, что смотрит на поле: щёлкают ведь оттуда, где сидят люди.
   constructor(scene, stands) {
     const A = CONFIG.atmosphere.flashes;
@@ -346,13 +346,18 @@ export class CameraFlashes {
   }
 }
 
-// Точки на «лицевой» грани каждого сектора: берём ту грань бокса, чья
+// Точки на «лицевой» стороне каждого сектора: берём сторону полотна, чья
 // нормаль в мире смотрит к центру поля, и раскидываем по ней сетку мест.
 function collectStandSpots(stands, want) {
   const A = CONFIG.atmosphere.flashes;
   const spots = [];
   if (!stands || !stands.length) return spots;
-  const perStand = Math.ceil(want / stands.length);
+  // После замыкания чаши сектора имеют разную длину. Одинаковое число точек
+  // на короткой хорде и длинной прямой собирало бы вспышки в яркие «гнёзда».
+  const totalWidth = stands.reduce(
+    (sum, stand) => sum + (stand.geometry.parameters.width || 0),
+    0,
+  );
   const normal = new THREE.Vector3();
   const toCenter = new THREE.Vector3();
   const local = new THREE.Vector3();
@@ -360,6 +365,7 @@ function collectStandSpots(stands, want) {
   for (const stand of stands) {
     stand.updateMatrixWorld(true);
     const par = stand.geometry.parameters;
+    const perStand = Math.max(1, Math.ceil(want * par.width / totalWidth));
     normal.set(0, 0, 1).transformDirection(stand.matrixWorld);
     toCenter.set(-stand.position.x, 0, -stand.position.z).normalize();
     const face = normal.dot(toCenter) >= 0 ? 1 : -1;
@@ -367,7 +373,7 @@ function collectStandSpots(stands, want) {
     for (let i = 0; i < perStand; i++) {
       const u = Math.random() - 0.5;
       const v = A.minRow + Math.random() * (A.maxRow - A.minRow) - 0.5;
-      local.set(u * par.width, v * par.height, face * (par.depth / 2 + 0.15));
+      local.set(u * par.width, v * par.height, face * 0.15);
       stand.localToWorld(local);
       spots.push({ x: local.x, y: local.y, z: local.z });
     }
