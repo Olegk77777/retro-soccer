@@ -248,8 +248,7 @@ export class CameraFlashes {
     // Масштаб точки: сколько пикселей занимает метр на дистанции 1 м.
     // Считается из fov камеры и высоты внутреннего рендера — если поменяем
     // targetHeight, вспышки останутся того же физического размера.
-    const uScale = CONFIG.render.targetHeight
-      / (2 * Math.tan(THREE.MathUtils.degToRad(CONFIG.camera.fov) / 2));
+    const uScale = pixelsPerMeter(CONFIG.render.targetHeight);
 
     this.material = new THREE.ShaderMaterial({
       vertexShader: FLASH_VERT,
@@ -282,8 +281,7 @@ export class CameraFlashes {
   // буфера. Сменили чёткость картинки — пересчитываем, иначе на 720p
   // вспышки станут вдвое крупнее прежних.
   setRenderHeight(h) {
-    this.material.uniforms.uScale.value = h
-      / (2 * Math.tan(THREE.MathUtils.degToRad(CONFIG.camera.fov) / 2));
+    this.material.uniforms.uScale.value = pixelsPerMeter(h);
   }
 
   _nextPause(n) {
@@ -379,6 +377,136 @@ function collectStandSpots(stands, want) {
     }
   }
   return spots;
+}
+
+// --- Мошкара в лучах прожекторов -----------------------------------------
+
+// Ночной стадион под лампами всегда в мошкаре: у каждой лампы висит облако
+// мерцающих точек. Примета вечернего эфира не хуже фотовспышек.
+//
+// Движение считает ШЕЙДЕР, а не процессор: у каждой мошки свои фазы и
+// радиусы, положение — три синусоиды от общего времени. Буфер заливается
+// ОДИН раз при сборке, в кадре меняется единственный юниформ. Двести с
+// лишним точек не стоят процессору ничего.
+const MIDGE_VERT = /* glsl */ `
+  attribute vec3 aOrbit;    // радиусы блуждания по осям, м
+  attribute vec3 aRate;     // частоты по осям, рад/с
+  attribute vec3 aPhase;    // фазы по осям
+  attribute float aSeed;
+  varying float vAlpha;
+  uniform float uTime;
+  uniform float uScale;     // пиксель-на-метр на дистанции 1 м
+  uniform float uSize;      // видимый размер мошки в метрах
+  uniform float uFlicker;
+  void main() {
+    vec3 wob = vec3(
+      sin(uTime * aRate.x + aPhase.x),
+      sin(uTime * aRate.y + aPhase.y),
+      cos(uTime * aRate.z + aPhase.z)
+    ) * aOrbit;
+    vec4 mv = modelViewMatrix * vec4(position + wob, 1.0);
+    // Мошка мерцает, когда поворачивается к свету крылом: быстрая
+    // несимметричная пульсация, у каждой своя.
+    float f = sin(uTime * uFlicker + aSeed * 6.283);
+    vAlpha = 0.25 + 0.75 * f * f;
+    gl_PointSize = max(1.0, uSize * uScale / max(1.0, -mv.z));
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const MIDGE_FRAG = /* glsl */ `
+  precision mediump float;
+  varying float vAlpha;
+  uniform float uOpacity;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float a = uOpacity * vAlpha * (1.0 - min(1.0, dot(d, d) * 4.0));
+    if (a <= 0.004) discard;
+    gl_FragColor = vec4(1.0, 0.95, 0.82, a);
+  }
+`;
+
+export class Midges {
+  constructor(scene) {
+    const M = CONFIG.atmosphere.midges;
+    this.cfg = M;
+    this.time = 0;
+    const masts = mastPositions();
+    const n = M.perMast * masts.length;
+
+    const pos = new Float32Array(n * 3);
+    const orbit = new Float32Array(n * 3);
+    const rate = new Float32Array(n * 3);
+    const phase = new Float32Array(n * 3);
+    const seed = new Float32Array(n);
+
+    let i = 0;
+    for (const m of masts) {
+      for (let k = 0; k < M.perMast; k++) {
+        // Облако вытянуто ВНИЗ от лампы: там же, где виден конус света, и
+        // там мошкара ближе к камере, а значит заметнее в кадре.
+        const a = Math.random() * Math.PI * 2;
+        // Степени, а не равномерность: мошкара вьётся у САМОЙ лампы и редеет
+        // книзу. Равномерное облако читается сеткой точек, а не роем.
+        const r = M.spread * Math.pow(Math.random(), 0.8);
+        pos[i * 3] = m.x + Math.cos(a) * r;
+        pos[i * 3 + 1] = m.y - Math.pow(Math.random(), 1.7) * M.drop;
+        pos[i * 3 + 2] = m.z + Math.sin(a) * r;
+        for (let ax = 0; ax < 3; ax++) {
+          orbit[i * 3 + ax] = M.orbit * (0.35 + Math.random());
+          rate[i * 3 + ax] = M.rate * (0.5 + Math.random());
+          phase[i * 3 + ax] = Math.random() * Math.PI * 2;
+        }
+        seed[i] = Math.random();
+        i++;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aOrbit', new THREE.BufferAttribute(orbit, 3));
+    geo.setAttribute('aRate', new THREE.BufferAttribute(rate, 3));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 400);
+
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: MIDGE_VERT,
+      fragmentShader: MIDGE_FRAG,
+      uniforms: {
+        uTime: { value: 0 },
+        uScale: { value: pixelsPerMeter(CONFIG.render.targetHeight) },
+        uSize: { value: M.size },
+        uFlicker: { value: M.flicker },
+        uOpacity: { value: M.opacity },
+      },
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    this.points = new THREE.Points(geo, this.material);
+    this.points.frustumCulled = false;
+    scene.add(this.points);
+  }
+
+  // Размер задан в МЕТРАХ, а gl_PointSize — в пикселях буфера (та же
+  // зависимость, что у вспышек: сменили чёткость — пересчитали).
+  setRenderHeight(h) {
+    this.material.uniforms.uScale.value = pixelsPerMeter(h);
+  }
+
+  update(dt) {
+    this.time += dt;
+    this.material.uniforms.uTime.value = this.time;
+  }
+}
+
+// Сколько пикселей буфера занимает метр на дистанции метр: из fov камеры
+// и высоты внутреннего рендера. Общая формула для всего, что меряется в
+// метрах, а рисуется точками.
+function pixelsPerMeter(height) {
+  return height / (2 * Math.tan(THREE.MathUtils.degToRad(CONFIG.camera.fov) / 2));
 }
 
 // --- Веер теней от четырёх мачт ------------------------------------------

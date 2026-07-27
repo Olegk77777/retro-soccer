@@ -8,7 +8,7 @@ import { PACK } from './pack.js';
 import { GoalSystem } from './goal.js';
 import {
   mastPositions, paintPitchLight, buildFloodlightHalos, buildLightShafts,
-  CameraFlashes, GroundShadows,
+  CameraFlashes, GroundShadows, Midges,
 } from './atmosphere.js';
 import { Flares } from './flares.js';
 
@@ -629,6 +629,7 @@ export function buildStadium() {
   scene.userData.flashes = new CameraFlashes(scene, stands);
   scene.userData.shadows = new GroundShadows(scene);
   scene.userData.flares = new Flares(scene, stands);
+  scene.userData.midges = new Midges(scene);
 
   // Свет (для объёмных объектов: мяч, ворота, трибуны): ночь + мощные прожекторы
   scene.add(new THREE.HemisphereLight(0x99aacc, 0x334422, 0.9));

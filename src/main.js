@@ -89,6 +89,8 @@ function applyQuality(height, save = false) {
   // Вспышки меряют себя в метрах, а рисуются в пикселях буфера — им нужно
   // знать новую высоту, иначе на 720p они станут вдвое крупнее.
   if (scene.userData.flashes) scene.userData.flashes.setRenderHeight(h);
+  // Мошкара меряется в метрах ровно так же, как вспышки
+  if (scene.userData.midges) scene.userData.midges.setRenderHeight(h);
   if (save) remember('f98.renderHeight', h);
 }
 
@@ -418,6 +420,7 @@ function frame() {
   if (scene.userData.shadows) scene.userData.shadows.update();
   if (scene.userData.flashes) scene.userData.flashes.update(dt);
   if (scene.userData.flares) scene.userData.flares.update(dt);
+  if (scene.userData.midges) scene.userData.midges.update(dt);
   if (event === 'goal' && match) match.onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.

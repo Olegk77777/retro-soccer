@@ -88,6 +88,35 @@ const QUAD_VERT = /* glsl */ `
   }
 `;
 
+// Пелена, стелющаяся по газону. Квад НЕ разворачивается к камере, а лежит
+// в плоскости земли: так дым и ведёт себя, когда остыл и растёкся, а с ТВ-камеры
+// (она смотрит сверху вниз) лежащий квад занимает вдвое-втрое меньше пикселей,
+// чем вертикальный billboard того же размера. На планшете это и решает.
+const GROUND_VERT = /* glsl */ `
+  attribute vec2 aCorner;
+  attribute float aSize;
+  attribute float aRot;
+  attribute vec3 aColor;
+  attribute float aAlpha;
+  varying vec2 vUv;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying float vFog;
+  uniform float uFogNear;
+  uniform float uFogFar;
+  void main() {
+    vUv = aCorner + 0.5;
+    vColor = aColor;
+    vAlpha = aAlpha;
+    float s = sin(aRot);
+    float c = cos(aRot);
+    vec2 off = vec2(aCorner.x * c - aCorner.y * s, aCorner.x * s + aCorner.y * c) * aSize;
+    vec4 mv = modelViewMatrix * vec4(position + vec3(off.x, 0.0, off.y), 1.0);
+    vFog = clamp((-mv.z - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
 const SMOKE_FRAG = /* glsl */ `
   precision mediump float;
   varying vec2 vUv;
@@ -124,7 +153,7 @@ const FIRE_FRAG = /* glsl */ `
 `;
 
 class QuadPool {
-  constructor(scene, max, { additive, map, renderOrder }) {
+  constructor(scene, max, { additive, map, renderOrder, ground }) {
     this.max = max;
     const HZ = CONFIG.atmosphere.haze;
 
@@ -169,12 +198,19 @@ class QuadPool {
     }
 
     const mat = new THREE.ShaderMaterial({
-      vertexShader: QUAD_VERT,
+      vertexShader: ground ? GROUND_VERT : QUAD_VERT,
       fragmentShader: additive ? FIRE_FRAG : SMOKE_FRAG,
       uniforms,
       transparent: true,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
       depthWrite: false,
+      // ГРАБЛЯ (27.07.2026): у ЛЕЖАЧЕГО квада тот же порядок обхода вершин
+      // даёт нормаль ВНИЗ — (v1−v0)×(v2−v0) = (0,−1,0), — и камера, которая
+      // смотрит на газон сверху, видит заднюю грань. Односторонний материал
+      // отсекал пелену целиком: в кадре её не было ВООБЩЕ, хотя в буфере
+      // лежали правильные позиции, размеры и альфа. У billboard-квадов такого
+      // не бывает — они разворачиваются в пространстве вида и всегда лицом.
+      side: ground ? THREE.DoubleSide : THREE.FrontSide,
     });
 
     this.mesh = new THREE.Mesh(geo, mat);
@@ -281,14 +317,22 @@ export class Flares {
     this.time = 0;
     this.level = 1;           // множитель бюджета: настройка «Пиротехника»
 
+    const smokeTex = createSmokeTexture();   // одна карта на клубы и на пелену
     this.smoke = new QuadPool(scene, F.smokeMax, {
       additive: false,
-      map: createSmokeTexture(),
+      map: smokeTex,
       renderOrder: 5,         // дым под огнём: сначала клубы, потом ядро
     });
     this.fire = new QuadPool(scene, F.fireMax, {
       additive: true,
       renderOrder: 6,
+    });
+    // Пелена лежит на газоне и рисуется ПЕРВОЙ: всё остальное — над ней
+    this.haze = new QuadPool(scene, F.hazeMax, {
+      additive: false,
+      map: smokeTex,
+      renderOrder: 4,
+      ground: true,
     });
 
     this.flares = [];
@@ -302,6 +346,13 @@ export class Flares {
       });
     }
     this.nextPuff = 0;
+
+    // Пелена — отдельный пул: она живёт втрое дольше клуба и ведёт себя иначе
+    this.hazes = [];
+    for (let i = 0; i < F.hazeMax; i++) {
+      this.hazes.push({ life: 0, x: 0, y: 0, z: 0, vx: 0, vz: 0, rot: 0, spin: 0 });
+    }
+    this.nextHaze = 0;
   }
 
   // Фанатский сектор стороны side (±1 по X) — ОДИН И ТОТ ЖЕ весь матч.
@@ -376,6 +427,7 @@ export class Flares {
         life: F.life * (0.75 + Math.random() * 0.5),
         seed: Math.random() * 100,
         debt: 0,                                  // накопленная доля частицы дыма
+        hazeDebt: 0,                              // то же для пелены
         r: tint.r, g: tint.g, b: tint.b,
       });
       lit++;
@@ -398,6 +450,7 @@ export class Flares {
     this.time += dt;
     this.smoke.begin();
     this.fire.begin();
+    this.haze.begin();
 
     // 1) Файеры: горение, дрожание пламени, рождение дыма
     for (let i = this.flares.length - 1; i >= 0; i--) {
@@ -433,6 +486,12 @@ export class Flares {
         f.debt -= 1;
         this._spawnPuff(f);
       }
+      // И редкая порция пелены: остывший дым сползает с трибуны на поле
+      f.hazeDebt += F.hazeRate * dt * ignite * tail;
+      while (f.hazeDebt >= 1) {
+        f.hazeDebt -= 1;
+        this._spawnHaze(f);
+      }
     }
 
     // 2) Дым: подъём, снос ветром, рост и растворение
@@ -467,8 +526,53 @@ export class Flares {
       this.smoke.push(p.x, p.y, p.z, size, p.rot, r, g, b, a);
     }
 
+    // 3) Пелена: медленно наползает на газон, растекается и тает
+    for (const h of this.hazes) {
+      if (h.life <= 0) continue;
+      h.life -= dt;
+      if (h.life <= 0) continue;
+      // Трение о газон: пелена не летит, а расползается и останавливается
+      const drag = Math.max(0, 1 - F.hazeDrag * dt);
+      h.vx *= drag;
+      h.vz *= drag;
+      h.x += h.vx * dt;
+      h.z += h.vz * dt;
+      h.rot += h.spin * dt;
+
+      const k = 1 - h.life / F.hazeLife;
+      const size = F.hazeSize + (F.hazeGrow - F.hazeSize) * k;
+      // Трапеция, а не колокол: пелена проступает, ДЕРЖИТСЯ и тает. Прежний
+      // множитель (1-k)² давил её уже к середине жизни — на ночном газоне
+      // от заявленных 0.22 оставалось 0.05, то есть ничего.
+      const a = F.hazeAlpha
+        * Math.min(1, k / F.hazeRise)
+        * Math.min(1, (1 - k) / F.hazeFade);
+      if (a <= 0.004) continue;
+      this.haze.push(h.x, F.hazeY, h.z, size, h.rot,
+        F.hazeColor[0], F.hazeColor[1], F.hazeColor[2], a);
+    }
+
+    this.haze.end();
     this.smoke.end();
     this.fire.end();
+  }
+
+  // Пелена рождается НЕ у факела, а внизу под сектором: это остывший дым,
+  // уже сползший вдоль трибуны. Так у неё нет фазы «горизонтальный блин
+  // висит в воздухе», которая выдала бы приём с первого взгляда.
+  _spawnHaze(f) {
+    const F = this.cfg;
+    const h = this.hazes[this.nextHaze];
+    this.nextHaze = (this.nextHaze + 1) % this.hazes.length;
+    const out = F.hazeStart + Math.random() * F.hazeStartSpread;
+    h.life = F.hazeLife;
+    h.x = f.x + f.inX * out;
+    h.z = f.z + f.inZ * out;
+    // Ползёт к полю, слегка вдоль — ветер тот же, что несёт дым наверху
+    h.vx = f.inX * F.hazeDrift + F.wind.x * F.hazeWind;
+    h.vz = f.inZ * F.hazeDrift + F.wind.z * F.hazeWind;
+    h.rot = Math.random() * Math.PI * 2;
+    h.spin = (Math.random() - 0.5) * F.hazeSpin;
   }
 
   _spawnPuff(f) {
