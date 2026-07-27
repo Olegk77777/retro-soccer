@@ -162,8 +162,20 @@ export class Match {
       plateMark: document.getElementById('np-mark'),
       plateNum: document.getElementById('np-num'),
       plateName: document.getElementById('np-name'),
+      // Бегущая строка с составами — как в начале трансляции 90-х
+      lineups: document.getElementById('lineups'),
+      lineupsText: document.getElementById('lineups-text'),
     };
     this._plateKey = '';
+
+    // Текст строки собираем ОДИН раз: состав за матч не меняется, а сборка
+    // на каждом розыгрыше дёргала бы вёрстку. Имена и номера — из пака,
+    // значит публичная сборка покажет псевдонимы, и ничего править не надо.
+    this._lineupHTML = teamsData.map((t) => {
+      const men = (t.squad || []).map((p) =>
+        `<span class="lu-num">${p.number}</span> ${p.name}`).join('<span class="lu-sep">·</span>');
+      return `<span class="lu-team">${t.name}</span><span class="lu-sep">—</span>${men}`;
+    }).join('<span class="lu-sep">◆</span>');
     this.hud.home.textContent = teamsData[0].short;
     this.hud.away.textContent = teamsData[1].short;
 
@@ -281,7 +293,32 @@ export class Match {
   // отлетает и показывает пару нападающих → ПАС (любая кнопка действия)
   // разыгрывает с центра, камера доезжает в игровое положение уже по живой
   // игре. Кадры и тайминги — CONFIG.intro; расстановка уже сделана kickoff().
+  // Бегущая строка с составами: один быстрый проход в начале матча.
+  // Скорость задана в пикселях за секунду (CONFIG.intro.lineupSpeed), а
+  // длительность считается от РЕАЛЬНОЙ ширины текста — иначе длинный состав
+  // ехал бы медленнее короткого. По окончании прохода строка гаснет сама.
+  startLineups() {
+    const el = this.hud.lineups;
+    const txt = this.hud.lineupsText;
+    if (!el || !txt || !this._lineupHTML) return;
+    txt.innerHTML = this._lineupHTML;
+    el.classList.add('show');
+    // Ширину меряем ПОСЛЕ показа: у скрытого блока она нулевая
+    const from = el.clientWidth;
+    const width = txt.scrollWidth;
+    const speed = Math.max(40, CONFIG.intro.lineupSpeed);
+    txt.style.setProperty('--from', `${from}px`);
+    txt.style.setProperty('--to', `${-width}px`);
+    txt.style.setProperty('--roll', `${(from + width) / speed}s`);
+    // Перезапуск анимации: без сброса второй матч не поехал бы вовсе
+    txt.style.animation = 'none';
+    void txt.offsetWidth;
+    txt.style.animation = '';
+    txt.onanimationend = () => el.classList.remove('show');
+  }
+
   startIntro() {
+    this.startLineups();
     this.state = 'intro';
     this.stateTimer = 0;
     this.introPhase = 'ball';

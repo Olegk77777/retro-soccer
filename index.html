@@ -201,29 +201,24 @@
     /* Плашка игрока с мячом: номер и фамилия внизу кадра, как в футсимах.
        Собрана из тех же кирпичей, что табло — это графика ОДНОГО эфира. */
     #nameplate {
-      /* Выше шпаргалки управления: та занимает низ кадра и живёт первые
-         секунды матча, пересекаться им нельзя */
-      position: fixed; left: 16px; bottom: 58px;
+      /* Выше шпаргалки и бегущей строки составов */
+      position: fixed; left: 18px; bottom: 58px;
       display: none; align-items: stretch;
+      transform: skewX(var(--tv-skew));
       font-family: var(--tv-font);
-      background: linear-gradient(180deg, #2b3566 0%, var(--tv-navy) 45%, var(--tv-navy-deep) 100%);
-      border: 1px solid rgba(255,255,255,0.45);
-      box-shadow: 0 2px 0 rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.3);
-      color: #fff; font-size: 16px; letter-spacing: 2px;
-      text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
+      background: var(--tv-slab);
+      color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 3px;
       pointer-events: none; z-index: 10;
-      transition: opacity 0.18s ease-out;
     }
     #nameplate.show { display: flex; }
-    #np-mark { width: 6px; align-self: stretch; background: #888; }
+    #np-mark { width: 7px; align-self: stretch; background: #888; }
     #np-num {
-      display: flex; align-items: center; padding: 3px 9px 2px;
-      color: var(--tv-gold); font-weight: 700;
-      background: rgba(0,0,0,0.42);
-      border-right: 1px solid rgba(255,255,255,0.22);
+      display: flex; align-items: center; padding: 2px 10px 1px;
+      color: var(--tv-gold);
+      background: rgba(0, 0, 0, 0.35);
       font-variant-numeric: tabular-nums;
     }
-    #np-name { display: flex; align-items: center; padding: 3px 12px 2px; font-weight: 500; }
+    #np-name { display: flex; align-items: center; padding: 2px 13px 1px; }
 
     /* Логотип телеканала в ЛЕВОМ верхнем углу — настоящий «жучок» эфира.
        Картинку назначает ПАК атрибутики (data/packs/<id>/pack.json →
@@ -248,34 +243,38 @@
       pointer-events: none;
     }
 
-    /* Табло-телеграфика: плашка трансляции 98-го — тёмно-синий блок,
-       цветные метки команд по бортам, счёт в собственной ячейке,
-       минута отдельным «окошком» справа. */
+    /* ================= ТЕЛЕГРАФИКА =================
+       Стиль один на всю инфографику матча и снят с логотипа УТ-1: плоский
+       скошенный блок, тяжёлый узкий гротеск с наклоном, никаких градиентов,
+       рамок и объёмных теней. Раньше плашки были «объёмными» — тёмно-синий
+       градиент с окантовкой и подложкой; рядом с минималистичным жучком
+       канала это выглядело из разных эпох (фидбек Олега 27.07.2026).
+
+       Наклон делает САМ блок (skewX), текст наклоняется вместе с ним — ровно
+       как в знаке УТ-1, где курсив и есть вся форма. Поэтому обратного
+       раскоса у текста нет: он не нужен и только вернул бы прямые буквы. */
+    :root { --tv-skew: -11deg; --tv-slab: rgba(6, 8, 16, 0.74); }
+
     #scoreboard {
-      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      position: fixed; top: 12px; left: 50%;
+      transform: translateX(-50%) skewX(var(--tv-skew));
       display: flex; align-items: stretch;
       font-family: var(--tv-font);
-      background: linear-gradient(180deg, #2b3566 0%, var(--tv-navy) 42%, var(--tv-navy-deep) 100%);
-      border: 1px solid rgba(255,255,255,0.5);
-      box-shadow: 0 2px 0 rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.35);
-      color: #fff; font-weight: 500; font-size: 17px; letter-spacing: 2px;
+      background: var(--tv-slab);
+      color: #fff; font-weight: 700; font-size: 19px; letter-spacing: 3px;
       pointer-events: none; z-index: 10;
-      text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
     }
     #scoreboard span { display: flex; align-items: center; }
-    .sb-team { padding: 4px 11px 3px; }
-    /* Цветная метка команды — как полоска формы в углу плашки */
-    .sb-mark { width: 6px; align-self: stretch; background: #888; }
+    .sb-team { padding: 3px 12px 2px; }
+    /* Метка команды — тот же скошенный штрих, что «1» в знаке канала */
+    .sb-mark { width: 7px; align-self: stretch; background: #888; }
     #sb-score {
-      color: var(--tv-gold); font-weight: 700; font-size: 20px; letter-spacing: 3px;
-      padding: 3px 13px 2px; background: rgba(0,0,0,0.42);
-      border-left: 1px solid rgba(255,255,255,0.22);
-      border-right: 1px solid rgba(255,255,255,0.22);
+      color: var(--tv-gold); padding: 3px 13px 2px;
+      background: rgba(0, 0, 0, 0.35);
     }
     #sb-time {
-      color: #8fe05a; min-width: 46px; justify-content: flex-end;
-      padding: 4px 11px 3px; background: rgba(0,0,0,0.3);
-      border-left: 1px solid rgba(255,255,255,0.35);
+      color: #8fe05a; min-width: 44px; justify-content: flex-end;
+      padding: 3px 12px 2px; font-weight: 500;
       font-variant-numeric: tabular-nums;
     }
 
@@ -289,36 +288,36 @@
     }
     #goal-flash.show { opacity: 1; }
 
-    /* Плашка автора гола: выезжает под криком «ГОЛ!», как титр в эфире */
+    /* Титр автора гола: тот же плоский скошенный блок */
     #goal-card {
       position: fixed; top: 34%; left: 50%;
-      transform: translate(-50%, 11vw) translateY(14px);
+      transform: translate(-50%, 11vw) skewX(var(--tv-skew)) translateY(14px);
       display: flex; align-items: stretch; font-family: var(--tv-font);
-      background: linear-gradient(180deg, #2b3566, var(--tv-navy-deep));
-      border: 1px solid rgba(255,255,255,0.5);
-      box-shadow: 0 3px 0 rgba(0,0,0,0.5);
-      color: #fff; font-size: 18px; letter-spacing: 3px;
+      background: var(--tv-slab);
+      color: #fff; font-size: 19px; font-weight: 700; letter-spacing: 3px;
       opacity: 0; pointer-events: none; z-index: 10;
       transition: opacity 0.25s ease-out, transform 0.25s ease-out;
-      text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
     }
-    #goal-card.show { opacity: 1; transform: translate(-50%, 11vw) translateY(0); }
+    #goal-card.show {
+      opacity: 1;
+      transform: translate(-50%, 11vw) skewX(var(--tv-skew)) translateY(0);
+    }
     #goal-card .gc-mark { width: 7px; align-self: stretch; background: #888; }
-    #goal-card .gc-team { padding: 6px 14px 4px; font-weight: 500; }
+    #goal-card .gc-team { padding: 4px 14px 3px; }
     #goal-card .gc-min {
-      padding: 6px 12px 4px; color: var(--tv-gold); font-weight: 700;
-      background: rgba(0,0,0,0.4); border-left: 1px solid rgba(255,255,255,0.25);
+      padding: 4px 12px 3px; color: var(--tv-gold);
+      background: rgba(0, 0, 0, 0.35);
     }
 
     /* Повтор: плашка с красным «глазом» записи и полосы видеомагнитофона */
     #replay-tag {
-      position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
+      position: fixed; top: 56px; left: 50%;
+      transform: translateX(-50%) skewX(var(--tv-skew));
       display: none; align-items: center; gap: 9px;
-      font-family: var(--tv-font); font-size: 15px; letter-spacing: 4px;
-      color: #fff; padding: 3px 13px 2px;
-      background: linear-gradient(180deg, rgba(43,53,102,0.92), rgba(8,12,34,0.92));
-      border: 1px solid rgba(255,255,255,0.45);
-      text-shadow: 1px 1px 0 #000; pointer-events: none; z-index: 10;
+      font-family: var(--tv-font); font-size: 16px; font-weight: 700;
+      letter-spacing: 4px; color: #fff; padding: 2px 13px 1px;
+      background: var(--tv-slab);
+      pointer-events: none; z-index: 10;
     }
     #replay-tag.show { display: flex; }
     #replay-tag::before {
@@ -350,15 +349,11 @@
     #matchcard.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     #mc-teams {
       display: flex; align-items: stretch; justify-content: center;
-      background: linear-gradient(180deg, #2b3566 0%, var(--tv-navy) 45%, var(--tv-navy-deep) 100%);
-      border: 1px solid rgba(255,255,255,0.5);
-      box-shadow: 0 3px 0 rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.3);
-      color: #fff; font-size: clamp(18px, 3.1vw, 34px); font-weight: 500;
-      letter-spacing: 5px; text-shadow: 2px 2px 0 rgba(0,0,0,0.85);
+      transform: skewX(var(--tv-skew));
+      background: var(--tv-slab);
+      color: #fff; font-size: clamp(18px, 3.1vw, 34px); font-weight: 700;
+      letter-spacing: 6px;
     }
-    #mc-teams span { display: flex; align-items: center; padding: 5px 18px 3px; }
-    #mc-teams .mc-mark { width: 8px; align-self: stretch; background: #888; padding: 0; }
-    #mc-teams .mc-dash { color: var(--tv-gold); padding: 5px 8px 3px; }
     #mc-venue {
       margin-top: 7px; color: rgba(255,255,255,0.82);
       font-size: clamp(11px, 1.5vw, 16px); letter-spacing: 4px;
@@ -385,6 +380,30 @@
       margin: 16px 0 6px; font-size: 13px; letter-spacing: 2px; color: #e8d44d;
       border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 4px;
     }
+    /* Секции меню складываются: справочник управления — это стена текста,
+       и без сворачивания до настроек камеры приходилось листать полэкрана
+       (фидбек Олега 27.07.2026). Разметку секций собирает main.js по <h3> —
+       так новый раздел не требует ни строчки вёрстки. */
+    #settings h3 {
+      cursor: pointer; user-select: none; display: flex; align-items: center;
+      gap: 8px; touch-action: manipulation;
+    }
+    #settings h3::before {
+      content: '▾'; font-size: 11px; width: 10px; flex: 0 0 auto;
+      color: rgba(255,255,255,0.55); transition: transform 0.12s;
+    }
+    #settings h3.folded::before { transform: rotate(-90deg); }
+    #settings h3:hover { color: #fff; }
+    #settings .sect { overflow: hidden; }
+    #settings h3.folded + .sect { display: none; }
+    #settings-fold {
+      position: absolute; top: 12px; right: 44px;
+      background: none; border: 1px solid rgba(255,255,255,0.3);
+      color: #ddd; font-family: var(--tv-font); font-size: 11px;
+      letter-spacing: 1px; padding: 2px 8px; cursor: pointer;
+      touch-action: manipulation;
+    }
+    #settings-fold:active { background: rgba(255,255,255,0.18); }
     #settings .row { margin: 3px 0; }
     #settings .key { color: #fff; font-weight: bold; }
     #settings-close {
@@ -481,6 +500,35 @@
       #gesture-viz { display: block; }
     }
 
+    /* Бегущая строка с составами — как в начале трансляции 90-х.
+       Полоса идёт ровно, без скоса: скошенная лента при движении «плывёт»
+       и читается хуже. Наклон живёт в самих буквах — этого хватает, чтобы
+       строка была из той же графики, что табло и жучок канала. */
+    #lineups {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      height: 30px; overflow: hidden; display: none;
+      background: var(--tv-slab);
+      pointer-events: none; z-index: 11;
+    }
+    #lineups.show { display: block; }
+    #lineups-text {
+      position: absolute; top: 0; left: 0; white-space: nowrap;
+      height: 100%; display: flex; align-items: center;
+      font-family: var(--tv-font); font-weight: 500; font-style: italic;
+      font-size: 16px; letter-spacing: 2px; color: #fff;
+      /* Стартовая позиция и длина прохода считаются в JS от реальной ширины
+         текста — иначе скорость строки зависела бы от длины состава */
+      animation: lineups-roll var(--roll, 14s) linear 1 forwards;
+      will-change: transform;
+    }
+    @keyframes lineups-roll {
+      from { transform: translateX(var(--from, 100vw)); }
+      to   { transform: translateX(var(--to, -100%)); }
+    }
+    #lineups-text .lu-team { color: var(--tv-gold); font-weight: 700; font-style: normal; }
+    #lineups-text .lu-num { color: #8fe05a; }
+    #lineups-text .lu-sep { color: rgba(255,255,255,0.35); padding: 0 14px; }
+
     /* Шкала замаха удара */
     #power {
       position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
@@ -511,20 +559,23 @@
 
   <div id="settings">
     <button id="settings-close" aria-label="Закрыть">✕</button>
+    <button id="settings-fold">СВЕРНУТЬ ВСЁ</button>
     <h2>НАСТРОЙКИ</h2>
 
-    <h3>ИЗОБРАЖЕНИЕ</h3>
+    <h3 data-open="1">ИЗОБРАЖЕНИЕ</h3>
     <div class="row" style="color:rgba(255,255,255,0.5)">Картинка настраивается на КОРПУСЕ телевизора, а не здесь: ручки <span class="key">КАНАЛ</span>, <span class="key">ЯРКОСТЬ</span>, <span class="key">КОНТРАСТ</span>, <span class="key">ЦВЕТ</span> и клавиши <span class="key">ЧЁТКОСТЬ</span> / <span class="key">ГАЗОН</span>. Ручку можно крутить мышью, пальцем или колесом; двойной щелчок по ручке возвращает её в середину. Все положения запоминаются.</div>
 
-    <h3>ТЕЛЕВИЗОР (панель справа)</h3>
+    <h3 data-open="1">ТЕЛЕВИЗОР (панель справа)</h3>
     <div class="row"><span class="key">КАНАЛ</span> — переключает картинку «телеканала»: Эфир-98, VHS-запись, Чистый RGB. Ручка щёлкает по положениям и идёт по кругу</div>
     <div class="row"><span class="key">ЯРКОСТЬ · КОНТРАСТ · ЦВЕТ</span> — живая подстройка ПОВЕРХ канала, от −10 до +10. Смена канала их не сбрасывает, как на настоящем телевизоре. Двойной щелчок по ручке — обратно в ноль</div>
     <div class="row"><span class="key">ЧЁТКОСТЬ</span> — разрешение внутреннего рендера: 240p (совсем PS1) · 360p · 480p · 720p · 1080p. По умолчанию 1080p — на iPad оно «летает и не греет». Строчность кинескопа и зерно от разрешения НЕ зависят: полосы всегда как у ТВ 90-х. Слабое железо просядет по FPS — ставь 480p</div>
     <div class="row"><span class="key">ГАЗОН</span> — износ поля: 0% ухоженное · 50% умеренные следы игры · 100% сильно вытоптанное</div>
     <div class="row"><span class="key">Логотип слева вверху</span> — «жучок» телеканала. Он часть ПАКА атрибутики: в своей сборке настоящий УТ-1, в публичной вымышленный УГ-1. Меняется файлом, не кодом</div>
+    <div class="row"><span class="key">Бегущая строка</span> — в начале матча внизу один быстрый проход с составами обеих команд, как в трансляции 90-х. Имена и номера — из состава, значит в публичной сборке поедут псевдонимы</div>
+    <div class="row"><span class="key">Разделы этого меню</span> — складываются: щелчок по заголовку сворачивает раздел, кнопка <span class="key">СВЕРНУТЬ ВСЁ</span> — сразу все. Справочник управления по умолчанию свёрнут, чтобы настройки были под рукой. Что свёрнуто — запоминается</div>
     <div class="row"><span class="key">Плашка внизу кадра</span> — номер и фамилия игрока, у которого мяч; мяч ничей — подписан тот, кем управляешь. Цветная метка слева — форма его команды</div>
 
-    <h3>ГЕЙМПЛЕЙ</h3>
+    <h3 data-open="1">ГЕЙМПЛЕЙ</h3>
     <div class="row">
       Помощь в ударах:
       <input id="set-assist" type="range" min="10" max="30" step="5" style="vertical-align:middle;width:180px">
@@ -538,7 +589,7 @@
     </div>
     <div class="row" style="color:rgba(255,255,255,0.5)">Шире ищет адресата по направлению и подтягивает силу паса к дистанции до него. Пас без партнёра в конусе летит ровно как нарисован; сильная передержка всё равно уводит мяч дальше.</div>
 
-    <h3>КАМЕРА</h3>
+    <h3 data-open="1">КАМЕРА</h3>
     <div class="row">
       Подлёт к дальней бровке:
       <input id="set-far" type="range" min="0" max="30" step="1" style="vertical-align:middle;width:180px">
@@ -546,7 +597,7 @@
     </div>
     <div class="row" style="color:rgba(255,255,255,0.5)">Камера приближается, когда мяч уходит на дальнюю сторону — дальний игрок не мельчает.</div>
 
-    <h3>УПРАВЛЕНИЕ — КЛАВИАТУРА</h3>
+    <h3 data-open="0">УПРАВЛЕНИЕ — КЛАВИАТУРА</h3>
     <div class="row"><span class="key">Стрелки</span> — движение; во время замаха удара — прицел по створу</div>
     <div class="row"><span class="key">Q</span> — смена управляемого игрока, когда мяч НЕ у тебя (берётся ближний к мячу); авто — когда партнёр принял мяч или сосед заметно ближе к мячу</div>
     <div class="row"><span class="key">Q + S (с мячом)</span> — СТЕНОЧКА: отдал пас и сам рванул вперёд за спину опекуну; курсор переходит на принимающего — верни мяч на ход (<span class="key">W</span>), когда пасующий откроется</div>
@@ -572,13 +623,13 @@
     <div class="row"><span class="key">После гола</span> — ПРАЗДНОВАНИЕ (автор бежит к бровке, партнёры догоняют), затем СЕРИЯ ПОВТОРОВ с разных камер: вся комбинация с момента отбора → завершение крупнее и медленнее → празднование крупным планом. Ракурсы каждый раз тасуются. Любая кнопка действия (<span class="key">S</span>, <span class="key">W</span>, <span class="key">A</span>, <span class="key">D</span>) — пропустить текущий ракурс, ещё нажатия — уйти в розыгрыш</div>
     <div class="row"><span class="key">Стеночка (авто)</span> — короткий пас под прессингом: пасующий сам рвёт вперёд за спину опекуну — верни ему на ход (<span class="key">W</span>). Крайний защитник на фланге сам подключается по бровке — пас на ход накормит рывок</div>
 
-    <h3>УПРАВЛЕНИЕ — ГЕЙМПАД</h3>
+    <h3 data-open="0">УПРАВЛЕНИЕ — ГЕЙМПАД</h3>
     <div class="row"><span class="key">Левый стик</span> — движение · <span class="key">RT/R2</span> (дальний правый курок) — спринт · <span class="key">LB/L1</span> — смена игрока (когда мяч не у тебя)</div>
     <div class="row"><span class="key">A</span> пас · <span class="key">Y</span> пас на ход · <span class="key">B</span> удар · <span class="key">X</span> навес (в обороне — ПОДКАТ)</div>
     <div class="row"><span class="key">LB/L1 + A (с мячом)</span> — СТЕНОЧКА: пас и рывок вперёд; курсор на принимающем, возврат — <span class="key">Y</span> (пас на ход)</div>
     <div class="row"><span class="key">После удара наклонить левый стик вбок</span> — подкрутка мяча в полёте (тот же приём, что жест-докрутка на планшете)</div>
 
-    <h3>УПРАВЛЕНИЕ — ПЛАНШЕТ</h3>
+    <h3 data-open="0">УПРАВЛЕНИЕ — ПЛАНШЕТ</h3>
     <div class="row"><span class="key">Левая половина</span> — виртуальный стик (движение; после удара — докрутка)</div>
     <div class="row"><span class="key">Кнопки</span> ⇄ смена игрока · ⚡спринт · две КОНТЕКСТНЫЕ кнопки (меняются сами, как в мобильных футсимах)</div>
     <div class="row"><span class="key">В атаке (мяч наш)</span> — ПАС и УДАР; круг НАВЕС для жеста подачи</div>
@@ -594,7 +645,7 @@
     <div class="row"><span class="key">Начало матча</span> — ТВ-заставка: крупный план мяча и свисток; тап по ПАС — разыграть с центра</div>
     <div class="row"><span class="key">После гола</span> — празднование и серия повторов с разных камер (комбинация → завершение в слоу-мо → празднование крупным планом); тап по любой кнопке действия пропускает текущий ракурс</div>
 
-    <h3>МЕХАНИКИ УДАРА (авто)</h3>
+    <h3 data-open="0">МЕХАНИКИ УДАРА (авто)</h3>
     <div class="row">Тип выбирается сам: <span class="key">с места</span> — щёчка (точно) · <span class="key">на скорости/с хода</span> — подъём (мощно, ныряет) · <span class="key">тап</span> — носок (добивание)</div>
     <div class="row">Бьющая нога — от положения корпуса к мячу: мяч слева → левая, справа → правая; крутка «наружу» = внешняя сторона стопы (шведка)</div>
     <div class="row">Нога решает дугу навеса: правая с правого фланга — аутсвингер (от вратаря к набегающим), с левого — инсвингер (закручивается к воротам)</div>
@@ -614,6 +665,7 @@
   <div id="btn-shoot" class="tbtn"><span class="lbl-atk">УДАР</span><span class="lbl-def">ВЫНОС</span></div>
   <div id="btn-sprint" class="tbtn">⚡</div>
   <div id="power"><div id="power-fill"></div></div>
+  <div id="lineups"><div id="lineups-text"></div></div>
   <div id="tv-glass"></div>
  </div><!-- /#tv-screen -->
 

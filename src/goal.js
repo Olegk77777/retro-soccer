@@ -247,8 +247,16 @@ export class GoalSystem {
     const outerHalf = innerHalf + G.postRadius * 2;
     const frameMat = new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0x555555 });
     const postHeight = G.height + G.postRadius * 2;
-    const postGeo = new THREE.CylinderGeometry(G.postRadius, G.postRadius, postHeight, 8);
-    const barGeo = new THREE.CylinderGeometry(G.postRadius, G.postRadius, G.width + G.postRadius * 4, 8);
+    // Перекладина обрывается ровно на ОСЯХ штанг, а не на их внешней кромке.
+    // Раньше её длина была width + 4R: торцевой круг приходился точно на
+    // внешний силуэт штанги и на большом разрешении читался крестом на стыке
+    // (фидбек Олега 27.07.2026). Уехав внутрь штанги, торец прячется в ней
+    // целиком, и угол ворот выглядит одной сплошной трубой.
+    // Физика тут ни при чём: столкновения считаются по осям a0/a1 ниже,
+    // они не изменились.
+    const postGeo = new THREE.CylinderGeometry(G.postRadius, G.postRadius, postHeight, G.frameSegments);
+    const barGeo = new THREE.CylinderGeometry(
+      G.postRadius, G.postRadius, postAxisZ * 2, G.frameSegments);
 
     for (const dir of [-1, 1]) {
       const lineX = dir * (F.length / 2);

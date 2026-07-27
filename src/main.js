@@ -185,6 +185,52 @@ document.getElementById('settings-close').addEventListener('click', (e) => {
   settingsPanel.classList.remove('show');
 });
 
+// --- Складные разделы меню ---
+// Разметку собираем КОДОМ: каждый <h3> забирает под себя всё до следующего
+// <h3>. Так новый раздел не требует ни строчки вёрстки — написал заголовок,
+// и он уже складывается. Стартовое состояние берётся из data-open (длинный
+// справочник управления свёрнут), выбор игрока переживает перезапуск.
+const foldBtn = document.getElementById('settings-fold');
+const sections = [];
+for (const head of [...settingsPanel.querySelectorAll('h3')]) {
+  const body = document.createElement('div');
+  body.className = 'sect';
+  let node = head.nextSibling;
+  while (node && !(node.nodeType === 1 && node.tagName === 'H3')) {
+    const next = node.nextSibling;
+    body.appendChild(node);
+    node = next;
+  }
+  head.after(body);
+  const key = `f98.fold.${head.textContent.trim()}`;
+  const saved = localStorage.getItem(key);
+  const open = saved !== null ? saved === '1' : head.dataset.open !== '0';
+  head.classList.toggle('folded', !open);
+  head.addEventListener('click', () => {
+    head.classList.toggle('folded');
+    remember(key, head.classList.contains('folded') ? '0' : '1');
+    syncFoldBtn();
+  });
+  sections.push({ head, key });
+}
+
+function syncFoldBtn() {
+  const anyOpen = sections.some((s) => !s.head.classList.contains('folded'));
+  foldBtn.textContent = anyOpen ? 'СВЕРНУТЬ ВСЁ' : 'РАЗВЕРНУТЬ ВСЁ';
+}
+
+foldBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const fold = sections.some((s) => !s.head.classList.contains('folded'));
+  for (const s of sections) {
+    s.head.classList.toggle('folded', fold);
+    remember(s.key, fold ? '0' : '1');
+  }
+  syncFoldBtn();
+  settingsPanel.scrollTop = 0;
+});
+syncFoldBtn();
+
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
 const assistSlider = document.getElementById('set-assist');
