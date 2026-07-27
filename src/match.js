@@ -11,7 +11,7 @@ import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace, passPower, passStrikeKind } from './ai/steering.js';
-import { playWhistle, setCrowdIntensity, crowdCheer } from './sfx.js';
+import { playWhistle, setCrowdIntensity, crowdCheer, flareHiss } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
 import { Celebration } from './celebration.js';
@@ -330,6 +330,10 @@ export class Match {
       mix: 1,
       fading: false,
     };
+    // Выход команд: оба фанатских сектора встречают своих пиротехникой.
+    // Это самый узнаваемый кадр вечернего эфира 90-х — трибуна в дыму,
+    // который сносит через лучи прожекторов.
+    this.litFlares('intro');
     // Титр «кто с кем и где» выезжает поверх заставки, как в начале эфира
     if (this.hud.matchcard) this.hud.matchcard.classList.add('show');
     this.controlledMarker.visible = false; // звезда не мельтешит в кино-кадре
@@ -1576,6 +1580,32 @@ export class Match {
     this._restoreHint();
   }
 
+  // Пиротехника фанатского сектора. Одно место на все поводы: заставка
+  // (встречают обе команды) и гол (зажигает только забившая).
+  // Цвет ореола берём из формы, поэтому подмена пака меняет и его.
+  litFlares(kind, teamIdx = -1) {
+    const flares = this.scene && this.scene.userData.flares;
+    if (!flares) return;
+    const F = CONFIG.atmosphere.flares;
+    let lit = 0;
+    if (kind === 'intro') {
+      // «Свой» сектор — за СВОИМИ воротами, то есть напротив стороны атаки
+      for (let i = 0; i < this.teams.length; i++) {
+        lit += flares.ignite({
+          side: -this.teams[i].side,
+          count: F.introCount,
+          color: this._teamColors[i],
+        });
+      }
+    } else if (teamIdx >= 0) {
+      lit = flares.ignite({
+        side: -this.teams[teamIdx].side,
+        color: this._teamColors[teamIdx],
+      });
+    }
+    if (lit) flareHiss(lit, F.life);
+  }
+
   // Гол: определяем сторону по позиции мяча, счёт, пауза, потом розыгрыш
   onGoal() {
     if (this.state !== 'play' && this.state !== 'kickoff') return;
@@ -1598,6 +1628,9 @@ export class Match {
     crowdCheer(1);
     const flashes = this.scene && this.scene.userData.flashes;
     if (flashes) flashes.cheer();
+    // И фанатский сектор забившей зажигает файеры. Сектор СВОЙ, то есть за
+    // своими воротами: t.side — это сторона ЧУЖИХ ворот (куда команда атакует).
+    this.litFlares('goal', scorerIdx);
     this.hud.flash.textContent = 'ГОЛ!';
     this.hud.flash.classList.add('show');
     this.flashTimer = 2.0;

@@ -10,6 +10,7 @@ import {
   mastPositions, paintPitchLight, buildFloodlightHalos, buildLightShafts,
   CameraFlashes, GroundShadows,
 } from './atmosphere.js';
+import { Flares } from './flares.js';
 
 const STADIUM_TEXTURES = Object.freeze({
   pitchBalanced: './textures/stadium/pitch-balanced-98.png',
@@ -622,10 +623,12 @@ export function buildStadium() {
   const stands = buildStands(scene);
   buildFloodlights(scene);
 
-  // Живой стадион: щелчки фотоаппаратов на трибунах и веер теней под
-  // игроками. Обновляются раз в кадр из main.js.
+  // Живой стадион: щелчки фотоаппаратов на трибунах, веер теней под
+  // игроками и пиротехника фанатских секторов. Обновляются раз в кадр
+  // из main.js, зажигаются событиями матча.
   scene.userData.flashes = new CameraFlashes(scene, stands);
   scene.userData.shadows = new GroundShadows(scene);
+  scene.userData.flares = new Flares(scene, stands);
 
   // Свет (для объёмных объектов: мяч, ворота, трибуны): ночь + мощные прожекторы
   scene.add(new THREE.HemisphereLight(0x99aacc, 0x334422, 0.9));

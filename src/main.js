@@ -16,6 +16,20 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ст�
 renderer.setPixelRatio(1); // рендерим в маленькую текстуру, ретина не нужна
 
 const scene = buildStadium();
+
+// Уровень пиротехники читаем ЗДЕСЬ, а не вместе с остальными настройками
+// ниже: заставка матча зажигает файеры прямо в конструкторе Match, который
+// создаётся через десяток строк. Прочитай позже — и «выкл» успеет только
+// погасить уже зажжённое, вместе с прозвучавшим шипением.
+// Number(null) === 0, а 0 — это законное значение «выкл», поэтому проверять
+// надо СЫРУЮ строку. Ровно на этом уже горел износ газона: пустой
+// localStorage читался как выбранный ноль.
+const savedPyroRaw = localStorage.getItem('f98.pyro');
+const savedPyro = Number(savedPyroRaw);
+const pyroLevel = (savedPyroRaw !== null && Number.isFinite(savedPyro)
+  && savedPyro >= 0 && savedPyro <= 150) ? savedPyro : 100;
+if (scene.userData.flares) scene.userData.flares.setLevel(pyroLevel / 100);
+
 const goals = scene.userData.goals;
 const ball = new Ball(scene, goals);
 const input = new Input();
@@ -311,6 +325,23 @@ passSlider.addEventListener('input', () => {
   try { localStorage.setItem('f98.passAssist', passSlider.value); } catch (e) { /* приватный режим */ }
 });
 
+// Пиротехника: множитель бюджета файеров. 0 — выкл (дым — самая дорогая
+// часть кадра на планшете), 100% — как задумано, 150% — вовсю.
+// Само значение уже прочитано и применено выше, до создания матча.
+const pyroSlider = document.getElementById('set-pyro');
+const pyroVal = document.getElementById('set-pyro-val');
+const PYRO_LABEL = { 0: 'выкл', 50: 'редко', 100: 'как в эфире', 150: 'вовсю' };
+
+function applyPyro(v, save = false) {
+  pyroSlider.value = v;
+  pyroVal.textContent = PYRO_LABEL[v] || `${v}%`;
+  if (scene.userData.flares) scene.userData.flares.setLevel(v / 100);
+  if (save) remember('f98.pyro', v);
+}
+
+applyPyro(pyroLevel);
+pyroSlider.addEventListener('input', () => applyPyro(Number(pyroSlider.value), true));
+
 // Настройка камеры: подлёт к дальней бровке (пишем прямо в живой CONFIG)
 const farSlider = document.getElementById('set-far');
 const farVal = document.getElementById('set-far-val');
@@ -386,6 +417,7 @@ function frame() {
   // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
   if (scene.userData.shadows) scene.userData.shadows.update();
   if (scene.userData.flashes) scene.userData.flashes.update(dt);
+  if (scene.userData.flares) scene.userData.flares.update(dt);
   if (event === 'goal' && match) match.onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.

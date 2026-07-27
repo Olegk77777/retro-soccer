@@ -125,6 +125,47 @@ export function crowdCheer(strength = 1) {
   cr.lp.frequency.setTargetAtTime(760, t + 1.2, 2.2);
 }
 
+// Шипение файеров на трибуне: пиротехника горит с характерным «пшшш».
+// Синтез тот же, что у толпы, — розовый шум, но полоса высокая и узкая:
+// шипение живёт в 2–5 кГц, ниже начинается гул зала и мешает ему.
+// Звук ДАЛЁКИЙ (сектор в сотне метров), поэтому громкость скромная, а
+// нарастание медленное: пачка файеров разгорается пару секунд.
+export function flareHiss(count = 1, seconds = 12) {
+  const c = getCtx();
+  if (!c || c.state !== 'running') return false;
+  const n = Math.max(1, Math.min(10, count));
+  const t0 = c.currentTime + 0.05;
+
+  const src = c.createBufferSource();
+  src.buffer = makeNoiseBuffer(c, 3);
+  src.loop = true;
+
+  const bp = c.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 3100;
+  bp.Q.value = 0.9;
+  // Розовый шум завален по верхам — поднимаем «песок», иначе выйдет шорох
+  const tilt = c.createBiquadFilter();
+  tilt.type = 'highshelf';
+  tilt.frequency.value = 2600;
+  tilt.gain.value = 9;
+
+  const out = c.createGain();
+  const peak = 0.012 * Math.sqrt(n);   // вдвое больше факелов ≠ вдвое громче
+  out.gain.setValueAtTime(0.0001, t0);
+  out.gain.linearRampToValueAtTime(peak, t0 + 1.6);
+  out.gain.setValueAtTime(peak, t0 + seconds * 0.6);
+  out.gain.setTargetAtTime(0.0001, t0 + seconds * 0.6, seconds * 0.25);
+
+  src.connect(tilt);
+  tilt.connect(bp);
+  bp.connect(out);
+  out.connect(c.destination);
+  src.start(t0);
+  src.stop(t0 + seconds + 2);
+  return true;
+}
+
 // Свисток длиной duration сек. Возвращает true, если реально зазвучал.
 export function playWhistle(duration = 0.8) {
   const c = getCtx();
