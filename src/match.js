@@ -157,7 +157,13 @@ export class Match {
       cardTeam: document.getElementById('gc-team'),
       cardMin: document.getElementById('gc-min'),
       matchcard: document.getElementById('matchcard'),
+      // Плашка игрока с мячом (номер + фамилия) — как в футсимах
+      plate: document.getElementById('nameplate'),
+      plateMark: document.getElementById('np-mark'),
+      plateNum: document.getElementById('np-num'),
+      plateName: document.getElementById('np-name'),
     };
+    this._plateKey = '';
     this.hud.home.textContent = teamsData[0].short;
     this.hud.away.textContent = teamsData[1].short;
 
@@ -1616,7 +1622,32 @@ export class Match {
     this.flashTimer = CONFIG.match.fulltimePause;
   }
 
+  // Плашка внизу кадра: чей сейчас мяч. Имя и номер приходят из состава
+  // (data/teams/*.json → squad), метка — цвет формы команды. Никого с мячом —
+  // подписываем управляемого игрока, чтобы курсор всегда был назван.
+  // В заставке, повторе и празднике плашки нет: там своя графика.
+  updatePlate() {
+    const h = this.hud;
+    if (!h.plate) return;
+    const quiet = this.state === 'intro' || this.state === 'replay' || this.state === 'celebration';
+    const p = quiet ? null : (this.toucher || this.controlled);
+    // Ключ-кэш: трогаем DOM только когда игрок реально сменился
+    const key = p ? `${p.name}|${p.number}|${this.teams.indexOf(p.team)}` : '';
+    if (key === this._plateKey) return;
+    this._plateKey = key;
+    if (!p || !p.name) {
+      h.plate.classList.remove('show');
+      return;
+    }
+    h.plateMark.style.background = this._teamColors[Math.max(0, this.teams.indexOf(p.team))];
+    h.plateNum.textContent = p.number != null ? String(p.number) : '';
+    h.plateName.textContent = p.name;
+    h.plate.classList.add('show');
+  }
+
   updateHUD() {
+    this.updatePlate();
+
     // Контекстные тач-кнопки (как в мобильных футсимах): владеем мячом —
     // ПАС/УДАР, обороняемся — КОРПУС/ВЫНОС. CSS переключает по data-phase
     const phase = this.possession === this.humanTeam ? 'attack' : 'defend';

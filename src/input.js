@@ -10,6 +10,13 @@
 // ВСЕ действия — с замахом: держишь кнопку — сила растёт, отпустил — исполнение.
 
 import { CONFIG } from './config.js';
+import { screenRect, toScreen } from './tvset.js';
+
+// Игра идёт ВНУТРИ рамки телевизора, а не во весь экран (см. src/tvset.js).
+// Поэтому всё, что раньше считалось от window.innerWidth/innerHeight —
+// зоны стика и свайпа, позиция стика, сила и скорость жеста — считается от
+// прямоугольника стекла. Иначе правая зона начиналась бы под пластиком
+// корпуса, а стик появлялся бы со сдвигом на толщину рамки.
 
 // Кнопка с замахом: копит силу, пока держится; на отпускании отдаёт силу 0..overCap.
 // Значение выше 1.0 = ПЕРЕДЕРЖКА: исполнение сильнее задуманного (мяч за поле).
@@ -107,14 +114,16 @@ export class Input {
 
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
-      if (e.clientX > window.innerWidth * 0.55) return; // правая зона — под кнопки
+      const sp = toScreen(e);
+      const sr = screenRect();
+      if (sp.x > sr.width * 0.55) return; // правая зона — под кнопки
       if (this._stick.id !== null) return;
       this._stick.id = e.pointerId;
       this._stick.ox = e.clientX;
       this._stick.oy = e.clientY;
       base.style.display = 'block';
-      base.style.left = (e.clientX - 60) + 'px';
-      base.style.top = (e.clientY - 60) + 'px';
+      base.style.left = (sp.x - 60) + 'px';
+      base.style.top = (sp.y - 60) + 'px';
       knob.style.transform = 'translate(0px, 0px)';
     });
     window.addEventListener('pointermove', (e) => {
@@ -173,7 +182,11 @@ export class Input {
     const viz = document.getElementById('gesture-viz');
     const vctx = viz ? viz.getContext('2d') : null;
     const fitViz = () => {
-      if (viz) { viz.width = window.innerWidth; viz.height = window.innerHeight; }
+      if (viz) {
+        const r = screenRect();
+        viz.width = Math.max(1, Math.round(r.width));
+        viz.height = Math.max(1, Math.round(r.height));
+      }
     };
     fitViz();
     window.addEventListener('resize', fitViz);
@@ -186,7 +199,7 @@ export class Input {
       const a = pts[0];
       const b = pts[pts.length - 1];
       const len = Math.hypot(b.x - a.x, b.y - a.y);
-      const power = Math.min(1.3, len / (window.innerHeight * 0.35));
+      const power = Math.min(1.3, len / (screenRect().height * 0.35));
       // цвета шкалы замаха: жёлтый, в передержке — красный
       const col = power > 1 ? 'rgba(224,74,48,0.85)' : 'rgba(232,212,77,0.7)';
       // след пальца — сама траектория (изгиб = подкрутка виден глазами)
@@ -222,25 +235,26 @@ export class Input {
       this._swipe.id = e.pointerId;
       this._swipe.kind = 'shot';
       this._swipe.active = false;
-      this._swipe.pts = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
+      this._swipe.pts = [{ ...toScreen(e), t: e.timeStamp }];
     });
 
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
-      if (e.clientX <= window.innerWidth * 0.55) return; // левая зона — стик
+      if (toScreen(e).x <= screenRect().width * 0.55) return; // левая зона — стик
       if (e.target && e.target.classList && e.target.classList.contains('tbtn')) return;
       if (this._swipe.id !== null) return;
       this._swipe.id = e.pointerId;
       this._swipe.kind = 'cross';
       this._swipe.active = true;
-      this._swipe.pts = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
+      this._swipe.pts = [{ ...toScreen(e), t: e.timeStamp }];
     });
     window.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this._swipe.id) return;
-      this._swipe.pts.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+      const sp = toScreen(e);
+      this._swipe.pts.push({ x: sp.x, y: sp.y, t: e.timeStamp });
       if (this._swipe.kind === 'shot' && !this._swipe.active) {
         const a = this._swipe.pts[0];
-        if (Math.hypot(e.clientX - a.x, e.clientY - a.y) < 28) return;
+        if (Math.hypot(sp.x - a.x, sp.y - a.y) < 28) return;
         // Палец явно пошёл рисовать: отменяем накопленный обычный замах,
         // чтобы после жеста не вылетели два мяча подряд.
         this._swipe.active = true;
@@ -281,11 +295,11 @@ export class Input {
       }
 
       // Сила: длина свайпа относительно трети экрана
-      const power = Math.min(1.3, Math.max(0.2, len / (window.innerHeight * 0.35)));
+      const power = Math.min(1.3, Math.max(0.2, len / (screenRect().height * 0.35)));
 
       // Скорость жеста (экранов в секунду): медленный — свеча, резкий — прострел
       const durMs = Math.max(1, (pts[pts.length - 1].t || 0) - (a.t || 0));
-      let speed = (len / window.innerHeight) / (durMs / 1000);
+      let speed = (len / screenRect().height) / (durMs / 1000);
       if (durMs < 40) speed = 2; // защита от синтетических событий
 
       // Подкрутка: насколько середина траектории отклонилась от прямой (со знаком)

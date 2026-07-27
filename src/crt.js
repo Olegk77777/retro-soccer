@@ -73,6 +73,7 @@ const FRAG = /* glsl */ `
   uniform float uScanRes;     // сколько строк рисует «кинескоп» (НЕ равно высоте рендера)
   uniform float uGrainRes;    // крупность зерна (тоже своя, не от разрешения)
   uniform float uCurvature;   // кривизна кинескопа
+  uniform float uOverscan;    // насколько растр выходит за видимую часть стекла
   uniform float uScanline;    // сила полос развёртки
   uniform float uNoise;       // зерно
   uniform float uRgbShift;    // расхождение цветов (хроматическая аберрация)
@@ -84,7 +85,11 @@ const FRAG = /* glsl */ `
   uniform float uBloom;       // сила halation
   uniform float uContrast;    // S-контраст вокруг средних тонов
   uniform float uLift;        // подъём чёрного: стекло кинескопа не бывает чёрным
+  uniform float uToe;         // подъём ТЁМНЫХ УЧАСТКОВ (тени мягче, не «дыры»)
   uniform float uWarmth;      // раздел тонов: света теплее, тени холоднее
+  uniform float uGain;        // живая ручка «яркость» на корпусе ТВ
+  uniform float uContrastKnob;// живая ручка «контраст»
+  uniform float uColorKnob;   // живая ручка «цвет»
   varying vec2 vUv;
 
   float rand(vec2 co) {
@@ -92,8 +97,14 @@ const FRAG = /* glsl */ `
   }
 
   void main() {
-    // Кривизна: выпуклый экран кинескопа
+    // Кривизна: выпуклый экран кинескопа.
+    // ОВЕРСКАН обязателен: без него выпуклость оставляет чёрные поля внутри
+    // рамки корпуса, и картинка читается как «экран меньше стекла». Настоящий
+    // кинескоп работал наоборот — растр был ЧУТЬ БОЛЬШЕ видимой части, и
+    // самые края кадра просто не показывались. Множитель подобран так, чтобы
+    // угол ровно дотягивался до границы на всей вилке кривизны пресетов.
     vec2 cc = vUv * 2.0 - 1.0;
+    cc /= 1.0 + uCurvature * uOverscan;
     cc *= 1.0 + uCurvature * dot(cc, cc);
     vec2 uv = cc * 0.5 + 0.5;
 
@@ -120,12 +131,21 @@ const FRAG = /* glsl */ `
     vec3 glow = texture2D(tBloom, uv).rgb;
     col += glow * uBloom * vec3(1.06, 1.0, 0.92);
 
-    // Насыщенность и оттенок канала
+    // Насыщенность и оттенок канала. Ручки корпуса (uGain/uColorKnob) —
+    // множители ПОВЕРХ пресета: пресет задаёт характер канала, ручка правит
+    // его под свою комнату, ровно как на настоящем телевизоре.
     float luma = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(vec3(luma), col, uSaturation) * uTint * uBrightness;
+    col = mix(vec3(luma), col, uSaturation * uColorKnob) * uTint * uBrightness * uGain;
 
     // Контраст вокруг средних тонов: главный рычаг «сочности»
-    col = (col - 0.5) * uContrast + 0.5;
+    col = (col - 0.5) * uContrast * uContrastKnob + 0.5;
+
+    // Подъём ТЁМНЫХ УЧАСТКОВ. uLift поднимает весь кадр (свечение стекла),
+    // а это — только тени: полутени игроков и дальние углы перестают быть
+    // чёрными дырами, света при этом не трогаются вовсе. Без него высокий
+    // контраст «чистых» каналов давит тени в уголь (фидбек Олега 27.07.2026).
+    float dk = 1.0 - smoothstep(0.0, 0.44, dot(col, vec3(0.299, 0.587, 0.114)));
+    col += uToe * dk * vec3(0.84, 0.92, 1.12);   // и уводит их в стадионную синеву
 
     // Разделение тонов: света уходят в тёплый, тени — в синеву стадионной ночи
     float l2 = clamp(dot(col, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
@@ -220,6 +240,7 @@ export class CRTPipeline {
         uScanRes: { value: CONFIG.render.scanLines },
         uGrainRes: { value: CONFIG.render.grainRes },
         uCurvature: { value: 0.1 },
+        uOverscan: { value: CONFIG.render.overscan },
         uScanline: { value: 0.3 },
         uNoise: { value: 0.05 },
         uRgbShift: { value: 0.0015 },
@@ -231,7 +252,12 @@ export class CRTPipeline {
         uBloom: { value: B.enabled ? B.strength : 0 },
         uContrast: { value: 1.0 },
         uLift: { value: 0.0 },
+        uToe: { value: 0.0 },
         uWarmth: { value: 0.0 },
+        // Ручки корпуса ТВ: нейтраль = 1.0, пресет их не трогает
+        uGain: { value: 1.0 },
+        uContrastKnob: { value: 1.0 },
+        uColorKnob: { value: 1.0 },
       },
       depthTest: false,
       depthWrite: false,
@@ -301,7 +327,17 @@ export class CRTPipeline {
     u.uBloom.value = B.enabled ? (p.bloom ?? B.strength) : 0;
     u.uContrast.value = p.contrast ?? 1.0;
     u.uLift.value = p.lift ?? 0.0;
+    u.uToe.value = p.toe ?? 0.0;
     u.uWarmth.value = p.warmth ?? 0.0;
+  }
+
+  // Живые ручки корпуса телевизора. Множители ПОВЕРХ пресета: смена канала
+  // их не сбрасывает, как и на настоящем ТВ.
+  setKnobs({ gain, contrast, color } = {}) {
+    const u = this.material.uniforms;
+    if (gain !== undefined) u.uGain.value = gain;
+    if (contrast !== undefined) u.uContrastKnob.value = contrast;
+    if (color !== undefined) u.uColorKnob.value = color;
   }
 
   // Три микропрохода на 1/downscale: яркая часть → размытие по X → по Y.

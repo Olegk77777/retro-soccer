@@ -8,6 +8,7 @@ import { Ball } from './ball.js';
 import { Match } from './match.js';
 import { Input } from './input.js';
 import { CRTPipeline } from './crt.js';
+import { Knob, screenRect } from './tvset.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -33,109 +34,143 @@ const camera = new THREE.PerspectiveCamera(CONFIG.camera.fov, 16 / 9, 0.5, 400);
 camera.position.set(0, CONFIG.camera.height, CONFIG.camera.distance);
 camera.lookAt(0, 1, 0);
 
-// --- ТВ-пресеты ---
-// Стартовая картинка — чистый RGB («оригинал»): пусть игрок сам решит, когда
-// накинуть эфирный шум или VHS. Какой пресет стартовый — решают ДАННЫЕ
-// (tv-presets.json → "default"), а выбор игрока переживает перезапуск.
-let presets = [];
-let presetIndex = 0;
-const presetBtn = document.getElementById('preset-btn');
+// ===== Панель телевизора =====
+// Настройки картинки живут на КОРПУСЕ, а не в меню: канал, яркость, контраст
+// и цвет — аналоговые ручки, чёткость и износ газона — клавиши. В меню
+// осталось только то, чего на телевизоре 98-го быть не могло (геймплей,
+// камера, справочник управления).
 
-fetch('./data/tv-presets.json')
-  .then((r) => r.json())
-  .then((data) => {
-    presets = data.presets;
-    const saved = localStorage.getItem('f98.tvPreset');
-    const savedIdx = presets.findIndex((p) => p.id === saved);
-    const defIdx = presets.findIndex((p) => p.id === data.default);
-    applyPreset(savedIdx >= 0 ? savedIdx : Math.max(0, defIdx));
-  })
-  .catch((e) => console.error('Не удалось загрузить ТВ-пресеты:', e));
+const remember = (key, value) => {
+  try { localStorage.setItem(key, String(value)); } catch (e) { /* приватный режим */ }
+};
 
-function applyPreset(i) {
-  if (!presets.length) return;
-  presetIndex = ((i % presets.length) + presets.length) % presets.length;
-  crt.setPreset(presets[presetIndex]);
-  presetBtn.textContent = 'ТВ: ' + presets[presetIndex].name;
-  try { localStorage.setItem('f98.tvPreset', presets[presetIndex].id); } catch (e) { /* приватный режим */ }
-}
+// --- Клавиша ЧЁТКОСТЬ: перебор ступеней внутреннего рендера ---
+// Строчность кинескопа и зерно к разрешению НЕ привязаны
+// (CONFIG.render.scanLines / grainRes), поэтому 720p не съедает ретро-дух.
+const keySharp = document.getElementById('key-sharp');
+const HEIGHTS = CONFIG.render.heights;
+let qualityIdx = 0;
 
-presetBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  applyPreset(presetIndex + 1);
-});
-
-// --- Панель настроек ---
-const settingsPanel = document.getElementById('settings');
-document.getElementById('settings-btn').addEventListener('click', (e) => {
-  e.stopPropagation();
-  settingsPanel.classList.add('show');
-});
-document.getElementById('settings-close').addEventListener('click', (e) => {
-  e.stopPropagation();
-  settingsPanel.classList.remove('show');
-});
-
-// Износ газона: три карты плавно смешиваются прямо в CanvasTexture.
-// По умолчанию — золотая середина; выбор переживает перезапуск игры.
-const wearSlider = document.getElementById('set-pitch-wear');
-const wearVal = document.getElementById('set-pitch-wear-val');
-const savedWearRaw = localStorage.getItem('f98.pitchWear');
-const savedWear = Number(savedWearRaw);
-const defaultWear = Math.round(CONFIG.atmosphere.pitchWear.default * 100);
-const initialWear = savedWearRaw !== null && Number.isFinite(savedWear) &&
-  savedWear >= 0 && savedWear <= 100 ? savedWear : defaultWear;
-
-function wearLabel(value) {
-  if (value === 50) return 'Золотая середина';
-  if (value <= 15) return 'Ухоженный';
-  if (value <= 35) return 'Лёгкий износ';
-  if (value <= 65) return 'Умеренный';
-  if (value <= 85) return 'Поношенный';
-  return 'Сильно изношенный';
-}
-
-function applyPitchWear(value, remember = false) {
-  const safe = Math.max(0, Math.min(100, Number(value) || 0));
-  wearSlider.value = safe;
-  wearVal.textContent = `${safe}% · ${wearLabel(safe)}`;
-  scene.userData.setPitchWear(safe / 100);
-  if (remember) {
-    try { localStorage.setItem('f98.pitchWear', String(safe)); } catch (e) { /* приватный режим */ }
-  }
-}
-
-applyPitchWear(initialWear);
-wearSlider.addEventListener('input', () => applyPitchWear(wearSlider.value, true));
-
-// Чёткость: высота внутреннего рендера. Строчность кинескопа и зерно к ней
-// НЕ привязаны (CONFIG.render.scanLines / grainRes), поэтому 720p не съедает
-// ретро-дух — он только перестаёт мылить дальнего игрока.
-const qualitySelect = document.getElementById('set-quality');
-for (const [h, label] of CONFIG.render.heights) {
-  const opt = document.createElement('option');
-  opt.value = String(h);
-  opt.textContent = label;
-  qualitySelect.appendChild(opt);
-}
-
-function applyQuality(height, remember = false) {
-  const known = CONFIG.render.heights.map(([h]) => h);
-  const h = known.includes(height) ? height : CONFIG.render.targetHeight;
-  qualitySelect.value = String(h);
+function applyQuality(height, save = false) {
+  const i = HEIGHTS.findIndex(([h]) => h === height);
+  qualityIdx = i >= 0 ? i : HEIGHTS.findIndex(([h]) => h === CONFIG.render.targetHeight);
+  if (qualityIdx < 0) qualityIdx = 0;
+  const h = HEIGHTS[qualityIdx][0];
+  keySharp.querySelector('b').textContent = `${h}p`;
   crt.setHeight(h);
   // Вспышки меряют себя в метрах, а рисуются в пикселях буфера — им нужно
   // знать новую высоту, иначе на 720p они станут вдвое крупнее.
   if (scene.userData.flashes) scene.userData.flashes.setRenderHeight(h);
-  if (remember) {
-    try { localStorage.setItem('f98.renderHeight', String(h)); } catch (e) { /* приватный режим */ }
-  }
+  if (save) remember('f98.renderHeight', h);
 }
 
 const savedQuality = Number(localStorage.getItem('f98.renderHeight'));
 applyQuality(Number.isFinite(savedQuality) && savedQuality > 0
   ? savedQuality : CONFIG.render.targetHeight);
-qualitySelect.addEventListener('change', () => applyQuality(Number(qualitySelect.value), true));
+keySharp.addEventListener('click', () => {
+  applyQuality(HEIGHTS[(qualityIdx + 1) % HEIGHTS.length][0], true);
+});
+
+// --- Клавиша ГАЗОН: износ поля пятью ступенями ---
+// Плавный ползунок никуда не делся по сути — три карты по-прежнему
+// смешиваются в CanvasTexture, просто щёлкаем по круглым значениям.
+const keyPitch = document.getElementById('key-pitch');
+const WEARS = [0, 25, 50, 75, 100];
+let wearIdx = 2;
+
+function wearLabel(v) {
+  if (v === 50) return 'середина';
+  if (v <= 15) return 'ухожен';
+  if (v <= 35) return 'лёгкий';
+  if (v <= 65) return 'умерен.';
+  if (v <= 85) return 'поношен';
+  return 'вытоптан';
+}
+
+function applyPitchWear(value, save = false) {
+  const v = WEARS.reduce((a, b) => (Math.abs(b - value) < Math.abs(a - value) ? b : a), WEARS[2]);
+  wearIdx = WEARS.indexOf(v);
+  keyPitch.querySelector('b').textContent = `${v}% ${wearLabel(v)}`;
+  scene.userData.setPitchWear(v / 100);
+  if (save) remember('f98.pitchWear', v);
+}
+
+// Number(null) === 0, поэтому проверять надо СЫРУЮ строку: без этого пустой
+// localStorage читался как «износ 0%» и поле стартовало ухоженным.
+const savedWearRaw = localStorage.getItem('f98.pitchWear');
+const savedWear = Number(savedWearRaw);
+applyPitchWear(savedWearRaw !== null && Number.isFinite(savedWear) &&
+  savedWear >= 0 && savedWear <= 100
+  ? savedWear : CONFIG.atmosphere.pitchWear.default * 100);
+keyPitch.addEventListener('click', () => {
+  applyPitchWear(WEARS[(wearIdx + 1) % WEARS.length], true);
+});
+
+// --- Ручки картинки: множители ПОВЕРХ пресета ---
+// Пресет задаёт характер канала, ручка правит его под свою комнату — ровно
+// как на настоящем телевизоре. Смена канала ручки не сбрасывает.
+const knobs = {};
+const KNOBS = [
+  ['gain', 'knob-gain', 0.70, 1.35],
+  ['contrast', 'knob-contrast', 0.72, 1.32],
+  ['color', 'knob-color', 0.00, 1.70],
+];
+for (const [key, id, min, max] of KNOBS) {
+  const saved = Number(localStorage.getItem(`f98.knob.${key}`));
+  knobs[key] = new Knob(document.getElementById(id), {
+    min, max, def: 1, value: Number.isFinite(saved) && saved > 0 ? saved : 1,
+    // На шкале телевизора не проценты, а отклонение от нуля-середины
+    format: (v) => {
+      const n = Math.round((v - 1) * 20);
+      return n === 0 ? '0' : (n > 0 ? `+${n}` : String(n));
+    },
+    onChange: (v) => {
+      crt.setKnobs({ [key]: v });
+      remember(`f98.knob.${key}`, v.toFixed(3));
+    },
+  });
+}
+crt.setKnobs({ gain: knobs.gain.value, contrast: knobs.contrast.value, color: knobs.color.value });
+
+// --- Ручка КАНАЛ: перебор ТВ-пресетов ---
+// Стартовая картинка — чистый RGB («оригинал»): пусть игрок сам решит, когда
+// накинуть эфирный шум или VHS. Какой пресет стартовый — решают ДАННЫЕ
+// (tv-presets.json → "default"), а выбор игрока переживает перезапуск.
+// Пресеты с "hidden": true остаются в файле, но в переборе не участвуют.
+let presets = [];
+let channelKnob = null;
+
+fetch('./data/tv-presets.json')
+  .then((r) => r.json())
+  .then((data) => {
+    presets = data.presets.filter((p) => !p.hidden);
+    if (!presets.length) throw new Error('в tv-presets.json не осталось видимых пресетов');
+    const saved = localStorage.getItem('f98.tvPreset');
+    const savedIdx = presets.findIndex((p) => p.id === saved);
+    const defIdx = presets.findIndex((p) => p.id === data.default);
+    const start = savedIdx >= 0 ? savedIdx : Math.max(0, defIdx);
+    channelKnob = new Knob(document.getElementById('knob-channel'), {
+      min: 0, max: presets.length - 1, step: 1, def: Math.max(0, defIdx), value: start,
+      format: (i) => presets[i].name,
+      onChange: (i) => {
+        crt.setPreset(presets[i]);
+        remember('f98.tvPreset', presets[i].id);
+      },
+    });
+    crt.setPreset(presets[start]);
+  })
+  .catch((e) => console.error('Не удалось загрузить ТВ-пресеты:', e));
+
+// --- Клавиша НАСТРОЙКИ: меню на стекле ---
+const settingsPanel = document.getElementById('settings');
+document.getElementById('key-menu').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsPanel.classList.toggle('show');
+});
+document.getElementById('settings-close').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsPanel.classList.remove('show');
+});
 
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
@@ -183,16 +218,22 @@ farSlider.addEventListener('input', () => {
 const powerEl = document.getElementById('power');
 const powerFill = document.getElementById('power-fill');
 
-// --- Размер окна ---
+// --- Размер стекла ---
+// Считаем от ЭКРАНА ТЕЛЕВИЗОРА, а не от окна: вокруг него теперь корпус
+// с панелью ручек, и окно заметно шире кадра (src/tvset.js → screenRect).
 function resize() {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
+  const r = screenRect();
+  const w = Math.max(1, Math.round(r.width));
+  const h = Math.max(1, Math.round(r.height));
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   crt.resize(w, h);
 }
-window.addEventListener('resize', resize);
+// screenRect кэширует прямоугольник и сбрасывает кэш по своему слушателю
+// resize; наш обработчик обязан идти ПОСЛЕ него, иначе прочитаем старый размер.
+window.addEventListener('resize', () => requestAnimationFrame(resize));
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
 resize();
 
 // --- Потеря WebGL-контекста (грабля iOS — см. База-знаний) ---
