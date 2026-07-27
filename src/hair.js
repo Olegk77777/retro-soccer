@@ -28,14 +28,14 @@ import * as THREE from 'three';
 // (мировая высота в метрах, полуширина по X, полуглубина по Y, сдвиг по Y).
 // Меняешь голову там — правь и здесь, иначе шапка сползёт с черепа.
 const HEAD_PROFILE = [
-  [1.584, 0.038, 0.057, -0.011],
-  [1.610, 0.056, 0.079, -0.009],
-  [1.641, 0.069, 0.091, -0.006],
-  [1.676, 0.074, 0.096, -0.004],
-  [1.714, 0.072, 0.093, 0.000],
-  [1.752, 0.066, 0.083, 0.004],
-  [1.784, 0.047, 0.058, 0.006],
-  [1.800, 0.022, 0.027, 0.006],
+  [1.574, 0.048, 0.060, -0.012],
+  [1.604, 0.065, 0.084, -0.010],
+  [1.640, 0.078, 0.096, -0.007],
+  [1.682, 0.083, 0.100, -0.004],
+  [1.724, 0.081, 0.098, 0.000],
+  [1.766, 0.074, 0.090, 0.005],
+  [1.800, 0.053, 0.064, 0.007],
+  [1.815, 0.025, 0.031, 0.007],
 ];
 const HEAD_BONE_Z = 1.6209;   // высота кости mixamorig:Head в рест-позе
 
@@ -56,17 +56,20 @@ export const HAIR = {
 // Стили. lowFront/lowBack — мировая высота нижнего края волос спереди и сзади
 // (спереди линия выше: это и есть линия роста волос). grow — насколько шапка
 // толще черепа. lift — приподнятая макушка (копна).
+// ТОЛЩИНА ВОЛОС. Первый заход давал 9 мм — это не причёска, а купальная
+// шапочка: на общем плане она читается тёмным пятном, натянутым на череп.
+// Настоящая короткая стрижка добавляет 2 см и имеет ВИДИМЫЙ край.
 const STYLES = {
   none: null,
-  thin: { lowFront: 1.762, lowBack: 1.694, grow: 0.004, lift: 0.000 },
-  short: { lowFront: 1.734, lowBack: 1.668, grow: 0.009, lift: 0.005 },
-  afro: { lowFront: 1.724, lowBack: 1.662, grow: 0.030, lift: 0.028 },
+  thin: { lowFront: 1.776, lowBack: 1.706, grow: 0.010, lift: 0.002 },
+  short: { lowFront: 1.748, lowBack: 1.678, grow: 0.020, lift: 0.010 },
+  afro: { lowFront: 1.738, lowBack: 1.672, grow: 0.044, lift: 0.036 },
   long: {
-    lowFront: 1.730, lowBack: 1.648, grow: 0.011, lift: 0.006,
+    lowFront: 1.744, lowBack: 1.656, grow: 0.024, lift: 0.012,
     // Хвост: подвес на затылке, длина и толщина в метрах
     // Замер показал, что при длине 14.5 см хвост сливался с шапкой и в
     // кадре не читался вовсе. 19 см — это как раз «собрал в хвост».
-    tail: { z: 1.678, y: 0.090, len: 0.190, w: 0.058, thick: 0.042 },
+    tail: { z: 1.690, y: 0.098, len: 0.195, w: 0.062, thick: 0.046 },
   },
 };
 
@@ -90,10 +93,52 @@ function profileAt(z) {
 const geoCache = new Map();
 const matCache = new Map();
 
+
+/**
+ * Развернуть все треугольники НАРУЖУ от центра объёма.
+ *
+ * Зачем не следить за порядком обхода руками. Первый заход собирал шапку
+ * поясами и веером на макушке, и весь набор оказался вывернут внутрь. Замер:
+ * нормаль веера макушки [0, −1, 0], то есть строго ВНИЗ. Материал у нас
+ * односторонний (так и надо: двусторонний вдвое дороже и ловит z-fighting),
+ * поэтому вывернутые грани просто отсекаются — на экране это лысая макушка
+ * при кольце волос вокруг головы, ровно «повязка» из фидбека Олега.
+ * Здесь то же самое, что делает recalc_face_normals в Blender: считаем, куда
+ * смотрит грань относительно центра, и при несогласии переворачиваем ВЕСЬ
+ * набор (у выпуклой шапки и у хвоста ориентация общая).
+ */
+function orientOutward(verts, idx) {
+  let cx = 0, cy = 0, cz = 0;
+  const n = verts.length / 3;
+  for (let i = 0; i < n; i += 1) {
+    cx += verts[i * 3]; cy += verts[i * 3 + 1]; cz += verts[i * 3 + 2];
+  }
+  cx /= n; cy /= n; cz /= n;
+  let vote = 0;
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+    const ux = verts[b] - verts[a], uy = verts[b + 1] - verts[a + 1], uz = verts[b + 2] - verts[a + 2];
+    const vx = verts[c] - verts[a], vy = verts[c + 1] - verts[a + 1], vz = verts[c + 2] - verts[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const dx = (verts[a] + verts[b] + verts[c]) / 3 - cx;
+    const dy = (verts[a + 1] + verts[b + 1] + verts[c + 1]) / 3 - cy;
+    const dz = (verts[a + 2] + verts[b + 2] + verts[c + 2]) / 3 - cz;
+    vote += Math.sign(nx * dx + ny * dy + nz * dz);
+  }
+  if (vote < 0) {
+    for (let t = 0; t < idx.length; t += 3) {
+      const tmp = idx[t + 1];
+      idx[t + 1] = idx[t + 2];
+      idx[t + 2] = tmp;
+    }
+  }
+  return idx;
+}
+
 /** Шапка волос: облегает череп, снизу обрезана по линии роста волос. */
 function capGeometry(st) {
   const n = HAIR.segments;
-  const levels = [1.752, 1.784, 1.801 + st.lift];
+  const levels = [1.762, 1.796, 1.812 + st.lift];
   const verts = [];
   const idx = [];
 
@@ -129,9 +174,11 @@ function capGeometry(st) {
   const rings = [lowStart];
   for (const z of levels) rings.push(ring(z, 0));
   // макушка — одна вершина
-  const topP = profileAt(1.800);
+  const topP = profileAt(1.815);
   const top = verts.length / 3;
-  verts.push(0, 1.801 + st.lift - HEAD_BONE_Z, -topP[3]);
+  // Вершина ВЫШЕ последнего кольца: иначе «купол» вырождается в плоский
+  // диск, и любая ошибка ориентации сразу оставляет дырку на макушке.
+  verts.push(0, 1.828 + st.lift - HEAD_BONE_Z, -topP[3]);
 
   for (let r = 0; r < rings.length - 1; r += 1) {
     const a = rings[r];
@@ -149,7 +196,7 @@ function capGeometry(st) {
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  geo.setIndex(idx);
+  geo.setIndex(orientOutward(verts, idx));
   geo.computeVertexNormals();
   return geo;
 }
@@ -180,7 +227,7 @@ function tailGeometry(t) {
   idx.push(0, 1, 2, 0, 2, 3);             // торец основания
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
-  geo.setIndex(idx);
+  geo.setIndex(orientOutward(v, idx));
   geo.computeVertexNormals();
   return geo;
 }

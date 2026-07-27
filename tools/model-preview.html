@@ -27,7 +27,7 @@
   select, input, button { background:#22242b; color:#e6e8ee; border:1px solid #383b44;
                           border-radius:4px; padding:4px 7px; font:inherit; }
   label { opacity:.7; }
-  #views { display:grid; grid-template-columns:repeat(5, 1fr); gap:2px; }
+  #views { display:grid; grid-template-columns:repeat(6, 1fr); gap:2px; }
   .cell { position:relative; }
   .cell canvas { display:block; width:100%; }
   .cap { position:absolute; left:6px; top:4px; font-size:11px; opacity:.65;
@@ -75,11 +75,12 @@ window.addEventListener('error', (e) => err(e.error || e.message));
 // Четыре плана. dist — метры до цели, h — высота цели, fov — как у ТВ-камеры.
 // «эфир» повторяет игровой масштаб: fov 33 и 61 м от камеры до центра поля.
 const VIEWS = [
-  { name: 'лицо',  dist: 0.52, aim: 1.66, fov: 34, w: 460, h: 460, yaw: 0.14 },
-  { name: 'бюст',  dist: 1.25, aim: 1.42, fov: 34, w: 460, h: 460, yaw: 0.55 },
-  { name: 'рост',  dist: 3.60, aim: 0.95, fov: 34, w: 460, h: 640, yaw: 0.55 },
-  { name: 'спина', dist: 2.20, aim: 1.25, fov: 34, w: 460, h: 640, yaw: Math.PI + 0.25 },
-  { name: 'эфир',  dist: 61.0, aim: 0.95, fov: 33, w: 460, h: 640, yaw: 0.55 },
+  { name: 'лицо',    dist: 0.58, aim: 1.70, fov: 30, w: 380, h: 420, yaw: 0.10 },
+  { name: 'затылок', dist: 0.58, aim: 1.70, fov: 30, w: 380, h: 420, yaw: Math.PI + 0.30 },
+  { name: 'бюст',    dist: 1.25, aim: 1.42, fov: 34, w: 380, h: 420, yaw: 0.55 },
+  { name: 'рост',    dist: 3.60, aim: 0.95, fov: 34, w: 380, h: 560, yaw: 0.55 },
+  { name: 'спина',   dist: 2.20, aim: 1.25, fov: 34, w: 380, h: 560, yaw: Math.PI + 0.25 },
+  { name: 'эфир',    dist: 61.0, aim: 0.95, fov: 33, w: 380, h: 560, yaw: 0.55 },
 ];
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
