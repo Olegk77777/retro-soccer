@@ -114,6 +114,9 @@ export function buildFloodlightHalos(scene) {
       depthWrite: false,
       opacity: H.opacity,
     });
+    // Лампа мачты — источник, а не светлое пятно: её яркость уходит выше
+    // единицы, поэтому у неё есть ореол, а у белой разметки его почти нет.
+    mat.color.setRGB(H.gain, H.gain * 0.985, H.gain * 0.95);
     const sprite = new THREE.Sprite(mat);
     sprite.position.set(m.x, m.y, m.z);
     sprite.scale.set(H.size, H.size, 1);
@@ -216,12 +219,17 @@ const FLASH_VERT = /* glsl */ `
 const FLASH_FRAG = /* glsl */ `
   precision mediump float;
   varying float vAlpha;
+  uniform float uGain;
   void main() {
     vec2 d = gl_PointCoord - 0.5;
     float r = min(1.0, dot(d, d) * 4.0);
     float a = vAlpha * (1.0 - r) * (1.0 - r);   // мягкое ядро, быстрый спад
     if (a <= 0.003) discard;
-    gl_FragColor = vec4(1.0, 0.97, 0.92, a);
+    // Ксеноновая вспышка — НАСТОЯЩИЙ источник, а не белая краска: её яркость
+    // уходит ВЫШЕ единицы (uGain), и дальше тонмаппинг сводит её мягким
+    // плечом, а порог halation отличает её от белой футболки. Пока всё в
+    // кадре упиралось в 1.0, ореол рождался у разметки наравне с лампой.
+    gl_FragColor = vec4(vec3(1.0, 0.97, 0.92) * uGain, a);
   }
 `;
 
@@ -256,6 +264,7 @@ export class CameraFlashes {
       uniforms: {
         uScale: { value: uScale },
         uSize: { value: A.size },
+        uGain: { value: A.gain },
       },
       transparent: true,
       blending: THREE.AdditiveBlending,

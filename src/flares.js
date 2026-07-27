@@ -267,7 +267,13 @@ export class Flares {
       this.fire.push(f.x, y, f.z, F.glowSize, F.glowSize, 0, f.r, f.g, f.b, F.glowAlpha * power);
       const halo = F.haloSize * (0.9 + 0.2 * jitter);
       this.fire.push(f.x, y, f.z, halo, halo, 0, f.r, f.g, f.b, F.haloAlpha * power);
-      this.fire.push(f.x, y, f.z, F.coreSize, F.coreSize, 0, 1, 0.96, 0.90, Math.min(1, power));
+      // Ядро файера — самая яркая точка кадра и единственный настоящий
+      // источник на трибуне. Оно уходит ВЫШЕ единицы (coreGain), поэтому
+      // тонмаппинг сводит его плечом в горячее белое с тёплым ореолом,
+      // а не срезает в плоский блин. Ореол и зарево остаются в LDR: они
+      // и есть рассеянный свет этого ядра, второй раз светить им нечем.
+      const cg = F.coreGain;
+      this.fire.push(f.x, y, f.z, F.coreSize, F.coreSize, 0, cg, cg * 0.96, cg * 0.90, Math.min(1, power));
 
       // Дым: копим дробную часть, иначе на низком темпе частицы не родятся
       f.debt += F.smokeRate * dt * ignite * tail;
