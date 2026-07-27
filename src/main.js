@@ -8,7 +8,7 @@ import { Ball } from './ball.js';
 import { Match } from './match.js';
 import { Input } from './input.js';
 import { CRTPipeline } from './crt.js';
-import { Knob, screenRect } from './tvset.js';
+import { Knob, screenRect, invalidateScreenRect } from './tvset.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -173,6 +173,53 @@ fetch('./data/tv-presets.json')
     crt.setPreset(presets[start]);
   })
   .catch((e) => console.error('Не удалось загрузить ТВ-пресеты:', e));
+
+// --- Клавиша ВО ВЕСЬ ЭКРАН ---
+// Панель ручек уезжает, рамка корпуса схлопывается, картинка занимает всё окно.
+// Стекло при этом МЕНЯЕТ РАЗМЕР без события resize у окна, поэтому кэш
+// прямоугольника надо сбросить руками — иначе управление и холст рендера
+// останутся жить по старым границам (src/tvset.js → invalidateScreenRect).
+// Настоящий полноэкранный режим браузера просим сверху, но лишь по
+// возможности: на iPad он для обычных элементов не работает, а прятать
+// панель это не мешает.
+const fsExit = document.getElementById('fs-exit');
+
+function setFullscreen(on, save = true) {
+  document.body.classList.toggle('tv-full', on);
+  invalidateScreenRect();
+  resize();
+  if (save) remember('f98.fullscreen', on ? '1' : '0');
+}
+
+function toggleFullscreen() {
+  const on = !document.body.classList.contains('tv-full');
+  setFullscreen(on);
+  if (on) document.documentElement.requestFullscreen?.().catch(() => {});
+  else if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+}
+
+document.getElementById('key-full').addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleFullscreen();
+});
+// Кнопка живёт на стекле, а слушатели управления — на window: без остановки
+// всплытия тап по ней заодно взводил бы игровой жест (та же грабля, что с ручками)
+fsExit.addEventListener('pointerdown', (e) => e.stopPropagation());
+fsExit.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleFullscreen();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('tv-full')) toggleFullscreen();
+});
+// Браузер вышел из полноэкранного сам (Esc, свайп) — возвращаем корпус
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && document.body.classList.contains('tv-full')) setFullscreen(false);
+});
+// Режим переживает перезапуск: снимать ролики удобнее без лишнего клика.
+// Настоящий полноэкранный режим браузера при загрузке не попросишь — он
+// требует жеста пользователя, поэтому восстанавливаем только спрятанный корпус.
+if (localStorage.getItem('f98.fullscreen') === '1') setFullscreen(true, false);
 
 // --- Клавиша НАСТРОЙКИ: меню на стекле ---
 const settingsPanel = document.getElementById('settings');

@@ -113,6 +113,29 @@
       box-shadow: 0 0 7px rgba(255,65,48,0.85), inset 0 0 2px rgba(255,220,210,0.9);
     }
 
+    /* ---- Во весь экран ----
+       Панель ручек уезжает, рамка и скругление корпуса схлопываются, картинка
+       занимает всё окно. Выход — маленькая кнопка в углу и Esc; состояние
+       запоминается, поэтому записывать ролики можно без лишнего клика. */
+    body.tv-full #tv { padding: 0; gap: 0; }
+    body.tv-full #tv-panel { display: none; }
+    body.tv-full #tv-screen { border-radius: 0; box-shadow: none; }
+    body.tv-full #bug { right: 54px; }   /* уступаем угол кнопке выхода */
+
+    #fs-exit {
+      position: fixed; top: 10px; right: 12px;
+      width: 28px; height: 28px; display: none;
+      align-items: center; justify-content: center;
+      font-family: var(--tv-font); font-size: 16px; line-height: 1;
+      color: rgba(255,255,255,0.6);
+      background: rgba(0,0,0,0.42);
+      border: 1px solid rgba(255,255,255,0.22); cursor: pointer;
+      opacity: 0.6; transition: opacity 0.15s;
+      touch-action: manipulation; z-index: 12;
+    }
+    body.tv-full #fs-exit { display: flex; }
+    #fs-exit:hover, #fs-exit:active { opacity: 1; color: #fff; }
+
     /* ---- Аналоговая ручка ---- */
     .knob {
       --k: clamp(30px, 6.4vh, 52px);
@@ -571,6 +594,7 @@
     <div class="row"><span class="key">ЧЁТКОСТЬ</span> — разрешение внутреннего рендера: 240p (совсем PS1) · 360p · 480p · 720p · 1080p. По умолчанию 1080p — на iPad оно «летает и не греет». Строчность кинескопа и зерно от разрешения НЕ зависят: полосы всегда как у ТВ 90-х. Слабое железо просядет по FPS — ставь 480p</div>
     <div class="row"><span class="key">ГАЗОН</span> — износ поля: 0% ухоженное · 50% умеренные следы игры · 100% сильно вытоптанное</div>
     <div class="row"><span class="key">Логотип слева вверху</span> — «жучок» телеканала. Он часть ПАКА атрибутики: в своей сборке настоящий УТ-1, в публичной вымышленный УГ-1. Меняется файлом, не кодом</div>
+    <div class="row"><span class="key">ВО ВЕСЬ ЭКРАН</span> — прячет корпус телевизора с ручками, картинка занимает всё окно. Обратно — маленькая кнопка <span class="key">⤡</span> в правом верхнем углу или <span class="key">Esc</span>. Режим запоминается</div>
     <div class="row"><span class="key">Бегущая строка</span> — в начале матча внизу один быстрый проход с составами обеих команд, как в трансляции 90-х. Имена и номера — из состава, значит в публичной сборке поедут псевдонимы</div>
     <div class="row"><span class="key">Разделы этого меню</span> — складываются: щелчок по заголовку сворачивает раздел, кнопка <span class="key">СВЕРНУТЬ ВСЁ</span> — сразу все. Справочник управления по умолчанию свёрнут, чтобы настройки были под рукой. Что свёрнуто — запоминается</div>
     <div class="row"><span class="key">Плашка внизу кадра</span> — номер и фамилия игрока, у которого мяч; мяч ничей — подписан тот, кем управляешь. Цветная метка слева — форма его команды</div>
@@ -666,6 +690,7 @@
   <div id="btn-sprint" class="tbtn">⚡</div>
   <div id="power"><div id="power-fill"></div></div>
   <div id="lineups"><div id="lineups-text"></div></div>
+  <button id="fs-exit" title="Свернуть (Esc)" aria-label="Свернуть">⤡</button>
   <div id="tv-glass"></div>
  </div><!-- /#tv-screen -->
 
@@ -678,6 +703,7 @@
   <div class="knob" id="knob-color" data-name="Цвет"></div>
   <button class="tv-key" id="key-sharp">ЧЁТКОСТЬ<b>—</b></button>
   <button class="tv-key" id="key-pitch">ГАЗОН<b>—</b></button>
+  <button class="tv-key" id="key-full">ВО ВЕСЬ<b>ЭКРАН</b></button>
   <button class="tv-key" id="key-menu">НАСТРОЙКИ</button>
   <div id="tv-grille"></div>
   <div id="tv-led"></div>

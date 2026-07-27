@@ -20,6 +20,11 @@ function markDirty() { _dirty = true; }
 window.addEventListener('resize', markDirty);
 window.addEventListener('orientationchange', markDirty);
 
+// Стекло меняет размер не только по resize окна: панель ручек может уехать
+// (режим «во весь экран»), и тогда кэш надо сбросить руками — события окна
+// при этом не будет вовсе.
+export function invalidateScreenRect() { markDirty(); }
+
 // Прямоугольник экрана телевизора в координатах окна. Кэшируется: его дёргают
 // на каждом касании, а getBoundingClientRect заставляет браузер пересчитывать
 // раскладку. Сбрасывается только по resize.
