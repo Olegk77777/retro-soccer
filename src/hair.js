@@ -14,6 +14,14 @@
 // ПОРЯДОК В КАДРЕ КРИТИЧЕН: updateLoco → mixer.update → updatePose → updateHair.
 // Раньше нельзя — микшер и слой «живой корпус» перепишут поворот головы, и
 // волосы поедут относительно черепа.
+//
+// ОСИ КОСТИ ГОЛОВЫ (замерены по риггу, а не угаданы):
+//   локальный +Y — ВВЕРХ вдоль кости,
+//   локальный +Z — ВПЕРЁД, в лицо,
+//   локальный +X — влево.
+// Первый заход считал перёд за −Z, и вся причёска встала задом наперёд:
+// высокий край линии роста волос уехал на затылок, низкий налез на лоб —
+// на экране это читалось повязкой на голове (фидбек Олега 27.07.2026).
 import * as THREE from 'three';
 
 // Профиль головы, СВЕРЕННЫЙ с tools/build-player-mesh.py → HEAD.
@@ -56,7 +64,9 @@ const STYLES = {
   long: {
     lowFront: 1.730, lowBack: 1.648, grow: 0.011, lift: 0.006,
     // Хвост: подвес на затылке, длина и толщина в метрах
-    tail: { z: 1.672, y: 0.088, len: 0.145, w: 0.052, thick: 0.036 },
+    // Замер показал, что при длине 14.5 см хвост сливался с шапкой и в
+    // кадре не читался вовсе. 19 см — это как раз «собрал в хвост».
+    tail: { z: 1.678, y: 0.090, len: 0.190, w: 0.058, thick: 0.042 },
   },
 };
 
@@ -91,11 +101,13 @@ function capGeometry(st) {
     const p = profileAt(z);
     const start = verts.length / 3;
     for (let k = 0; k < n; k += 1) {
-      const a = (k / n) * Math.PI * 2;                    // 0 = вперёд (-Z в мире модели)
+      const a = (k / n) * Math.PI * 2;                    // 0 = ВПЕРЁД (+Z кости)
       const g = st.grow + extra;
-      verts.push(p[1] === 0 ? 0 : (p[1] + g) * Math.sin(a),
+      // p[3] — сдвиг профиля по Y в Blender, где вперёд это −Y; в осях кости
+      // вперёд это +Z, поэтому знак переворачивается.
+      verts.push((p[1] + g) * Math.sin(a),
                  z - HEAD_BONE_Z,
-                 -((p[2] + g) * Math.cos(a)) + p[3]);
+                 (p[2] + g) * Math.cos(a) - p[3]);
     }
     return start;
   };
@@ -109,7 +121,7 @@ function capGeometry(st) {
     const p = profileAt(z);
     const g = st.grow;
     low.push([(p[1] + g) * Math.sin(a), z - HEAD_BONE_Z,
-              -((p[2] + g) * Math.cos(a)) + p[3]]);
+              (p[2] + g) * Math.cos(a) - p[3]]);
   }
   const lowStart = verts.length / 3;
   for (const v of low) verts.push(v[0], v[1], v[2]);
@@ -119,7 +131,7 @@ function capGeometry(st) {
   // макушка — одна вершина
   const topP = profileAt(1.800);
   const top = verts.length / 3;
-  verts.push(0, 1.801 + st.lift - HEAD_BONE_Z, topP[3]);
+  verts.push(0, 1.801 + st.lift - HEAD_BONE_Z, -topP[3]);
 
   for (let r = 0; r < rings.length - 1; r += 1) {
     const a = rings[r];
@@ -231,14 +243,15 @@ export class HairRig {
       const tk = `tail|${look && look.hair}`;
       if (!geoCache.has(tk)) geoCache.set(tk, tailGeometry(st.tail));
       const pivot = new THREE.Object3D();
-      pivot.position.set(0, (st.tail.z - HEAD_BONE_Z) / sy, st.tail.y / sz);
+      // Минус: подвес хвоста на ЗАТЫЛКЕ, а +Z кости смотрит в лицо.
+      pivot.position.set(0, (st.tail.z - HEAD_BONE_Z) / sy, -st.tail.y / sz);
       pivot.scale.set(1 / sx, 1 / sy, 1 / sz);
       const mesh = new THREE.Mesh(geoCache.get(tk), mat);
       mesh.frustumCulled = false;
       pivot.add(mesh);
       this.bone.add(pivot);
-      // Хвост в покое висит вниз и чуть назад — как лежал бы под своим весом.
-      this.rest = new THREE.Vector3(0, -1, 0.34).normalize();
+      // В покое хвост висит вниз и НАЗАД — как лёг бы под своим весом.
+      this.rest = new THREE.Vector3(0, -1, -0.34).normalize();
       this.len = st.tail.len;
       this.tail = pivot;
       this.tip = new THREE.Vector3();

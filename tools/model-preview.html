@@ -197,6 +197,7 @@ async function main() {
     for (const ms of [120, 400, 900, 2000]) setTimeout(showTex, ms);
     scene.add(model);
     hair = new HairRig(model, look);
+    window.__dbg = { model, hair, rig, look };   // для проверки из консоли
     mixer = new THREE.AnimationMixer(model);
     setClip();
   };

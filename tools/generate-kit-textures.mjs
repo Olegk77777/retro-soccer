@@ -14,6 +14,7 @@ const C = {
   empty: '#48494c',
   seam: '#1a1a1c',
   boot: '#171719',
+  bootSole: '#d9d4c6',   // светлый кант подошвы — примета бутсы 90-х
   white: '#eee9da',
   brazilYellow: '#f6cf19',
   brazilYellowShade: '#dfb915',
@@ -94,6 +95,12 @@ function baseOutfield(image, shirt, shirtShade, shorts, socks) {
   rect(image, 32, 16, 64, 32, shorts);
   rect(image, 0, 0, 16, 16, socks);
   rect(image, 16, 0, 32, 16, C.boot);
+  // Подошва. Развёртка бутсы кладёт ВЫСОТУ сечения в y зоны: нижние ряды — это
+  // низ колодки по всей длине. Светлая полоса там читается как белая подошва,
+  // а на общем плане отделяет бутсу от газона (см. BOOT_SECTION в
+  // tools/build-player-mesh.py).
+  rect(image, 16, 0, 32, 2, C.bootSole);
+  rect(image, 16, 2, 32, 3, '#8d8a80');
   // Пиксельные швы зон помогают форме не сливаться после CRT.
   rect(image, 0, 32, 32, 33, shirtShade);
   rect(image, 32, 32, 64, 33, shirtShade);
