@@ -399,6 +399,16 @@ const camBallPos = new THREE.Vector3();
 const camBallVel = new THREE.Vector3();
 let camInit = false;
 
+// Ловля монтажных склеек для ТВ-прохода (см. конец frame()).
+// 4 м за кадр камера в игре не проходит никогда: доводка идёт долей от 60 Гц,
+// а цель отстоит от неё на единицы метров. Поворот на 25° (косинус 0.906) —
+// тоже заведомо больше, чем даёт панорама за живым мячом.
+const CUT_DIST = 4;
+const CUT_DOT = 0.906;
+const prevCamPos = new THREE.Vector3(0, CONFIG.camera.height, CONFIG.camera.distance);
+const prevCamDir = new THREE.Vector3(0, 0, -1);
+const camDir = new THREE.Vector3();
+
 // Плавная кривая 0..1 для выхода из ТВ-заставки (копия smooth01 из match.js)
 function smooth01(t) {
   const k = Math.max(0, Math.min(1, t));
@@ -505,6 +515,23 @@ function frame() {
   // а не на игрока: сам контровик считается в шейдере (src/rimlight.js).
   camera.updateMatrixWorld();
   updateRim(camera);
+
+  // СКЛЕЙКА. У ТВ-прохода есть буфер истории (послесвечение люминофора и
+  // чересстрочность), и на монтажном стыке — смене ракурса повтора, старте
+  // празднования, прыжке на стандарт — он потянул бы старый план через новый
+  // наплывом. Ловим прыжок здесь, по самой камере, а не расставляем вызовы по
+  // match.js и replay.js: так ни один будущий ракурс не забудут подключить.
+  // Порог с запасом: в игре камера едет доводкой и за кадр проходит меньше
+  // метра, повтор же прыгает на десятки.
+  // Направление считаем ДО проверки, а не внутри неё: при `||` короткое
+  // замыкание пропустило бы getWorldDirection на кадре, где сработал порог по
+  // расстоянию, и в prevCamDir уехало бы позавчерашнее значение.
+  camera.getWorldDirection(camDir);
+  const jump = camera.position.distanceToSquared(prevCamPos) > CUT_DIST * CUT_DIST
+    || camDir.dot(prevCamDir) < CUT_DOT;
+  if (jump) crt.cut();
+  prevCamPos.copy(camera.position);
+  prevCamDir.copy(camDir);
 
   if (NO_CRT) renderer.render(scene, camera);
   else crt.render(scene, camera, t);
