@@ -11,6 +11,7 @@
   },
   "textures": {
     "boards": null,
-    "ball": null
+    "ball": null,
+    "channelLogo": "./textures/tv/ug1-white.svg"
   }
 }

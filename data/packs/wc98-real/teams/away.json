@@ -12,16 +12,104 @@
   "_комментарий": "Домашняя форма сборной Франции на ЧМ-98: синяя футболка Vitesse с бело-красной грудной полосой, белые шорты, красные гетры; у вратаря чёрный комплект с белой отделкой.",
   "_состав": "Стартовые 11 финала ЧМ-98 (12.07.1998). Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Рост и внешность — по духу эпохи: узнаваемость важнее паспортной точности (принцип PS1 — рост, телосложение, тон кожи, причёска).",
   "squad": [
-    { "name": "БАРТЕЗ",     "number": 16, "height": 181, "build": 0.98, "skin": "#c49b7c", "hair": "none",  "hairColor": "#3a2a1c" },
-    { "name": "ТЮРАМ",      "number": 15, "height": 183, "build": 1.06, "skin": "#5b4130", "hair": "short", "hairColor": "#160f0c" },
-    { "name": "ДЕСАЙИ",     "number": 8,  "height": 186, "build": 1.10, "skin": "#55402e", "hair": "short", "hairColor": "#160f0c" },
-    { "name": "БЛАН",       "number": 5,  "height": 192, "build": 1.02, "skin": "#c8a184", "hair": "thin",  "hairColor": "#6b5136" },
-    { "name": "ЛИЗАРАЗЮ",   "number": 3,  "height": 169, "build": 1.05, "skin": "#c09070", "hair": "short", "hairColor": "#3b2a1a" },
-    { "name": "КАРАНБЁ",    "number": 4,  "height": 174, "build": 1.02, "skin": "#6a4a33", "hair": "short", "hairColor": "#160f0c" },
-    { "name": "ДЕШАМ",      "number": 7,  "height": 174, "build": 0.98, "skin": "#c49b7c", "hair": "short", "hairColor": "#2e2118" },
-    { "name": "ПЕТИ",       "number": 17, "height": 185, "build": 1.00, "skin": "#c8a184", "hair": "long",  "hairColor": "#b08a4a" },
-    { "name": "ДЖОРКАЕФФ",  "number": 6,  "height": 175, "build": 1.00, "skin": "#bd9070", "hair": "short", "hairColor": "#241812" },
-    { "name": "ЗИДАН",      "number": 10, "height": 185, "build": 1.02, "skin": "#b98a63", "hair": "none",  "hairColor": "#241812" },
-    { "name": "ГИВАРШ",     "number": 9,  "height": 178, "build": 1.00, "skin": "#c49b7c", "hair": "short", "hairColor": "#4a3520" }
+    {
+      "name": "БАРТЕЗ",
+      "number": 16,
+      "height": 181,
+      "build": 0.98,
+      "skin": "#c49b7c",
+      "hair": "none",
+      "hairColor": "#3a2a1c"
+    },
+    {
+      "name": "ЛИЗАРАЗЮ",
+      "number": 3,
+      "height": 169,
+      "build": 1.05,
+      "skin": "#c09070",
+      "hair": "short",
+      "hairColor": "#3b2a1a"
+    },
+    {
+      "name": "ДЕСАЙИ",
+      "number": 8,
+      "height": 186,
+      "build": 1.1,
+      "skin": "#55402e",
+      "hair": "short",
+      "hairColor": "#160f0c"
+    },
+    {
+      "name": "БЛАН",
+      "number": 5,
+      "height": 192,
+      "build": 1.02,
+      "skin": "#c8a184",
+      "hair": "thin",
+      "hairColor": "#6b5136"
+    },
+    {
+      "name": "ТЮРАМ",
+      "number": 15,
+      "height": 183,
+      "build": 1.06,
+      "skin": "#5b4130",
+      "hair": "short",
+      "hairColor": "#160f0c"
+    },
+    {
+      "name": "КАРАНБЁ",
+      "number": 4,
+      "height": 174,
+      "build": 1.02,
+      "skin": "#6a4a33",
+      "hair": "short",
+      "hairColor": "#160f0c"
+    },
+    {
+      "name": "ДЕШАМ",
+      "number": 7,
+      "height": 174,
+      "build": 0.98,
+      "skin": "#c49b7c",
+      "hair": "short",
+      "hairColor": "#2e2118"
+    },
+    {
+      "name": "ПЕТИ",
+      "number": 17,
+      "height": 185,
+      "build": 1.0,
+      "skin": "#c8a184",
+      "hair": "long",
+      "hairColor": "#b08a4a"
+    },
+    {
+      "name": "ДЖОРКАЕФФ",
+      "number": 6,
+      "height": 175,
+      "build": 1.0,
+      "skin": "#bd9070",
+      "hair": "short",
+      "hairColor": "#241812"
+    },
+    {
+      "name": "ЗИДАН",
+      "number": 10,
+      "height": 185,
+      "build": 1.02,
+      "skin": "#b98a63",
+      "hair": "none",
+      "hairColor": "#241812"
+    },
+    {
+      "name": "ГИВАРШ",
+      "number": 9,
+      "height": 178,
+      "build": 1.0,
+      "skin": "#c49b7c",
+      "hair": "short",
+      "hairColor": "#4a3520"
+    }
   ]
 }

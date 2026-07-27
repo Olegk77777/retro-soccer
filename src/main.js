@@ -34,6 +34,19 @@ const camera = new THREE.PerspectiveCamera(CONFIG.camera.fov, 16 / 9, 0.5, 400);
 camera.position.set(0, CONFIG.camera.height, CONFIG.camera.distance);
 camera.lookAt(0, 1, 0);
 
+// --- Жучок телеканала в левом верхнем углу ---
+// Картинку назначает ПАК атрибутики: у своей сборки реальный УТ-1, у публичной
+// вымышленный УГ-1 (правило лицензионного слоя — брендов в коде нет).
+// Пак без логотипа — блок молча не показывается.
+const channelLogo = document.getElementById('channel-logo');
+if (channelLogo && PACK.textures.channelLogo) {
+  channelLogo.addEventListener('load', () => channelLogo.classList.add('show'));
+  channelLogo.addEventListener('error', () => {
+    console.warn('Не загрузился логотип канала:', PACK.textures.channelLogo);
+  });
+  channelLogo.src = PACK.textures.channelLogo;
+}
+
 // ===== Панель телевизора =====
 // Настройки картинки живут на КОРПУСЕ, а не в меню: канал, яркость, контраст
 // и цвет — аналоговые ручки, чёткость и износ газона — клавиши. В меню

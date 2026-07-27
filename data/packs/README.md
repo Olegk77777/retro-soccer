@@ -58,7 +58,8 @@ node tools/build-anon-pack.mjs
   "teams": { "home": "teams/home.json", "away": "teams/away.json" },
   "textures": {
     "boards": "./textures/stadium/ads-france-98.png",
-    "ball": "./textures/ball/tricolore-98.png"
+    "ball": "./textures/ball/tricolore-98.png",
+    "channelLogo": "./textures/tv/ut1-white.svg"
   }
 }
 ```
@@ -69,6 +70,12 @@ node tools/build-anon-pack.mjs
 - `boards: null` — остаются процедурные щиты с выдуманными марками эпохи
   (СПОРТ·ТВ, КИНЕСКОП, ВОЛНА, ЭФИР 98, МЕТЕОР, ОРБИТА·888) из `src/scene.js`.
 - `ball: null` — остаётся классический чёрно-белый мяч из `src/ball.js`.
+- `channelLogo` — «жучок» телеканала в левом верхнем углу кадра. У своей
+  сборки настоящий `ut1-white.svg` (УТ-1 образца 1991–1997), у публичной
+  вымышленный `ug1-white.svg` («УГ-1»). Рядом лежат чёрные версии обоих
+  (`ut1.svg`, `ug1.svg`) — на случай светлого фона. `null` — жучка нет вовсе.
+  Логотипы каналов — такая же охраняемая марка, как эмблема клуба: в публичный
+  билд идёт только выдуманный.
 
 ## Что ещё осталось сделать перед публичным релизом
 

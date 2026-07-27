@@ -10,6 +10,8 @@
   },
   "textures": {
     "boards": "./textures/stadium/ads-france-98.png",
-    "ball": "./textures/ball/tricolore-98.png"
-  }
+    "ball": "./textures/ball/tricolore-98.png",
+    "channelLogo": "./textures/tv/ut1-white.svg"
+  },
+  "_логотип": "Жучок телеканала в левом верхнем углу кадра. Белая версия — она читается поверх тёмной картинки; чёрная лежит рядом (ut1.svg) на случай светлого фона. Реальная марка вещателя: в публичный билд не идёт, там свой логотип."
 }

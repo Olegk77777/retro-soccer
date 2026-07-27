@@ -22,13 +22,13 @@
       "hairColor": "#3a2a1c"
     },
     {
-      "name": "ТЮРЕН",
-      "number": 15,
-      "height": 183,
-      "build": 1.06,
-      "skin": "#5b4130",
+      "name": "ЛИЗАРАНЮ",
+      "number": 3,
+      "height": 169,
+      "build": 1.05,
+      "skin": "#c09070",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#3b2a1a"
     },
     {
       "name": "ДЕССАЙ",
@@ -49,13 +49,13 @@
       "hairColor": "#6b5136"
     },
     {
-      "name": "ЛИЗАРАНЮ",
-      "number": 3,
-      "height": 169,
-      "build": 1.05,
-      "skin": "#c09070",
+      "name": "ТЮРЕН",
+      "number": 15,
+      "height": 183,
+      "build": 1.06,
+      "skin": "#5b4130",
       "hair": "short",
-      "hairColor": "#3b2a1a"
+      "hairColor": "#160f0c"
     },
     {
       "name": "КАРАМБО",

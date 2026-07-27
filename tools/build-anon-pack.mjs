@@ -66,7 +66,11 @@ writeJSON(resolve(PACKS, TARGET, 'pack.json'), {
   _собрано: `Автоматически из пака ${aliases.source} скриптом tools/build-anon-pack.mjs. Руками не править.`,
   venue: aliases.venue,
   teams: { home: 'teams/home.json', away: 'teams/away.json' },
-  textures: { boards: aliases.textures.boards, ball: aliases.textures.ball },
+  textures: {
+    boards: aliases.textures.boards,
+    ball: aliases.textures.ball,
+    channelLogo: aliases.textures.channelLogo,
+  },
 });
 
 console.log(`Готово: пак ${TARGET} собран из ${aliases.source}.`);

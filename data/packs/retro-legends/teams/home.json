@@ -22,11 +22,11 @@
       "hairColor": "#2a1c14"
     },
     {
-      "name": "КАФО",
-      "number": 2,
-      "height": 176,
-      "build": 1,
-      "skin": "#6b4b34",
+      "name": "Р. КАРЛЕС",
+      "number": 6,
+      "height": 168,
+      "build": 1.12,
+      "skin": "#6a4a33",
       "hair": "short",
       "hairColor": "#160f0c"
     },
@@ -49,11 +49,11 @@
       "hairColor": "#160f0c"
     },
     {
-      "name": "Р. КАРЛЕС",
-      "number": 6,
-      "height": 168,
-      "build": 1.12,
-      "skin": "#6a4a33",
+      "name": "КАФО",
+      "number": 2,
+      "height": 176,
+      "build": 1,
+      "skin": "#6b4b34",
       "hair": "short",
       "hairColor": "#160f0c"
     },

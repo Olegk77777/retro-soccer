@@ -17,7 +17,7 @@ const FALLBACK = Object.freeze({
   id: 'fallback',
   title: 'МАТЧ',
   venue: 'ТОВАРИЩЕСКИЙ МАТЧ',
-  textures: { boards: null, ball: null },
+  textures: { boards: null, ball: null, channelLogo: null },
   teams: null,
 });
 
@@ -47,7 +47,7 @@ async function loadPack() {
     id,
     title: pack.title || FALLBACK.title,
     venue: pack.venue || FALLBACK.venue,
-    textures: { boards: null, ball: null, ...(pack.textures || {}) },
+    textures: { boards: null, ball: null, channelLogo: null, ...(pack.textures || {}) },
     teams,
   };
 }
