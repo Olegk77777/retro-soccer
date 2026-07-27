@@ -206,5 +206,74 @@ window.__rig = (async () => {
     return { сила: R.strength, пикселей: n, пик: Math.round(peak) };
   }
 
-  return { shoot, stats, area, bench, fit, shadowContrast, rimPeak, SHOTS, camera, crt, scene, CONFIG };
+  // ФАКТУРА газона: средний модуль градиента яркости, НОРМИРОВАННЫЙ на среднюю
+  // яркость участка. Нормировка тут и есть весь смысл: после переезда в
+  // дисплейное пространство абсолютная зернистость газона не изменилась
+  // (градиент 10.58 → 10.39), но средняя яркость поднялась с 86 до 105, и
+  // трава прочиталась ровным сукном. Опорные значения на общем плане, полоса
+  // «середина»: до гаммы 12.3 %, сразу после 9.9 %, с pitchTexture.contrast
+  // 1.6 — 12.6 %.
+  function grassTexture() {
+    const gl = renderer.getContext();
+    crt.cut();
+    for (let i = 0; i < 3; i++) shoot('tv');
+    const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
+    const out = {};
+    const zones = [
+      ['ближний газон', 0.30, 0.06, 0.70, 0.20],
+      ['середина', 0.30, 0.28, 0.70, 0.40],
+      ['дальний газон', 0.30, 0.48, 0.70, 0.56],
+    ];
+    for (const [name, x0, y0, x1, y1] of zones) {
+      const X = Math.round(x0 * W), Y = Math.round(y0 * H);
+      const w = Math.round((x1 - x0) * W), h = Math.round((y1 - y0) * H);
+      const b = new Uint8Array(w * h * 4);
+      gl.readPixels(X, Y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+      const L = (x, y) => {
+        const i = (y * w + x) * 4;
+        return 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2];
+      };
+      let g = 0, m = 0, n = 0;
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        g += Math.abs(L(x + 1, y) - L(x - 1, y)) + Math.abs(L(x, y + 1) - L(x, y - 1));
+        m += L(x, y);
+        n++;
+      }
+      out[name] = { средняя: Math.round(m / n), градиент: +(g / n).toFixed(2),
+        'фактура, %': +((g / n) / (m / n) * 100).toFixed(2) };
+    }
+    return out;
+  }
+
+  // Локальный контраст света ПОПЕРЁК кадра, на трёх глубинах. Так из замера
+  // уходит крупный градиент «ближе-дальше» (дымка, перспектива) и остаётся
+  // ровно неравномерность самих пятен прожекторов. Опорное: до гаммы 27.5 %,
+  // после 30.8 % — то есть пятна НЕ слабели, и жалоба на «плоский газон»
+  // относилась не к ним, а к фактуре (см. grassTexture).
+  function pitchLocal() {
+    crt.cut();
+    for (let i = 0; i < 3; i++) shoot('tv');
+    const Lm = (x) => 0.299 * x[0] + 0.587 * x[1] + 0.114 * x[2];
+    let acc = 0;
+    const rows = [];
+    for (const [y0, y1] of [[0.06, 0.13], [0.26, 0.33], [0.46, 0.53]]) {
+      const v = [];
+      for (let k = 0; k < 7; k++) {
+        const x0 = 0.04 + k * 0.135;
+        v.push(Lm(area(x0, y0, x0 + 0.075, y1)));
+      }
+      const mn = Math.min(...v), mx = Math.max(...v);
+      const av = v.reduce((a, b) => a + b, 0) / v.length;
+      const rel = +((mx - mn) / av * 100).toFixed(1);
+      acc += rel;
+      rows.push({ значения: v.map((x) => Math.round(x)), 'размах/среднее, %': rel });
+    }
+    return { полосы: rows, 'ИТОГ, %': +(acc / rows.length).toFixed(1) };
+  }
+
+  return {
+    shoot, stats, area, bench, fit,
+    shadowContrast, rimPeak, grassTexture, pitchLocal,
+    SHOTS, camera, crt, scene, CONFIG,
+  };
 })();
