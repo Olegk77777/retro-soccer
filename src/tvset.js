@@ -33,6 +33,15 @@ export function screenRect() {
   return _rect;
 }
 
+// Палец лёг НА СТЕКЛО, а не на корпус? Панель ручек лежит вне экрана, но
+// слушатели управления висят на window — без этой проверки касание ручки на
+// планшете заодно взводило бы жест навеса.
+export function onScreen(e) {
+  const r = screenRect();
+  const p = toScreen(e);
+  return p.x >= 0 && p.y >= 0 && p.x <= r.width && p.y <= r.height;
+}
+
 // Событие указателя → координаты ВНУТРИ стекла. Оверлей игры прибит к стеклу
 // (см. #tv-screen в index.html), а clientX/clientY приходят от окна.
 export function toScreen(e) {

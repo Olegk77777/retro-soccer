@@ -10,7 +10,7 @@
 // ВСЕ действия — с замахом: держишь кнопку — сила растёт, отпустил — исполнение.
 
 import { CONFIG } from './config.js';
-import { screenRect, toScreen } from './tvset.js';
+import { screenRect, toScreen, onScreen } from './tvset.js';
 
 // Игра идёт ВНУТРИ рамки телевизора, а не во весь экран (см. src/tvset.js).
 // Поэтому всё, что раньше считалось от window.innerWidth/innerHeight —
@@ -114,6 +114,7 @@ export class Input {
 
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
+      if (!onScreen(e)) return;          // палец на корпусе телевизора, не в игре
       const sp = toScreen(e);
       const sr = screenRect();
       if (sp.x > sr.width * 0.55) return; // правая зона — под кнопки
@@ -240,6 +241,7 @@ export class Input {
 
     window.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
+      if (!onScreen(e)) return;          // палец на корпусе телевизора, не в игре
       if (toScreen(e).x <= screenRect().width * 0.55) return; // левая зона — стик
       if (e.target && e.target.classList && e.target.classList.contains('tbtn')) return;
       if (this._swipe.id !== null) return;
