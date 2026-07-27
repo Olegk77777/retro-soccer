@@ -318,7 +318,11 @@ export class CameraFlashes {
       for (const s of this.stands) {
         const mats = Array.isArray(s.material) ? s.material : [s.material];
         for (const m of mats) {
-          if (m.map) m.color.setScalar(lift); // толпа светлеет, торцы не трогаем
+          // ВАЖНО: запись АБСОЛЮТНАЯ, поэтому базовую экспозицию сектора надо
+          // вернуть множителем. Без этого первый же гол стёр бы затемнение
+          // трибун навсегда: когда mood затухнет, lift станет ровно 1.0, и
+          // сектора останутся яркими до конца матча.
+          if (m.map) m.color.setScalar((m.userData.baseDim ?? 1) * lift);
         }
       }
     }

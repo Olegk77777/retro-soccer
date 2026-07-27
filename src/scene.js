@@ -12,6 +12,7 @@ import {
 } from './atmosphere.js';
 import { Flares } from './flares.js';
 import { Confetti } from './confetti.js';
+import { initRim, addRim } from './rimlight.js';
 
 const STADIUM_TEXTURES = Object.freeze({
   pitchBalanced: './textures/stadium/pitch-balanced-98.png',
@@ -410,10 +411,16 @@ function buildStands(scene) {
     texturePhase += rawLen;
 
     // Свет уже «запечён» в изображении; Basic не гасит наклонный сектор.
+    // Экспозиция трибуны: камера выставлена ПО ПОЛЮ, а зрительские секторы
+    // светят в 5–10 раз слабее газона — значит в эфире они обязаны уходить
+    // в нижнюю треть яркости. Базовый уровень запоминаем в userData: вспышки
+    // фотокамер после гола пишут color АБСОЛЮТНО и иначе сотрут затемнение.
     const standMat = new THREE.MeshBasicMaterial({
       map: tex,
       side: THREE.DoubleSide,
     });
+    standMat.color.setScalar(S.exposure);
+    standMat.userData.baseDim = S.exposure;
     const stand = new THREE.Mesh(new THREE.PlaneGeometry(len, standH), standMat);
     stand.rotation.order = 'YXZ';
     stand.rotation.y = Math.atan2(inwardX, inwardZ);
@@ -458,7 +465,12 @@ function buildStands(scene) {
 }
 
 function buildFloodlights(scene) {
-  const poleMat = new THREE.MeshLambertMaterial({ color: 0x555c66 });
+  // Столбам мачт кайма нужна не меньше, чем фигурам: серая труба на фоне
+  // чёрного неба без неё вообще не читается как объём.
+  const poleMat = addRim(
+    new THREE.MeshLambertMaterial({ color: 0x555c66 }),
+    CONFIG.atmosphere.rim.gearScale,
+  );
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff8dd }); // светится сам, без освещения
   const lampGeo = new THREE.BoxGeometry(4.5, 3, 0.8);
 
@@ -635,14 +647,60 @@ export function buildStadium() {
   // Бумага берёт фанатские секторы у пиротехники — сектор у них общий
   scene.userData.confetti = new Confetti(scene, scene.userData.flares);
 
-  // Свет (для объёмных объектов: мяч, ворота, трибуны): ночь + мощные прожекторы
-  scene.add(new THREE.HemisphereLight(0x99aacc, 0x334422, 0.9));
-  const sun = new THREE.DirectionalLight(0xfff2d0, 1.9);
-  sun.position.set(-40, 60, 30);
-  scene.add(sun);
-  const fill = new THREE.DirectionalLight(0xbfd0ff, 0.6);
-  fill.position.set(40, 40, -30);
-  scene.add(fill);
+  // Свет. Раньше тут стояли два выдуманных источника из (-40,60,30) и
+  // (40,40,-30), не связанных с мачтами ничем. Теперь лампы стоят В МАЧТАХ:
+  // от одних и тех же координат считаются столбы, гало, пятна на газоне,
+  // конусы, веер теней и контровая кайма — расходиться им нельзя.
+  const LT = CONFIG.atmosphere.light;
+  mastPositions().forEach((m, i) => {
+    // distance = 0, decay = 0: затухание ровно 1.0, то есть яркость постоянная,
+    // а личным у каждой лампы остаётся НАПРАВЛЕНИЕ — ради него всё и делается.
+    // Честное затухание разошлось бы с пятнами, запечёнными в текстуру газона.
+    const lamp = new THREE.PointLight(
+      LT.mastColor, LT.mastIntensity * (LT.weights[i] ?? 1), 0, 0,
+    );
+    lamp.position.set(m.x, m.y, m.z);
+    scene.add(lamp);
+  });
+
+  // Небо и отражение от газона. Верх берём из ДЫМКИ, низ — пипеткой из готовой
+  // текстуры газона: если задать их независимыми числами, фигура и воздух
+  // вокруг неё окажутся разного цвета, и игрок прочитается наклейкой.
+  const hemiSky = new THREE.Color(LT.hemiSky ?? HZ.color);
+  const hemiGround = LT.hemiGround !== null && LT.hemiGround !== undefined
+    ? new THREE.Color(LT.hemiGround)
+    : samplePitchColor(pitchTexture).multiplyScalar(LT.hemiGroundMul);
+  scene.add(new THREE.HemisphereLight(hemiSky, hemiGround, LT.hemiIntensity));
+
+  initRim();
 
   return scene;
+}
+
+/**
+ * Пипетка по текстуре газона: средний цвет травы для нижней полусферы ambient.
+ * Читаем из САМОЙ текстуры, а не пересчитываем формулу пятен второй раз —
+ * иначе при правке рисунка газона цвет отражённого света молча разъедется
+ * (та же грабля, что с профилем черепа, продублированным в hair.js).
+ */
+function samplePitchColor(tex) {
+  const fallback = new THREE.Color(0x2f4a24);
+  const canvas = tex && tex.image;
+  if (!canvas || !canvas.getContext) return fallback;
+  try {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // Четыре точки в стороне от разметки и от центрального круга
+    const pts = [[0.22, 0.28], [0.22, 0.72], [0.78, 0.28], [0.78, 0.72]];
+    let r = 0; let g = 0; let b = 0;
+    for (const [u, v] of pts) {
+      const d = ctx.getImageData((canvas.width * u) | 0, (canvas.height * v) | 0, 1, 1).data;
+      r += d[0]; g += d[1]; b += d[2];
+    }
+    const n = pts.length * 255;
+    // Текстура нарисована в sRGB, а свет считается в линейном
+    return new THREE.Color().setRGB(r / n, g / n, b / n, THREE.SRGBColorSpace);
+  } catch (e) {
+    console.warn('Пипетка по газону не сработала, ambient снизу по умолчанию:', e);
+    return fallback;
+  }
 }

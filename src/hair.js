@@ -23,6 +23,8 @@
 // высокий край линии роста волос уехал на затылок, низкий налез на лоб —
 // на экране это читалось повязкой на голове (фидбек Олега 27.07.2026).
 import * as THREE from 'three';
+import { CONFIG } from './config.js';
+import { addRim } from './rimlight.js';
 
 // Профиль головы, СВЕРЕННЫЙ с tools/build-player-mesh.py → HEAD.
 // (мировая высота в метрах, полуширина по X, полуглубина по Y, сдвиг по Y).
@@ -247,10 +249,12 @@ function material(colorHex) {
   const col = new THREE.Color(key);
   const m = new THREE.MeshLambertMaterial({
     color: col,
-    // Тот же уровень, что у кожи (0.45 в линейном): без него причёска на
-    // вечернем поле проваливается в чёрный силуэт.
-    emissive: col.clone().multiplyScalar(0.45),
+    // Тот же уровень, что у кожи: без него причёска на вечернем поле
+    // проваливается в чёрный силуэт. Число одно на обоих — CONFIG.player.emissive.
+    emissive: col.clone().multiplyScalar(CONFIG.player.emissive.skin),
   });
+  // Макушка — то место, где контровик от мачт читается лучше всего.
+  addRim(m, CONFIG.atmosphere.rim.hairScale);
   matCache.set(key, m);
   return m;
 }

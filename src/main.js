@@ -10,6 +10,7 @@ import { Input } from './input.js';
 import { CRTPipeline } from './crt.js';
 import { Knob, screenRect, invalidateScreenRect } from './tvset.js';
 import { clothTime } from './cloth.js';
+import { updateRim } from './rimlight.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -499,6 +500,11 @@ function frame() {
     camLook.lerp(camLookTarget, kCam);
   }
   camera.lookAt(camLook);
+  // Мачты в пространство вида — ПОСЛЕ lookAt, иначе кайма отстанет на кадр и
+  // на облёте камеры повтора будет «плавать». Четыре вектора на всю сцену,
+  // а не на игрока: сам контровик считается в шейдере (src/rimlight.js).
+  camera.updateMatrixWorld();
+  updateRim(camera);
 
   if (NO_CRT) renderer.render(scene, camera);
   else crt.render(scene, camera, t);

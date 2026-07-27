@@ -10,6 +10,7 @@ import { faceTexture } from './face.js';
 import { HairRig } from './hair.js';
 import { kitTextureWithNumber } from './kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
+import { addRim } from './rimlight.js';
 import { predictLanding, pursuitBall } from './ai/steering.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
@@ -244,8 +245,14 @@ export class Player {
 
     // Материалы — свои у каждого клона: форма перекрашена в цвет команды.
     // Lambert вместо Standard: быстрее на планшете, с плоскими гранями и
-    // пиксельной текстурой выглядит так же (стиль PS1). Emissive ~45% —
-    // без него фигура на вечернем поле чёрная.
+    // пиксельной текстурой выглядит так же (стиль PS1).
+    // Самосвечение — «пол яркости» на вечернем поле, но он же и потолок
+    // светотени: разница между освещённой и теневой стороной не может его
+    // превысить. Оба числа теперь в ЛИНЕЙНОЙ шкале и в CONFIG.player.emissive
+    // (раньше форма стояла на 0x737373 ≈ 0.17 после перевода из sRGB, а кожа
+    // на явном 0.45 — две разные шкалы в соседних ветках).
+    const EM = CONFIG.player.emissive;
+    const R = CONFIG.atmosphere.rim;
     const kitTex = getKitTexture(gltf, this.kitTexture, this.kitColor, L);
     const faceTex = faceTexture(L || {});
     this.model.traverse((o) => {
@@ -256,32 +263,27 @@ export class Player {
       let mat;
       if (src.name === 'head') {
         // Голова — единственная часть с рисованной текстурой (src/face.js).
-        // ВАЖНО про emissive: у формы он задан числом 0x737373, а число three.js
-        // читает как sRGB и переводит в линейное ≈0.17. У кожи же стоит явное
-        // ×0.45 УЖЕ в линейном. Разница почти втрое, и голову с кожей нельзя
-        // красить разными ветками: они стыкуются ровно на челюсти, и шов вылезет
-        // тёмным кольцом под подбородком. Ставим голове ровно 0.45, как у кожи.
+        // ГОЛОВЕ И КОЖЕ ОБЯЗАН ДОСТАТЬСЯ ОДИН ИТОГ: они стыкуются ровно на
+        // челюсти, и разные ветки дают тёмное кольцо под подбородком.
         mat = new THREE.MeshLambertMaterial({ map: faceTex, emissiveMap: faceTex });
-        mat.emissive.setScalar(0.45);
+        mat.emissive.setScalar(EM.skin);
       } else if (src.name === 'kit' && kitTex) {
-        mat = new THREE.MeshLambertMaterial({
-          map: kitTex, emissive: 0x737373, emissiveMap: kitTex,
-        });
+        mat = new THREE.MeshLambertMaterial({ map: kitTex, emissiveMap: kitTex });
+        mat.emissive.setScalar(EM.kit);
       } else if (src.map) {
-        mat = new THREE.MeshLambertMaterial({
-          map: src.map, emissive: 0x737373, emissiveMap: src.map,
-        });
+        mat = new THREE.MeshLambertMaterial({ map: src.map, emissiveMap: src.map });
+        mat.emissive.setScalar(EM.kit);
       } else {
         mat = new THREE.MeshLambertMaterial({
           color: src.color.clone(),
-          emissive: src.color.clone().multiplyScalar(0.45),
+          emissive: src.color.clone().multiplyScalar(EM.skin),
         });
         // Тон кожи из состава: смуглые бразильцы и бледные европейцы в одном
         // кадре — это половина узнаваемости фигурок на PS1. Текстура лица
         // рисуется от этого же числа, поэтому лицо и руки совпадают по тону.
         if (L && L.skin && src.name === 'skin') {
           mat.color.set(L.skin);
-          mat.emissive.set(L.skin).multiplyScalar(0.45);
+          mat.emissive.set(L.skin).multiplyScalar(EM.skin);
         }
       }
       mat.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
@@ -291,8 +293,13 @@ export class Player {
         // 22 клонов ОДНА — SkeletonUtils.clone делит её по ссылке, — поэтому
         // маску достаточно прочитать один раз, а не на каждого игрока.
         bakeClothMask(o.geometry);
+        // Контровик форме достаётся ВНУТРИ патча ткани: onBeforeCompile у
+        // материала ровно один, и второе присваивание молча выключило бы ветер.
         this.cloth = makeClothMaterial(mat);
         this.kitMesh = o;
+      } else {
+        // Кожа, голова, бутсы, гетры — свободный слот, вешаем ссылкой.
+        addRim(mat, src.name === 'skin' || src.name === 'head' ? R.skinScale : 1);
       }
       o.material = mat;
     });

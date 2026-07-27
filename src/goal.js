@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { addRim } from './rimlight.js';
 
 const AXIS = [
   new THREE.Vector3(1, 0, 0),
@@ -245,7 +246,12 @@ export class GoalSystem {
     const postAxisZ = innerHalf + G.postRadius;
     const barAxisY = G.height + G.postRadius;
     const outerHalf = innerHalf + G.postRadius * 2;
-    const frameMat = new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0x555555 });
+    // Каркас ворот стоит на фоне дальней трибуны и без каймы теряет круглоту:
+    // белая труба на тёмном фоне читается плоской полосой.
+    const frameMat = addRim(
+      new THREE.MeshLambertMaterial({ color: 0xf2f2f2, emissive: 0x555555 }),
+      CONFIG.atmosphere.rim.gearScale,
+    );
     const postHeight = G.height + G.postRadius * 2;
     // Перекладина обрывается ровно на ОСЯХ штанг, а не на их внешней кромке.
     // Раньше её длина была width + 4R: торцевой круг приходился точно на

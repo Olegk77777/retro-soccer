@@ -24,6 +24,7 @@
 // матрицей uClothBasis = inverse(mat3(mesh.matrixWorld)) — она разом снимает и
 // масштаб Armature, и поворот, и рост/сложение игрока, и разворот группы.
 import * as THREE from 'three';
+import { injectRim } from './rimlight.js';
 
 // ОДИН объект времени на весь матч. Все материалы кладут себе ССЫЛКУ на него,
 // поэтому обновление — одно присваивание, а не 22. Программа у всех общая,
@@ -116,6 +117,12 @@ function patchCloth( shader ) {
   shader.uniforms.uClothAir = c.air;          // личные
   shader.uniforms.uClothBasis = c.basis;
   shader.uniforms.uClothPhase = c.phase;
+  // Контровой свет живёт ЗДЕСЬ, а не отдельным onBeforeCompile: слот у
+  // материала ровно один, и второе присваивание молча выключило бы ветер —
+  // без единой ошибки в консоли. Правило общее: в проекте есть занятые слоты
+  // (форма — тут, трибуны — patchWaveShader в atmosphere.js), и новый эффект
+  // ДОПИСЫВАЕТСЯ в цепочку, а не вешает свою функцию.
+  injectRim( shader, this.userData.rimScale ?? 1 );
 }
 
 /** Вешает ветер на материал формы. Возвращает юниформы игрока для updateCloth. */
