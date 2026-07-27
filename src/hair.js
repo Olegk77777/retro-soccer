@@ -135,19 +135,28 @@ function orientOutward(verts, idx) {
   return idx;
 }
 
-/** Шапка волос: облегает череп, снизу обрезана по линии роста волос. */
+/** Шапка волос: облегает череп, снизу обрезана по линии роста волос.
+ *
+ *  ТОЛЩИНА НАБИРАЕТСЯ ПОСТЕПЕННО, а не стоит одинаковой от края до макушки.
+ *  У самой линии роста волосы сходят на нет — если там держать полные 2 см,
+ *  край шапки повисает над лбом козырьком, а по бокам вылезают острые углы
+ *  граней (замер на стенде 27.07.2026). Множители ниже — доля от st.grow по
+ *  кольцам снизу вверх.
+ */
+const GROW_AT = [0.12, 0.62, 1.0, 1.0];
+
 function capGeometry(st) {
   const n = HAIR.segments;
   const levels = [1.762, 1.796, 1.812 + st.lift];
   const verts = [];
   const idx = [];
 
-  const ring = (z, extra) => {
+  const ring = (z, mul) => {
     const p = profileAt(z);
     const start = verts.length / 3;
     for (let k = 0; k < n; k += 1) {
       const a = (k / n) * Math.PI * 2;                    // 0 = ВПЕРЁД (+Z кости)
-      const g = st.grow + extra;
+      const g = st.grow * mul;
       // p[3] — сдвиг профиля по Y в Blender, где вперёд это −Y; в осях кости
       // вперёд это +Z, поэтому знак переворачивается.
       verts.push((p[1] + g) * Math.sin(a),
@@ -164,7 +173,7 @@ function capGeometry(st) {
     const w = (1 - Math.cos(a)) * 0.5;                    // 0 спереди, 1 сзади
     const z = st.lowFront + (st.lowBack - st.lowFront) * w;
     const p = profileAt(z);
-    const g = st.grow;
+    const g = st.grow * GROW_AT[0];
     low.push([(p[1] + g) * Math.sin(a), z - HEAD_BONE_Z,
               (p[2] + g) * Math.cos(a) - p[3]]);
   }
@@ -172,7 +181,7 @@ function capGeometry(st) {
   for (const v of low) verts.push(v[0], v[1], v[2]);
 
   const rings = [lowStart];
-  for (const z of levels) rings.push(ring(z, 0));
+  levels.forEach((z, i) => rings.push(ring(z, GROW_AT[i + 1])));
   // макушка — одна вершина
   const topP = profileAt(1.815);
   const top = verts.length / 3;
@@ -253,6 +262,7 @@ const _rest = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _qBone = new THREE.Quaternion();
 const _qInv = new THREE.Quaternion();
+const _mRel = new THREE.Matrix4();
 
 /**
  * Причёска игрока. Живёт на кости головы; хвост качается на пружине.
@@ -266,11 +276,22 @@ export class HairRig {
     if (!st || !this.bone) return;
 
     model.updateMatrixWorld(true);
-    // Кость Mixamo живёт в своём масштабе (сантиметры), да ещё умноженном на
-    // рост и сложение игрока — причём НЕРАВНОМЕРНО (scale = tall·wide, tall,
-    // tall·wide). Снимаем масштаб ПОКОЛОНОЧНО: один общий множитель врал бы
-    // процентов на десять у плотного игрока.
-    const e = this.bone.matrixWorld.elements;
+    // Кость Mixamo живёт в своём масштабе (сантиметры), и его надо погасить,
+    // иначе геометрия в метрах приедет в сто раз больше.
+    //
+    // ГАСИМ РОВНО МАСШТАБ АРМАТУРЫ, А НЕ ВЕСЬ МИРОВОЙ. Первый заход снимал
+    // масштаб из МИРОВОЙ матрицы кости, а в ней сидят ещё и личные рост со
+    // сложением игрока (model.scale = modelScale·tall·wide), — шапка получалась
+    // строго в метрах и НЕ росла вместе с фигурой. Замер в игре: у крупного
+    // игрока (scale 1.24) макушка головы торчала над куполом шапки на 1 см, а
+    // на уровне лба между черепом и шапкой оставалось 0.6 мм при том, что у
+    // гранёных колец рассинхрон граней сам по себе больше. Череп протыкал
+    // шапку, от неё оставался пояс вокруг головы — ровно «повязка на голове»
+    // из фидбека Олега 27.07.2026. Матрица кости ОТНОСИТЕЛЬНО МОДЕЛИ даёт
+    // чистый масштаб арматуры (0.01), и причёска дальше масштабируется
+    // model.scale заодно с головой — то есть всегда точно по черепу.
+    const rel = _mRel.copy(model.matrixWorld).invert().multiply(this.bone.matrixWorld);
+    const e = rel.elements;
     const sx = Math.hypot(e[0], e[1], e[2]) || 1;
     const sy = Math.hypot(e[4], e[5], e[6]) || 1;
     const sz = Math.hypot(e[8], e[9], e[10]) || 1;
@@ -320,14 +341,19 @@ export class HairRig {
     // Точка подвеса берётся из мировой матрицы подвеса: она зависит от позиции,
     // а не от поворота, поэтому наш же прошлый поворот её не портит.
     const anchor = _anchor.setFromMatrixPosition(t.matrixWorld);
+    // Хвост построен в координатах МОДЕЛИ, а пружина считается в МИРЕ: длину
+    // берём из масштаба подвеса (ось Y локально идёт вдоль хвоста). Иначе у
+    // высокого игрока пружина тянула бы кончик к точке короче самого меша.
+    const me = t.matrixWorld.elements;
+    const len = this.len * (Math.hypot(me[4], me[5], me[6]) || 1);
     // А вот направление ПОКОЯ обязано считаться от КОСТИ ГОЛОВЫ, а не от
     // подвеса: подвес мы сами вращаем каждый кадр, и «покой», взятый из него,
     // поехал бы следом за хвостом — пружина считала бы себя всегда в покое.
     this.bone.getWorldQuaternion(_qBone);
     const restW = _rest.copy(this.rest).applyQuaternion(_qBone).normalize();
-    const restTipX = anchor.x + restW.x * this.len;
-    const restTipY = anchor.y + restW.y * this.len;
-    const restTipZ = anchor.z + restW.z * this.len;
+    const restTipX = anchor.x + restW.x * len;
+    const restTipY = anchor.y + restW.y * len;
+    const restTipZ = anchor.z + restW.z * len;
 
     if (!this.ready) {
       this.tip.set(restTipX, restTipY, restTipZ);
@@ -370,9 +396,9 @@ export class HairRig {
     if (ang > HAIR.maxTilt) {
       _dir.lerp(restW, 1 - HAIR.maxTilt / ang).normalize();
     }
-    this.tip.set(anchor.x + _dir.x * this.len,
-                 anchor.y + _dir.y * this.len,
-                 anchor.z + _dir.z * this.len);
+    this.tip.set(anchor.x + _dir.x * len,
+                 anchor.y + _dir.y * len,
+                 anchor.z + _dir.z * len);
 
     // Поворот подвеса: из направления покоя в текущее, в ЛОКАЛЬНЫХ осях кости
     _qInv.copy(_qBone).invert();
