@@ -9,6 +9,7 @@ import { Match } from './match.js';
 import { Input } from './input.js';
 import { CRTPipeline } from './crt.js';
 import { Knob, screenRect, invalidateScreenRect } from './tvset.js';
+import { clothTime } from './cloth.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -369,6 +370,10 @@ function smooth01(t) {
 
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 30); // защита от рывка после сворачивания вкладки
+  // Часы ветра в футболках — ОДИН объект на весь матч. Все 22 материала
+  // формы держат на него ссылку, поэтому это присваивание заменяет
+  // двадцать два обновления юниформа.
+  clothTime.value += dt;
   const t = clock.elapsedTime;
 
   input.update(dt);

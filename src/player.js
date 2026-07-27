@@ -6,6 +6,10 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
 import { buildDerivedClips } from './anim.js';
+import { faceTexture } from './face.js';
+import { HairRig } from './hair.js';
+import { kitTextureWithNumber } from './kitnum.js';
+import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
 import { predictLanding, pursuitBall } from './ai/steering.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
@@ -35,7 +39,12 @@ function setupKitTexture(tex) {
   return tex;
 }
 
-function getKitTexture(gltf, texturePath, colorHex) {
+function getKitTexture(gltf, texturePath, colorHex, look) {
+  // У игрока из состава форма своя: тот же атлас плюс номер и фамилия на
+  // спине. У арбитров и команд без состава состава нет — им общий атлас.
+  if (texturePath && look && look.number !== undefined && look.number !== null) {
+    return kitTextureWithNumber(texturePath, look);
+  }
   if (texturePath) {
     const key = `file:${texturePath}`;
     if (kitTexCache.has(key)) return kitTexCache.get(key);
@@ -91,17 +100,9 @@ function getKitTexture(gltf, texturePath, colorHex) {
   return tex;
 }
 
-// Причёска — сменная «шапка» на кости головы, как делали на PS1: отдельной
-// геометрии волос в модели нет, а разные головы в кадре видно сразу.
-// Размеры в МЕТРАХ; кость Mixamo живёт в своём масштабе, поэтому при посадке
-// делим на масштаб кости (см. attachHair).
-const HAIR_STYLES = {
-  none: null,                                              // лысина (Зидан, Бартез)
-  thin: { r: 0.108, top: 0.55, up: 0.175, flat: 0.5 },     // редеющие, лежат на макушке
-  short: { r: 0.118, top: 0.72, up: 0.185, flat: 0.62 },   // обычная короткая стрижка
-  afro: { r: 0.152, top: 1.0, up: 0.185, flat: 0.9 },      // копна
-  long: { r: 0.128, top: 0.95, up: 0.18, flat: 0.78, tail: true }, // с хвостом (Пети)
-};
+// Причёски переехали в src/hair.js: там и геометрия стрижек, и пружина для
+// длинных волос. Здесь остался только вызов — модель одна на всех, а стиль
+// и цвет приходят из squad.
 
 // Временные вектора для handsWorldPoint — без аллокаций в кадре
 const _handA = new THREE.Vector3();
@@ -245,25 +246,53 @@ export class Player {
     // Lambert вместо Standard: быстрее на планшете, с плоскими гранями и
     // пиксельной текстурой выглядит так же (стиль PS1). Emissive ~45% —
     // без него фигура на вечернем поле чёрная.
-    const kitTex = getKitTexture(gltf, this.kitTexture, this.kitColor);
+    const kitTex = getKitTexture(gltf, this.kitTexture, this.kitColor, L);
+    const faceTex = faceTexture(L || {});
     this.model.traverse((o) => {
       if (!o.isMesh) return;
       // Скелет двигает вершины мимо исходной рамки объекта — отсечение по ней врёт
       o.frustumCulled = false;
       const src = o.material;
-      const map = (src.name === 'kit' && kitTex) ? kitTex : src.map;
-      const mat = map
-        ? new THREE.MeshLambertMaterial({ map, emissive: 0x737373, emissiveMap: map })
-        : new THREE.MeshLambertMaterial({
-            color: src.color.clone(),
-            emissive: src.color.clone().multiplyScalar(0.45),
-          });
+      let mat;
+      if (src.name === 'head') {
+        // Голова — единственная часть с рисованной текстурой (src/face.js).
+        // ВАЖНО про emissive: у формы он задан числом 0x737373, а число three.js
+        // читает как sRGB и переводит в линейное ≈0.17. У кожи же стоит явное
+        // ×0.45 УЖЕ в линейном. Разница почти втрое, и голову с кожей нельзя
+        // красить разными ветками: они стыкуются ровно на челюсти, и шов вылезет
+        // тёмным кольцом под подбородком. Ставим голове ровно 0.45, как у кожи.
+        mat = new THREE.MeshLambertMaterial({ map: faceTex, emissiveMap: faceTex });
+        mat.emissive.setScalar(0.45);
+      } else if (src.name === 'kit' && kitTex) {
+        mat = new THREE.MeshLambertMaterial({
+          map: kitTex, emissive: 0x737373, emissiveMap: kitTex,
+        });
+      } else if (src.map) {
+        mat = new THREE.MeshLambertMaterial({
+          map: src.map, emissive: 0x737373, emissiveMap: src.map,
+        });
+      } else {
+        mat = new THREE.MeshLambertMaterial({
+          color: src.color.clone(),
+          emissive: src.color.clone().multiplyScalar(0.45),
+        });
+        // Тон кожи из состава: смуглые бразильцы и бледные европейцы в одном
+        // кадре — это половина узнаваемости фигурок на PS1. Текстура лица
+        // рисуется от этого же числа, поэтому лицо и руки совпадают по тону.
+        if (L && L.skin && src.name === 'skin') {
+          mat.color.set(L.skin);
+          mat.emissive.set(L.skin).multiplyScalar(0.45);
+        }
+      }
       mat.name = src.name; // имена kit/skin/head нужны для перекраски из JSON
-      // Тон кожи из состава: смуглые бразильцы и бледные европейцы в одном
-      // кадре — это половина узнаваемости фигурок на PS1
-      if (L && L.skin && (src.name === 'skin' || src.name === 'head')) {
-        mat.color.set(L.skin);
-        mat.emissive.set(L.skin).multiplyScalar(0.45);
+      if (src.name === 'kit') {
+        // Ветер в футболке. Маска свободной ткани лежит во ВТОРОМ слое UV,
+        // запечённом в Blender (tools/build-player-mesh.py). Геометрия у всех
+        // 22 клонов ОДНА — SkeletonUtils.clone делит её по ссылке, — поэтому
+        // маску достаточно прочитать один раз, а не на каждого игрока.
+        bakeClothMask(o.geometry);
+        this.cloth = makeClothMaterial(mat);
+        this.kitMesh = o;
       }
       o.material = mat;
     });
@@ -346,46 +375,15 @@ export class Player {
     this.currentName = 'idle';
   }
 
-  // Причёска: низкополигональная «шапка» на кости головы. Кость Mixamo живёт
-  // в своём масштабе (≈1 см на единицу), поэтому размеры в метрах делим на
-  // масштаб кости — тогда стрижка не зависит от роста игрока.
+  // Причёска — отдельный модуль (src/hair.js). Сажаем ПОСЛЕ подключения
+  // модели: если стрижка сломается, игрок останется с моделью и анимациями,
+  // а не свалится на капсулу.
   attachHair() {
-    // Внешности может не быть вовсе (арбитры, команды без состава) —
-    // тогда обычная короткая стрижка стандартного цвета
-    const L = this.look || {};
-    const style = HAIR_STYLES[L.hair || 'short'];
-    if (!style) return;                       // 'none' — лысина, и это тоже примета
-    const bone = this.model.getObjectByName('mixamorigHead');
-    if (!bone) return;
-
-    this.model.updateMatrixWorld(true);
-    const e = bone.matrixWorld.elements;
-    const boneScale = Math.hypot(e[0], e[1], e[2]) || 1;
-    const k = 1 / boneScale;
-
-    const color = new THREE.Color(L.hairColor || '#241812');
-    const mat = new THREE.MeshLambertMaterial({
-      color,
-      emissive: color.clone().multiplyScalar(0.4), // читается на вечернем поле
-    });
-
-    // Полусфера-шапка: 8×3 сегмента — ровно та грубость, что на PS1
-    const cap = new THREE.Mesh(
-      new THREE.SphereGeometry(style.r, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.5 * style.top),
-      mat,
-    );
-    cap.scale.set(k, k * style.flat, k);
-    cap.position.y = style.up * k;
-    cap.frustumCulled = false;
-    bone.add(cap);
-
-    if (style.tail) {
-      // Хвост на затылке (Пети-98) — короткий скошенный блок
-      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.07), mat);
-      tail.scale.setScalar(k);
-      tail.position.set(0, (style.up - 0.09) * k, -0.085 * k);
-      tail.frustumCulled = false;
-      bone.add(tail);
+    try {
+      this.hair = new HairRig(this.model, this.look);
+    } catch (e) {
+      console.error('Причёска не собралась:', e);
+      this.hair = null;
     }
   }
 
@@ -757,6 +755,9 @@ export class Player {
 
   reset(x = -3, z = 0, rot = Math.PI / 2) {
     this.group.position.set(x, 0, z);
+    // Причёску тоже «телепортируем»: пружина считает разницу положений за
+    // кадр, и прыжок фигуры через полполя она бы приняла за рывок головой.
+    if (this.hair) this.hair.reset();
     this.vel.set(0, 0, 0);
     this.rot = rot;
     this.kickCooldown = 0;
@@ -1175,6 +1176,11 @@ export class Player {
       this.updateLoco(dt, speed);
       this.mixer.update(dt);
       this.updatePose(dt, speed);
+      // Волосы и ткань — ПОСЛЕДНИМИ. Раньше нельзя: и микшер, и слой «живой
+      // корпус» переписывают поворот головы, и причёска поехала бы за ним
+      // с опозданием на кадр.
+      if (this.hair) this.hair.update(dt);
+      if (this.cloth) updateCloth(this.cloth, this.kitMesh, this.vel, this.locoPhase);
     } else {
       // Капсула-фолбэк: лёгкое покачивание вместо анимаций
       this.bobT += dt * speed * 1.8;

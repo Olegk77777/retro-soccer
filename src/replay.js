@@ -361,6 +361,10 @@ export class Replay {
       // клипа нельзя — на стыке клипов оно прыгает с нуля
       const clip = d[a + o + 5];
       if (names && clip >= 0) p.setReplayPose(names[clip | 0], d[a + o + 6]);
+      // Волосы на повторе живут своей пружиной: запись хранит позы костей, а
+      // причёска в скелет не входит. Без этого вызова хвост на самом крупном
+      // плане матча стоял бы колом — ровно там, где его только и видно.
+      if (p.hair) p.hair.update(dt);
     }
 
     this._updateCam(dt, (this.pos - seg.from) / Math.max(1, seg.to - seg.from));

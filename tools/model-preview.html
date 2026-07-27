@@ -1,0 +1,271 @@
+<!doctype html>
+<!--
+  СТЕНД МОДЕЛИ ИГРОКА. Открывать при запущенном сервере:
+      http://localhost:8123/tools/model-preview.html
+  Параметры адреса: ?team=home&i=9&pose=run&t=0.35&pack=wc98-real
+
+  Зачем отдельная страница. Судить модель по игре невозможно: камера там живёт
+  своей жизнью, крупный план бывает только в повторе гола, а лицо занимает
+  полсотни пикселей. Стенд ставит фигуру в четыре заранее выбранных плана —
+  лицо, бюст, рост, и ТОТ ЖЕ масштаб, что даёт рабочая ТВ-камера в игре
+  (игрок ~5% высоты кадра). Последний план — главный: всё, что не читается
+  на нём, в матче не существует.
+
+  Материалы собираются ровно как в src/player.js, иначе стенд врёт.
+-->
+<meta charset="utf-8">
+<title>Стенд модели — Футбол 98</title>
+<!-- Тот же шрифт, что в эфире: номер на спине рисуется им, и без него
+     стенд показывал бы запасной гротеск, то есть врал. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; background:#15161a; color:#cfd2d8; font:13px/1.4 -apple-system,system-ui,sans-serif; }
+  #bar { padding:8px 12px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+         border-bottom:1px solid #2a2c33; }
+  select, input, button { background:#22242b; color:#e6e8ee; border:1px solid #383b44;
+                          border-radius:4px; padding:4px 7px; font:inherit; }
+  label { opacity:.7; }
+  #views { display:grid; grid-template-columns:repeat(5, 1fr); gap:2px; }
+  .cell { position:relative; }
+  .cell canvas { display:block; width:100%; }
+  .cap { position:absolute; left:6px; top:4px; font-size:11px; opacity:.65;
+         text-shadow:0 1px 2px #000; }
+  #err { color:#ff8b7a; padding:6px 12px; white-space:pre-wrap; }
+</style>
+<div id="bar">
+  <label>Игрок <select id="who"></select></label>
+  <label>Клип <select id="clip"></select></label>
+  <label>Кадр <input id="t" type="range" min="0" max="1" step="0.01" value="0.35"></label>
+  <span id="tval">0.35</span>
+  <label><input id="spin" type="checkbox"> вращать</label>
+  <label><input id="play" type="checkbox"> играть клип</label>
+  <label>Скорость бега <input id="spd" type="range" min="0" max="9" step="0.1" value="6"></label>
+  <span id="spdv">6.0</span> м/с
+  <button id="shot">Скачать кадр</button>
+</div>
+<div id="views"></div>
+<!-- Текстуры игрока крупно: без них не понять, номер не нарисовался или просто
+     не попал в кадр. Атлас формы показан как есть, лицо — увеличенным. -->
+<div id="tex" style="display:flex;gap:12px;padding:10px 12px;align-items:flex-start">
+  <div><div style="opacity:.6;font-size:11px">атлас формы</div><canvas id="texKit" width="256" height="256"
+    style="image-rendering:pixelated;width:256px;border:1px solid #333"></canvas></div>
+  <div><div style="opacity:.6;font-size:11px">лицо</div><canvas id="texFace" width="128" height="128"
+    style="image-rendering:pixelated;width:256px;border:1px solid #333"></canvas></div>
+</div>
+<div id="err"></div>
+
+<script type="importmap">
+  { "imports": { "three": "../vendor/three.module.js", "three/addons/": "../vendor/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { faceTexture } from '../src/face.js';
+import { HairRig } from '../src/hair.js';
+import { kitTextureWithNumber } from '../src/kitnum.js';
+import { bakeClothMask, makeClothMaterial, updateCloth, clothTime } from '../src/cloth.js';
+
+const qs = new URLSearchParams(location.search);
+const err = (e) => { document.getElementById('err').textContent += `\n${e && e.stack || e}`; };
+window.addEventListener('error', (e) => err(e.error || e.message));
+
+// Четыре плана. dist — метры до цели, h — высота цели, fov — как у ТВ-камеры.
+// «эфир» повторяет игровой масштаб: fov 33 и 61 м от камеры до центра поля.
+const VIEWS = [
+  { name: 'лицо',  dist: 0.52, aim: 1.66, fov: 34, w: 460, h: 460, yaw: 0.14 },
+  { name: 'бюст',  dist: 1.25, aim: 1.42, fov: 34, w: 460, h: 460, yaw: 0.55 },
+  { name: 'рост',  dist: 3.60, aim: 0.95, fov: 34, w: 460, h: 640, yaw: 0.55 },
+  { name: 'спина', dist: 2.20, aim: 1.25, fov: 34, w: 460, h: 640, yaw: Math.PI + 0.25 },
+  { name: 'эфир',  dist: 61.0, aim: 0.95, fov: 33, w: 460, h: 640, yaw: 0.55 },
+];
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#1b2a17');
+
+// Свет как на ночном стадионе: слабый общий плюс четыре «мачты» сверху.
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+for (const [x, z] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+  const d = new THREE.DirectionalLight(0xfff2dd, 0.55);
+  d.position.set(x * 8, 12, z * 8);
+  scene.add(d);
+}
+
+const cells = [];
+for (const v of VIEWS) {
+  const cell = document.createElement('div');
+  cell.className = 'cell';
+  const cv = document.createElement('canvas');
+  cv.width = v.w; cv.height = v.h;
+  const cap = document.createElement('div');
+  cap.className = 'cap'; cap.textContent = v.name;
+  cell.append(cv, cap);
+  document.getElementById('views').append(cell);
+  const cam = new THREE.PerspectiveCamera(v.fov, v.w / v.h, 0.05, 200);
+  cells.push({ v, cv, ctx: cv.getContext('2d'), cam });
+}
+
+let gltf = null, model = null, mixer = null, action = null, squad = [], look = null;
+let rig = null, hair = null;
+const vel = new THREE.Vector3();
+let clock = new THREE.Clock();
+
+async function loadPack() {
+  const packs = await (await fetch('../data/packs.json')).json();
+  const id = qs.get('pack') || packs.active;
+  const pack = await (await fetch(`../data/packs/${id}/pack.json`)).json();
+  const teamFile = pack.teams[qs.get('team') || 'home'];
+  // Осторожно с путями: `'../data/...'.replace('./','')` съедает точку ИЗ «..»
+  // и превращает путь в '.data/...' — сервер отдаёт страницу 404, а JSON.parse
+  // спотыкается на «<!DOCTYPE». Правим только ведущее './'.
+  const rel = (p) => `../${String(p).replace(/^\.\//, '')}`;
+  const team = await (await fetch(`../data/packs/${id}/${teamFile.replace(/^\.\//, '')}`)).json();
+  team._rel = rel;
+  return team;
+}
+
+function buildMaterials(root, kitPath, L) {
+  const out = {};
+  const faceTex = faceTexture(L || {});
+  const kitTex = kitTextureWithNumber(kitPath, L || {});
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    o.frustumCulled = false;
+    const n = o.material.name;
+    let mat;
+    if (n === 'head') {
+      mat = new THREE.MeshLambertMaterial({ map: faceTex, emissiveMap: faceTex });
+      mat.emissive.setScalar(0.45);
+    } else if (n === 'kit') {
+      mat = new THREE.MeshLambertMaterial({ map: kitTex, emissive: 0x737373, emissiveMap: kitTex });
+    } else {
+      const c = new THREE.Color(L && L.skin ? L.skin : '#c49b7c');
+      mat = new THREE.MeshLambertMaterial({ color: c, emissive: c.clone().multiplyScalar(0.45) });
+    }
+    mat.name = n;
+    if (n === 'kit') {
+      bakeClothMask(o.geometry);
+      out.cloth = makeClothMaterial(mat);
+      out.kitMesh = o;
+      out.kitTex = kitTex;
+    }
+    o.material = mat;
+  });
+  return out;
+}
+
+async function main() {
+  const team = await loadPack();
+  squad = team.squad || [];
+  gltf = await new GLTFLoader().loadAsync('../models/player.glb');
+
+  const who = document.getElementById('who');
+  squad.forEach((s, i) => who.append(new Option(`${s.number} ${s.name}`, i)));
+  who.value = qs.get('i') || 9;
+
+  const clipSel = document.getElementById('clip');
+  gltf.animations.map((a) => a.name).sort().forEach((n) => clipSel.append(new Option(n, n)));
+  clipSel.value = qs.get('pose') || 'idle';
+
+  const rebuild = () => {
+    if (model) scene.remove(model);
+    look = squad[+who.value] || null;
+    model = cloneSkeleton(gltf.scene);
+    const P = { modelScale: 1, baseHeightCm: 180 };
+    const tall = look && look.height ? look.height / P.baseHeightCm : 1;
+    const wide = look && look.build ? look.build : 1;
+    model.scale.set(tall * wide, tall, tall * wide);
+    const kit = (team.kits && (look === squad[0] ? team.kits.goalkeeper : team.kits.home)) || '';
+    rig = buildMaterials(model, team._rel(kit), look);
+    // Показать текстуры. Атлас дорисовывается асинхронно (ждёт PNG и шрифт),
+    // поэтому перерисовываем предпросмотр несколько раз в первую секунду.
+    const showTex = () => {
+      const kc = document.getElementById('texKit').getContext('2d');
+      kc.imageSmoothingEnabled = false;
+      kc.clearRect(0, 0, 256, 256);
+      if (rig.kitTex && rig.kitTex.image) kc.drawImage(rig.kitTex.image, 0, 0, 256, 256);
+      const fc = document.getElementById('texFace').getContext('2d');
+      fc.imageSmoothingEnabled = false;
+      const ft = faceTexture(look || {});
+      if (ft.image) fc.drawImage(ft.image, 0, 0, 128, 128);
+    };
+    showTex();
+    for (const ms of [120, 400, 900, 2000]) setTimeout(showTex, ms);
+    scene.add(model);
+    hair = new HairRig(model, look);
+    mixer = new THREE.AnimationMixer(model);
+    setClip();
+  };
+  const setClip = () => {
+    if (action) action.stop();
+    const c = gltf.animations.find((a) => a.name === clipSel.value);
+    if (!c) return;
+    action = mixer.clipAction(c);
+    action.play();
+  };
+  who.onchange = rebuild;
+  clipSel.onchange = setClip;
+  rebuild();
+
+  const tIn = document.getElementById('t');
+  const tVal = document.getElementById('tval');
+  let spinAng = 0;
+
+  document.getElementById('shot').onclick = () => {
+    const all = document.createElement('canvas');
+    all.width = cells.reduce((s, c) => s + c.v.w, 0);
+    all.height = Math.max(...cells.map((c) => c.v.h));
+    const g = all.getContext('2d');
+    g.fillStyle = '#15161a'; g.fillRect(0, 0, all.width, all.height);
+    let x = 0;
+    for (const c of cells) { g.drawImage(c.cv, x, 0); x += c.v.w; }
+    const a = document.createElement('a');
+    a.download = `model-${look ? look.name : 'x'}-${clipSel.value}.png`;
+    a.href = all.toDataURL();
+    a.click();
+  };
+
+  function frame() {
+    requestAnimationFrame(frame);
+    const dt = clock.getDelta();
+    if (!mixer || !action) return;
+    if (document.getElementById('play').checked) {
+      mixer.update(dt);
+      tIn.value = ((action.time / action.getClip().duration) % 1).toFixed(2);
+    } else {
+      action.time = +tIn.value * action.getClip().duration;
+      mixer.update(0);
+    }
+    tVal.textContent = (+tIn.value).toFixed(2);
+    // Ткань и волосы — теми же вызовами, что в игре, и в том же порядке
+    const sp = +document.getElementById('spd').value;
+    document.getElementById('spdv').textContent = sp.toFixed(1);
+    clothTime.value += dt;
+    vel.set(0, 0, sp);               // бежим вперёд, в +Z как в игре
+    if (rig && rig.cloth) updateCloth(rig.cloth, rig.kitMesh, vel, +tIn.value);
+    if (hair) hair.update(dt);
+    if (document.getElementById('spin').checked) spinAng += dt * 0.6;
+    model.rotation.y = spinAng;
+
+    for (const c of cells) {
+      const { v, cam } = c;
+      // Смотрим В ЛИЦО: модель по умолчанию смотрит в +Z, значит камера
+      // стоит со стороны +Z и глядит назад.
+      const a = v.yaw + spinAng;
+      cam.position.set(Math.sin(a) * v.dist, v.aim + v.dist * 0.06, Math.cos(a) * v.dist);
+      cam.lookAt(0, v.aim, 0);
+      renderer.setSize(v.w, v.h, false);
+      renderer.render(scene, cam);
+      c.ctx.clearRect(0, 0, v.w, v.h);
+      c.ctx.drawImage(renderer.domElement, 0, 0);
+    }
+  }
+  frame();
+}
+
+main().catch(err);
+</script>

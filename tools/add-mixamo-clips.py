@@ -25,6 +25,10 @@ import bpy, sys, os
 
 argv = sys.argv[sys.argv.index('--')+1:]
 ROOT, OUT = argv[0], argv[1]
+# Третий аргумент — откуда брать базовый glb. По умолчанию это боевая модель,
+# но при пересборке ГЕОМЕТРИИ (tools/build-player-mesh.py) сюда приходит
+# промежуточный файл: сетка уже новая, а трёх клипов в ней ещё нет.
+SRC = argv[2] if len(argv) > 2 else os.path.join(ROOT, 'models/player.glb')
 
 NEW = [
     ('kick soccerball (2).fbx',     'kick_r'),
@@ -75,7 +79,7 @@ def retime(act, k):
         c.update()
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=os.path.join(ROOT, 'models/player.glb'))
+bpy.ops.import_scene.gltf(filepath=SRC)
 # Клипы были сняты на 30 fps, а glTF-импорт кладёт сцену на 24 — из-за этого
 # концы клипов попадают на ДРОБНЫЕ кадры (12.8, 28.8, 43.2), и экспортёр,
 # сэмплирующий по целым кадрам, срезает у каждого хвост до кадра. На вымеренных
@@ -136,6 +140,7 @@ ad.action = None
 
 bpy.ops.export_scene.gltf(
     filepath=OUT, export_format='GLB',
+    export_vertex_color='ACTIVE',
     export_animation_mode='NLA_TRACKS',
     export_animations=True, export_skins=True, export_morph=False,
     export_apply=False, export_yup=True,
