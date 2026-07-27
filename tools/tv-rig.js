@@ -133,5 +133,78 @@ window.__rig = (async () => {
     return +((performance.now() - t0) / frames).toFixed(3);
   }
 
-  return { shoot, stats, area, bench, fit, SHOTS, camera, crt, scene, CONFIG };
+  // --- Замеры СВЕТОТЕНИ ---------------------------------------------------
+  // Оба написаны 28.07.2026 по жалобе Олега «во всех режимах освещение стало
+  // плоским». Оказалось, что дело не в грейдинге и не в газоне: гамма подняла
+  // средние тона, а тень и контровая кайма кладут в кадр ФИКСИРОВАННУЮ
+  // прибавку — на светлом основании она читается слабее. Чтобы такое ловить,
+  // нужны числа, сравнимые между сборками, а не «кажется темнее».
+
+  // Контраст «газон / тень под игроком». Меряется выключением самого меша
+  // теней, поэтому не зависит ни от ракурса, ни от расстановки игроков.
+  // Опорные значения на общем плане: до появления гаммы 1.28, сразу после
+  // неё 1.19 (вот она, потеря), после подъёма непрозрачности до 0.78 — 1.29.
+  function shadowContrast() {
+    let mesh = null;
+    scene.traverse((o) => { if (!mesh && o.isInstancedMesh) mesh = o; });
+    if (!mesh) return { ошибка: 'меш теней не найден' };
+    const gl = renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const grab = () => {
+      const b = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+      return b;
+    };
+    const draw = () => { crt.cut(); for (let i = 0; i < 3; i++) shoot('tv'); return grab(); };
+    const on = draw();
+    mesh.visible = false;
+    const off = draw();
+    mesh.visible = true;
+    draw();
+    const L = (b, i) => 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2];
+    let n = 0, sOn = 0, sOff = 0, peak = 0;
+    for (let i = 0; i < on.length; i += 4) {
+      const a = L(off, i), b = L(on, i);
+      if (a - b > 5) { n++; sOn += b; sOff += a; if (a - b > peak) peak = a - b; }
+    }
+    if (!n) return { пикселейТени: 0 };
+    return {
+      пикселейТени: n,
+      газон: Math.round(sOff / n),
+      тень: Math.round(sOn / n),
+      пикПровала: Math.round(peak),
+      контраст: +((sOff / n) / (sOn / n)).toFixed(2),
+    };
+  }
+
+  // Пик контровой каймы на фигуре: А/Б с выключенной силой. Эталон сессии 47
+  // (снятый ДО появления гаммы) — 110…122 из 255; после гаммы при прежней
+  // силе 1.35 пик упал до 87, при 2.0 вернулся к 113.
+  async function rimPeak(shotName = 'hero') {
+    const rl = await import('/src/rimlight.js');
+    const R = CONFIG.atmosphere.rim;
+    const gl = renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const grab = () => {
+      const b = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+      return b;
+    };
+    const draw = () => { crt.cut(); for (let i = 0; i < 3; i++) shoot(shotName); return grab(); };
+    const set = (s) => rl.rimRig.uRim.value.set(s, R.power, R.back, R.tint);
+    set(0);
+    const off = draw();
+    set(R.strength);
+    const on = draw();
+    const L = (b, i) => 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2];
+    let n = 0, peak = 0;
+    for (let i = 0; i < on.length; i += 4) {
+      const d = L(on, i) - L(off, i);
+      if (d > 20) n++;
+      if (d > peak) peak = d;
+    }
+    return { сила: R.strength, пикселей: n, пик: Math.round(peak) };
+  }
+
+  return { shoot, stats, area, bench, fit, shadowContrast, rimPeak, SHOTS, camera, crt, scene, CONFIG };
 })();
