@@ -379,6 +379,133 @@ function collectStandSpots(stands, want) {
   return spots;
 }
 
+// --- Волна на трибунах ----------------------------------------------------
+
+// «Мексиканская волна» без единого нового треугольника: по секторам бежит
+// фронт, в котором толпа СДВИГАЕТСЯ ВВЕРХ по текстуре и светлеет — ровно то,
+// что видно с телекамеры, когда ряд встаёт с поднятыми руками.
+//
+// Патчим готовый MeshBasicMaterial секторов (`onBeforeCompile`), поэтому
+// действуют две грабли из cloth.js: (1) функция подстановки должна быть ОДНОЙ И
+// ТОЙ ЖЕ ссылкой — three.js кэширует программы по ТЕКСТУ функции, и разные
+// замыкания дали бы по программе на сектор; (2) всё личное живёт в
+// юниформах, а здесь личного нет вовсе — объект юниформов один на всю чашу.
+const waveUniforms = {
+  uWavePhase: { value: 0 },     // где сейчас фронт, рад (угол вокруг центра поля)
+  uWaveAmp: { value: 0 },       // сила, 0 = волны нет
+  uWaveWidth: { value: 0.5 },
+  uWaveLift: { value: 0.05 },
+  uWaveBright: { value: 0.5 },
+  uWaveSkew: { value: 0.25 },
+};
+
+function patchWaveShader(shader) {
+  Object.assign(shader.uniforms, waveUniforms);
+
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vWavePos;')
+    .replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\nvWavePos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+    );
+
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec3 vWavePos;
+      uniform float uWavePhase;
+      uniform float uWaveAmp;
+      uniform float uWaveWidth;
+      uniform float uWaveLift;
+      uniform float uWaveBright;
+      uniform float uWaveSkew;`)
+    // Сектор не знает, где он стоит в чаше, — зато знает свои МИРОВЫЕ
+    // координаты. Угол вокруг центра поля и есть положение вдоль трибун,
+    // одинаково честное и для прямых, и для хорд виража.
+    .replace('#include <map_fragment>', `
+      float wAng = atan(vWavePos.z, vWavePos.x);
+      // Верхние ряды встают чуть позже нижних — волна получает наклон
+      float wD = wAng - uWavePhase + (vMapUv.y - 0.5) * uWaveSkew;
+      wD = mod(wD + 3.14159265, 6.28318531) - 3.14159265;
+      // Профиль АСИММЕТРИЧНЫЙ: перед фронтом ряд вскакивает почти мгновенно,
+      // за фронтом опускается долго. Симметричный колокол читается пятном
+      // света, ползущим по трибуне, а не волной.
+      float wave = uWaveAmp * (wD > 0.0
+        ? smoothstep(uWaveWidth * 0.3, 0.0, wD)
+        : smoothstep(uWaveWidth, 0.0, -wD));
+      // Сдвиг карты вверх = толпа поднялась; яркость = освещённые лица и руки
+      vec4 sampledDiffuseColor = texture2D(map, vMapUv - vec2(0.0, wave * uWaveLift));
+      diffuseColor *= sampledDiffuseColor;
+      diffuseColor.rgb *= 1.0 + wave * uWaveBright;`);
+}
+
+export class CrowdWave {
+  constructor(stands) {
+    const W = CONFIG.atmosphere.wave;
+    this.cfg = W;
+    this.stands = stands || [];
+    this.uniforms = waveUniforms;   // общий объект: удобно и для отладки
+    this.active = false;
+    this.phase = 0;
+    this.travelled = 0;     // рад, пройденных этой волной
+    this.total = 0;         // сколько всего пройти
+    this.wait = W.firstDelay;
+
+    waveUniforms.uWaveWidth.value = W.width;
+    waveUniforms.uWaveLift.value = W.lift;
+    waveUniforms.uWaveBright.value = W.bright;
+    waveUniforms.uWaveSkew.value = W.skew;
+
+    for (const stand of this.stands) {
+      const mats = Array.isArray(stand.material) ? stand.material : [stand.material];
+      for (const m of mats) {
+        if (!m.map) continue;
+        m.onBeforeCompile = patchWaveShader;   // ОДНА ссылка на все секторы
+        m.needsUpdate = true;
+      }
+    }
+  }
+
+  // Пустить волну. Она обойдёт чашу laps раз и погаснет сама.
+  start() {
+    const W = this.cfg;
+    if (this.active) return;
+    this.active = true;
+    this.travelled = 0;
+    // Стартуем от дальней трибуны — она в кадре почти всегда, и зритель
+    // увидит начало волны, а не её случайную середину
+    this.phase = -Math.PI / 2 + (Math.random() - 0.5) * 1.2;
+    this.total = Math.PI * 2 * (W.laps + Math.random() * W.lapsSpread);
+    this.dir = Math.random() < 0.5 ? 1 : -1;
+  }
+
+  update(dt) {
+    const W = this.cfg;
+    if (!this.active) {
+      this.wait -= dt;
+      if (this.wait <= 0) {
+        this.wait = W.period * (0.7 + Math.random() * 0.6);
+        this.start();
+      }
+      return;
+    }
+
+    const step = W.speed * dt;
+    this.phase += step * this.dir;
+    this.travelled += step;
+    if (this.travelled >= this.total) {
+      this.active = false;
+      waveUniforms.uWaveAmp.value = 0;
+      return;
+    }
+    // Первый круг волна набирает силу, последний — рассыпается: так она и
+    // ведёт себя на настоящей трибуне, пока сектор за сектором не выдохнется
+    const rise = Math.min(1, this.travelled / W.fade);
+    const fall = Math.min(1, (this.total - this.travelled) / W.fade);
+    waveUniforms.uWaveAmp.value = Math.min(rise, fall);
+    waveUniforms.uWavePhase.value = this.phase;
+  }
+}
+
 // --- Мошкара в лучах прожекторов -----------------------------------------
 
 // Ночной стадион под лампами всегда в мошкаре: у каждой лампы висит облако

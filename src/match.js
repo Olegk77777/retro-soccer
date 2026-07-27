@@ -1587,6 +1587,14 @@ export class Match {
     const flares = this.scene && this.scene.userData.flares;
     if (!flares) return;
     const F = CONFIG.atmosphere.flares;
+    const C = CONFIG.atmosphere.confetti;
+    const confetti = this.scene.userData.confetti;
+    // Бумагу бросают ТОЛЬКО свои: цвета берём из формы команды, поэтому
+    // подмена пака меняет и серпантин.
+    const paper = (i, count) => {
+      if (!confetti) return;
+      confetti.burst({ side: -this.teams[i].side, count, colors: [this._teamColors[i]] });
+    };
     let lit = 0;
     if (kind === 'intro') {
       // «Свой» сектор — за СВОИМИ воротами, то есть напротив стороны атаки
@@ -1596,12 +1604,14 @@ export class Match {
           count: F.introCount,
           color: this._teamColors[i],
         });
+        paper(i, C.burstCount);
       }
     } else if (teamIdx >= 0) {
       lit = flares.ignite({
         side: -this.teams[teamIdx].side,
         color: this._teamColors[teamIdx],
       });
+      paper(teamIdx, C.goalCount);
     }
     if (lit) flareHiss(lit, F.life);
   }

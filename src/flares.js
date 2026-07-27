@@ -9,13 +9,13 @@
 // белое ядро, цветной ореол вокруг него и столб дыма, который сносит ветром
 // через лучи прожекторов. Именно это здесь и рисуется.
 //
-// Устройство: два пула billboard-квадов (дым и огонь) — по одному draw call
-// на каждый. Точек (THREE.Points) намеренно НЕТ: gl_PointSize упирается в
-// потолок драйвера, а точка целиком пропадает, когда её ЦЕНТР уходит за край
-// экрана, — на большом зареве это выглядит как «моргнул весь сектор».
+// Устройство: три пула квадов из src/quadpool.js — огонь (аддитивный),
+// клубы дыма и стелющаяся пелена (лежачие квады), по одному draw call на
+// каждый. Почему квады, а не THREE.Points, — там же, в шапке пула.
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
+import { QuadPool } from './quadpool.js';
 
 // Рваное облачко дыма. Один радиальный градиент читается мыльным шариком,
 // поэтому клуб набирается из нескольких смещённых пятен разной плотности.
@@ -55,217 +55,6 @@ function createSmokeTexture(size = 64) {
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   return tex;
-}
-
-// --- Общий пул billboard-квадов ------------------------------------------
-
-const QUAD_VERT = /* glsl */ `
-  attribute vec2 aCorner;    // угол квада в долях (-0.5…0.5)
-  attribute float aSize;     // сторона квада В МЕТРАХ
-  attribute float aRot;      // поворот вокруг взгляда, рад
-  attribute vec3 aColor;
-  attribute float aAlpha;
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying float vAlpha;
-  varying float vFog;
-  uniform float uFogNear;
-  uniform float uFogFar;
-  void main() {
-    vUv = aCorner + 0.5;
-    vColor = aColor;
-    vAlpha = aAlpha;
-    // Разворот к камере: смещаем угол уже В ПРОСТРАНСТВЕ ВИДА, поэтому квад
-    // всегда плоскостью на объектив и никаким поворотом камеры его не «схлопнет».
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    float s = sin(aRot);
-    float c = cos(aRot);
-    mv.xy += vec2(aCorner.x * c - aCorner.y * s, aCorner.x * s + aCorner.y * c) * aSize;
-    // Дымку считаем САМИ: у ShaderMaterial нет автоматического фога, а без
-    // него частицы на дальней трибуне встанут контрастнее самой трибуны.
-    vFog = clamp((-mv.z - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
-    gl_Position = projectionMatrix * mv;
-  }
-`;
-
-// Пелена, стелющаяся по газону. Квад НЕ разворачивается к камере, а лежит
-// в плоскости земли: так дым и ведёт себя, когда остыл и растёкся, а с ТВ-камеры
-// (она смотрит сверху вниз) лежащий квад занимает вдвое-втрое меньше пикселей,
-// чем вертикальный billboard того же размера. На планшете это и решает.
-const GROUND_VERT = /* glsl */ `
-  attribute vec2 aCorner;
-  attribute float aSize;
-  attribute float aRot;
-  attribute vec3 aColor;
-  attribute float aAlpha;
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying float vAlpha;
-  varying float vFog;
-  uniform float uFogNear;
-  uniform float uFogFar;
-  void main() {
-    vUv = aCorner + 0.5;
-    vColor = aColor;
-    vAlpha = aAlpha;
-    float s = sin(aRot);
-    float c = cos(aRot);
-    vec2 off = vec2(aCorner.x * c - aCorner.y * s, aCorner.x * s + aCorner.y * c) * aSize;
-    vec4 mv = modelViewMatrix * vec4(position + vec3(off.x, 0.0, off.y), 1.0);
-    vFog = clamp((-mv.z - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
-    gl_Position = projectionMatrix * mv;
-  }
-`;
-
-const SMOKE_FRAG = /* glsl */ `
-  precision mediump float;
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying float vAlpha;
-  varying float vFog;
-  uniform sampler2D uMap;
-  uniform vec3 uFogColor;
-  void main() {
-    float a = texture2D(uMap, vUv).a * vAlpha;
-    if (a <= 0.004) discard;
-    gl_FragColor = vec4(mix(vColor, uFogColor, vFog), a);
-  }
-`;
-
-const FIRE_FRAG = /* glsl */ `
-  precision mediump float;
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying float vAlpha;
-  varying float vFog;
-  uniform float uFogKill;
-  void main() {
-    vec2 d = vUv - 0.5;
-    float r2 = dot(d, d) * 4.0;
-    if (r2 >= 1.0) discard;
-    float k = 1.0 - r2;
-    // Цвет на альфу НЕ умножаем: аддитивный бленд three.js — это
-    // src.rgb * src.a + dst, множитель уже внутри (грабля из atmosphere.js).
-    float a = vAlpha * k * k * (1.0 - vFog * uFogKill);
-    if (a <= 0.004) discard;
-    gl_FragColor = vec4(vColor, a);
-  }
-`;
-
-class QuadPool {
-  constructor(scene, max, { additive, map, renderOrder, ground }) {
-    this.max = max;
-    const HZ = CONFIG.atmosphere.haze;
-
-    const geo = new THREE.BufferGeometry();
-    const pos = new Float32Array(max * 4 * 3);
-    const corner = new Float32Array(max * 4 * 2);
-    const size = new Float32Array(max * 4);
-    const rot = new Float32Array(max * 4);
-    const color = new Float32Array(max * 4 * 3);
-    const alpha = new Float32Array(max * 4);
-    const index = new Uint16Array(max * 6);
-
-    // Углы квада одни и те же на всю жизнь пула — пишем один раз
-    const CORNERS = [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5];
-    for (let q = 0; q < max; q++) {
-      for (let v = 0; v < 4; v++) {
-        corner[(q * 4 + v) * 2] = CORNERS[v * 2];
-        corner[(q * 4 + v) * 2 + 1] = CORNERS[v * 2 + 1];
-      }
-      const b = q * 4;
-      index.set([b, b + 1, b + 2, b, b + 2, b + 3], q * 6);
-    }
-
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aCorner', new THREE.BufferAttribute(corner, 2));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
-    geo.setAttribute('aRot', new THREE.BufferAttribute(rot, 1));
-    geo.setAttribute('aColor', new THREE.BufferAttribute(color, 3));
-    geo.setAttribute('aAlpha', new THREE.BufferAttribute(alpha, 1));
-    geo.setIndex(new THREE.BufferAttribute(index, 1));
-    geo.setDrawRange(0, 0);
-
-    const uniforms = {
-      uFogNear: { value: HZ.near },
-      uFogFar: { value: HZ.far },
-    };
-    if (additive) {
-      uniforms.uFogKill = { value: CONFIG.atmosphere.flares.fogKill };
-    } else {
-      uniforms.uMap = { value: map };
-      uniforms.uFogColor = { value: new THREE.Color(HZ.color) };
-    }
-
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: ground ? GROUND_VERT : QUAD_VERT,
-      fragmentShader: additive ? FIRE_FRAG : SMOKE_FRAG,
-      uniforms,
-      transparent: true,
-      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
-      depthWrite: false,
-      // ГРАБЛЯ (27.07.2026): у ЛЕЖАЧЕГО квада тот же порядок обхода вершин
-      // даёт нормаль ВНИЗ — (v1−v0)×(v2−v0) = (0,−1,0), — и камера, которая
-      // смотрит на газон сверху, видит заднюю грань. Односторонний материал
-      // отсекал пелену целиком: в кадре её не было ВООБЩЕ, хотя в буфере
-      // лежали правильные позиции, размеры и альфа. У billboard-квадов такого
-      // не бывает — они разворачиваются в пространстве вида и всегда лицом.
-      side: ground ? THREE.DoubleSide : THREE.FrontSide,
-    });
-
-    this.mesh = new THREE.Mesh(geo, mat);
-    this.mesh.frustumCulled = false; // центры живут в буфере, рамка отсечения врёт
-    this.mesh.renderOrder = renderOrder;
-    scene.add(this.mesh);
-
-    this.geo = geo;
-    this.pos = pos;
-    this.size = size;
-    this.rot = rot;
-    this.color = color;
-    this.alpha = alpha;
-    this.used = 0;
-  }
-
-  // Начало кадра: пул набирается заново, живые частицы пишут себя сами
-  begin() {
-    this.used = 0;
-  }
-
-  // Вернёт false, когда пул кончился — вызывающий просто пропускает частицу
-  push(x, y, z, size, rot, r, g, b, a) {
-    if (this.used >= this.max) return false;
-    const q = this.used++;
-    for (let v = 0; v < 4; v++) {
-      const i = (q * 4 + v);
-      this.pos[i * 3] = x;
-      this.pos[i * 3 + 1] = y;
-      this.pos[i * 3 + 2] = z;
-      this.size[i] = size;
-      this.rot[i] = rot;
-      this.color[i * 3] = r;
-      this.color[i * 3 + 1] = g;
-      this.color[i * 3 + 2] = b;
-      this.alpha[i] = a;
-    }
-    return true;
-  }
-
-  end() {
-    const n = this.used;
-    this.geo.setDrawRange(0, n * 6);
-    if (!n) return;
-    const upto = n * 4;
-    // Грузим на GPU только занятую часть буфера: пул рассчитан на пик, а в
-    // обычном кадре живых частиц втрое меньше. three.js сам чистит диапазоны
-    // после загрузки, поэтому копить их между кадрами не приходится.
-    for (const name of ['position', 'aSize', 'aRot', 'aColor', 'aAlpha']) {
-      const attr = this.geo.attributes[name];
-      attr.clearUpdateRanges();
-      attr.addUpdateRange(0, upto * attr.itemSize);
-      attr.needsUpdate = true;
-    }
-  }
 }
 
 // --- Места на трибунах ----------------------------------------------------
@@ -319,17 +108,17 @@ export class Flares {
 
     const smokeTex = createSmokeTexture();   // одна карта на клубы и на пелену
     this.smoke = new QuadPool(scene, F.smokeMax, {
-      additive: false,
+      kind: 'smoke',
       map: smokeTex,
       renderOrder: 5,         // дым под огнём: сначала клубы, потом ядро
     });
     this.fire = new QuadPool(scene, F.fireMax, {
-      additive: true,
+      kind: 'fire',
       renderOrder: 6,
     });
     // Пелена лежит на газоне и рисуется ПЕРВОЙ: всё остальное — над ней
     this.haze = new QuadPool(scene, F.hazeMax, {
-      additive: false,
+      kind: 'smoke',
       map: smokeTex,
       renderOrder: 4,
       ground: true,
@@ -385,7 +174,7 @@ export class Flares {
     return this._sections[key];
   }
 
-  _spotsFor(side) {
+  sectorSpots(side) {
     const section = this._sectionFor(side);
     if (!section.length) return [];
     return collectSpots(section, this.cfg.spotsPerSection, () => true);
@@ -397,7 +186,7 @@ export class Flares {
     const F = this.cfg;
     const n = Math.round((count || F.burstCount) * this.level);
     if (n <= 0) return 0;
-    const spots = this._spotsFor(side);
+    const spots = this.sectorSpots(side);
     if (!spots.length) return 0;
 
     const tint = new THREE.Color(color !== null && color !== undefined ? color : F.color);
@@ -475,10 +264,10 @@ export class Flares {
       const y = f.y;
       // Три слоя одного источника: широкое зарево на секторе, ореол пламени
       // и добела раскалённое ядро. Порядок от большого к малому.
-      this.fire.push(f.x, y, f.z, F.glowSize, 0, f.r, f.g, f.b, F.glowAlpha * power);
-      this.fire.push(f.x, y, f.z, F.haloSize * (0.9 + 0.2 * jitter), 0,
-        f.r, f.g, f.b, F.haloAlpha * power);
-      this.fire.push(f.x, y, f.z, F.coreSize, 0, 1, 0.96, 0.90, Math.min(1, power));
+      this.fire.push(f.x, y, f.z, F.glowSize, F.glowSize, 0, f.r, f.g, f.b, F.glowAlpha * power);
+      const halo = F.haloSize * (0.9 + 0.2 * jitter);
+      this.fire.push(f.x, y, f.z, halo, halo, 0, f.r, f.g, f.b, F.haloAlpha * power);
+      this.fire.push(f.x, y, f.z, F.coreSize, F.coreSize, 0, 1, 0.96, 0.90, Math.min(1, power));
 
       // Дым: копим дробную часть, иначе на низком темпе частицы не родятся
       f.debt += F.smokeRate * dt * ignite * tail;
@@ -523,7 +312,7 @@ export class Flares {
       const r = F.smokeLow[0] + (F.smokeHigh[0] - F.smokeLow[0]) * lift;
       const g = F.smokeLow[1] + (F.smokeHigh[1] - F.smokeLow[1]) * lift;
       const b = F.smokeLow[2] + (F.smokeHigh[2] - F.smokeLow[2]) * lift;
-      this.smoke.push(p.x, p.y, p.z, size, p.rot, r, g, b, a);
+      this.smoke.push(p.x, p.y, p.z, size, size, p.rot, r, g, b, a);
     }
 
     // 3) Пелена: медленно наползает на газон, растекается и тает
@@ -548,7 +337,7 @@ export class Flares {
         * Math.min(1, k / F.hazeRise)
         * Math.min(1, (1 - k) / F.hazeFade);
       if (a <= 0.004) continue;
-      this.haze.push(h.x, F.hazeY, h.z, size, h.rot,
+      this.haze.push(h.x, F.hazeY, h.z, size, size, h.rot,
         F.hazeColor[0], F.hazeColor[1], F.hazeColor[2], a);
     }
 

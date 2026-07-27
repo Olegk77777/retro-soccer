@@ -29,6 +29,7 @@ const savedPyro = Number(savedPyroRaw);
 const pyroLevel = (savedPyroRaw !== null && Number.isFinite(savedPyro)
   && savedPyro >= 0 && savedPyro <= 150) ? savedPyro : 100;
 if (scene.userData.flares) scene.userData.flares.setLevel(pyroLevel / 100);
+if (scene.userData.confetti) scene.userData.confetti.setLevel(pyroLevel / 100);
 
 const goals = scene.userData.goals;
 const ball = new Ball(scene, goals);
@@ -338,6 +339,8 @@ function applyPyro(v, save = false) {
   pyroSlider.value = v;
   pyroVal.textContent = PYRO_LABEL[v] || `${v}%`;
   if (scene.userData.flares) scene.userData.flares.setLevel(v / 100);
+  // Серпантин — часть того же зрелища, что и файеры: одна ручка на оба
+  if (scene.userData.confetti) scene.userData.confetti.setLevel(v / 100);
   if (save) remember('f98.pyro', v);
 }
 
@@ -421,6 +424,8 @@ function frame() {
   if (scene.userData.flashes) scene.userData.flashes.update(dt);
   if (scene.userData.flares) scene.userData.flares.update(dt);
   if (scene.userData.midges) scene.userData.midges.update(dt);
+  if (scene.userData.wave) scene.userData.wave.update(dt);
+  if (scene.userData.confetti) scene.userData.confetti.update(dt);
   if (event === 'goal' && match) match.onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.

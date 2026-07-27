@@ -8,9 +8,10 @@ import { PACK } from './pack.js';
 import { GoalSystem } from './goal.js';
 import {
   mastPositions, paintPitchLight, buildFloodlightHalos, buildLightShafts,
-  CameraFlashes, GroundShadows, Midges,
+  CameraFlashes, GroundShadows, Midges, CrowdWave,
 } from './atmosphere.js';
 import { Flares } from './flares.js';
+import { Confetti } from './confetti.js';
 
 const STADIUM_TEXTURES = Object.freeze({
   pitchBalanced: './textures/stadium/pitch-balanced-98.png',
@@ -630,6 +631,9 @@ export function buildStadium() {
   scene.userData.shadows = new GroundShadows(scene);
   scene.userData.flares = new Flares(scene, stands);
   scene.userData.midges = new Midges(scene);
+  scene.userData.wave = new CrowdWave(stands);
+  // Бумага берёт фанатские секторы у пиротехники — сектор у них общий
+  scene.userData.confetti = new Confetti(scene, scene.userData.flares);
 
   // Свет (для объёмных объектов: мяч, ворота, трибуны): ночь + мощные прожекторы
   scene.add(new THREE.HemisphereLight(0x99aacc, 0x334422, 0.9));
