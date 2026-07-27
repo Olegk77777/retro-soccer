@@ -20,6 +20,15 @@ class Official {
     this.face = 0;
   }
 
+  // Поставить арбитра на точку. Тело и ЯКОРЬ ТЕНИ двигаются только вместе:
+  // тень — отдельный объект в общем InstancedMesh (src/atmosphere.js), и если
+  // тело переставить руками, тень останется там, где была (грабля 27.07.2026).
+  place(x, z) {
+    this.body.group.position.set(x, 0, z);
+    this.body.shadow.position.x = x;
+    this.body.shadow.position.z = z;
+  }
+
   // Простое steering: разгон к желаемой скорости, поворот корпуса на мяч.
   // Анимацию выбираем сами (Player.update завязан на ввод и мяч).
   step(dt, speed, lookAt) {
@@ -81,9 +90,13 @@ export class Officials {
     // Стартовая точка судьи — по ДАЛЬНЮЮ сторону от ТВ-камеры и камеры
     // заставки (они стоят на +Z): иначе на крупном плане мяча арбитр
     // оказывается прямо перед объективом и закрывает пол-кадра.
-    this.referee.body.group.position.set(7, 0, -13);
-    this.lines[0].body.group.position.set(20, 0, F.width / 2 + O.lineOffset);
-    this.lines[1].body.group.position.set(-20, 0, -(F.width / 2 + O.lineOffset));
+    // Ставим через place(): во время ТВ-заставки `Officials.update` не
+    // вызывается вовсе (Match.update выходит раньше), поэтому первым, кто
+    // подтянет тени за телами, окажется только первый кадр игры — а до него
+    // все три тени лежали кучей на стартовой точке Player.reset (−3, 0).
+    this.referee.place(7, -13);
+    this.lines[0].place(20, F.width / 2 + O.lineOffset);
+    this.lines[1].place(-20, -(F.width / 2 + O.lineOffset));
   }
 
   // teams нужны только для линии офсайда — второго с конца защитника
