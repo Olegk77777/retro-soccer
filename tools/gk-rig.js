@@ -349,7 +349,118 @@ function updateOne(match, keeper, ball, dt) {
   if (window.DBG.goals) window.DBG.goals.update(dt);
 }
 
-// ===== 3. Фантомные голы: мяч, не проходивший чистый проём =====
+// ===== 3. ОТБОЙ: куда уходит мяч и как падает вратарь =====
+// Отвечает на два вопроса Олега сразу: «честные ли отскоки» и «правильные ли
+// падения». Бьём в кипера с разных точек и по разной высоте и смотрим, КУДА
+// ушёл мяч относительно ворот — и совпало ли при этом тело с физикой.
+
+export function parryTest(opts = {}) {
+  const { match, ball, CONFIG } = window.DBG;
+  const F = CONFIG.field;
+  const G = CONFIG.goal;
+  const team = match.teams[1];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const hips = k.model && k.model.getObjectByName('mixamorigHips');
+  const V = ball.mesh.position.constructor;
+  const tmp = new V();
+
+  const dists = opts.dists || [8, 13, 20];
+  const aims = opts.aims || [-2.6, -1.2, 0, 1.2, 2.6];   // куда по створу
+  const highs = opts.highs || [0.4, 1.2, 2.0];           // высота на линии
+  const rows = [];
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const savedIntro = match.startIntro;
+  const savedReplay = match.startReplay;
+  const savedGoal = match.onGoal;
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+
+  try {
+    for (const d of dists) {
+      for (const aim of aims) {
+        for (const hy of highs) {
+          let goal = false;
+          match.onGoal = function () { goal = true; };
+          match.state = 'play';
+          k.reset();
+          k.group.position.set(goalX - sign * 1.6, 0, 0);
+          k.vel.set(0, 0, 0);
+          k.gk = null;
+          ball.reset();
+          ball.mesh.position.set(goalX - sign * d, 0.2, 0);
+          // Скорость подбираем так, чтобы мяч пришёл на линию на высоте hy
+          const t = d / 24;
+          const vy = (hy - 0.2) / t - 0.5 * CONFIG.ball.gravity * t;
+          ball.strike({ x: sign, z: 0 }, 24, 0, 0);
+          ball.vel.set(sign * 24, vy, (aim - 0) / t);
+
+          let touched = false; let after = null; let drift = 0; let low = 9;
+          let clip = null;
+          for (let i = 0; i < 200 && !goal; i += 1) {
+            const before = ball.vel.clone();
+            updateOne(match, k, ball, FRAME);
+            if (hips) {
+              k.group.updateMatrixWorld(true);
+              tmp.setFromMatrixPosition(hips.matrixWorld);
+              drift = Math.max(drift, Math.hypot(tmp.x - k.group.position.x,
+                tmp.z - k.group.position.z));
+              low = Math.min(low, tmp.y);
+            }
+            if (!touched && ball.vel.distanceTo(before) > 0.5) {
+              touched = true;
+              clip = k.currentName;
+              after = ball.vel.clone();
+            }
+            if (ball.goalScored) goal = true;
+            if (touched && i > 120) break;
+          }
+          if (!touched) continue;
+          // Куда ушёл мяч: наружу от ворот (безопасно), вбок (за штангу) или
+          // назад в опасную зону перед воротами
+          const away = after.x * team.side;         // > 0 — прочь от ворот
+          const lateral = Math.abs(after.z);
+          const where = goal ? 'ГОЛ'
+            : (away > 3 && lateral < away ? 'в поле от ворот'
+              : (lateral > 2 ? 'вбок за штангу'
+                : (away > 0 ? 'слабо вперёд' : 'НАЗАД в ворота')));
+          rows.push({
+            'удар с, м': d,
+            'по створу': aim,
+            'высота': hy,
+            'ушёл': where,
+            'скорость после': +after.length().toFixed(1),
+            'вверх': +after.y.toFixed(1),
+            клип: clip,
+            'тело↔физика, м': +drift.toFixed(2),
+            'таз упал до': +low.toFixed(2),
+          });
+        }
+      }
+    }
+  } finally {
+    match.startIntro = savedIntro;
+    match.startReplay = savedReplay;
+    match.onGoal = savedGoal;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  const by = {};
+  for (const r of rows) by[r.ушёл] = (by[r.ушёл] || 0) + 1;
+  const worst = rows.reduce((m, r) => Math.max(m, r['тело↔физика, м']), 0);
+  console.table(rows);
+  console.log('исходы:', by, 'худшее расхождение тело↔физика:', worst.toFixed(2), 'м');
+  window.GKPARRY = { rows, by, worst };
+  return { rows, by, worst };
+}
+
+// ===== 4. Фантомные голы: мяч, не проходивший чистый проём =====
 
 export function netTest(opts = {}) {
   const { match, ball, CONFIG } = window.DBG;

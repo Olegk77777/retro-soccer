@@ -115,7 +115,19 @@ function sweptContact(p, ball, dt, reachAt, maxY) {
   if (by > maxY + lift || by < -0.05) return null;
   const reach = reachAt(by - lift);
   if (d >= reach) return null;
-  return { dist: d, rel: d / reach, y: by, t: tca };
+  // НОРМАЛЬ КОНТАКТА — от вратаря к мячу в точке наибольшего сближения.
+  // Без неё отбой невозможно посчитать честно: мяч, пришедший в живот, и мяч,
+  // задетый краем перчатки, обязаны уходить в РАЗНЫЕ стороны, а раньше оба
+  // получали один и тот же заранее заданный вектор.
+  const inv = d > 1e-4 ? 1 / d : 0;
+  return {
+    dist: d, rel: d / reach, y: by, t: tca,
+    nx: inv ? cx * inv : 0,
+    nz: inv ? cz * inv : (ball.vel.z >= 0 ? -1 : 1),
+    // Высота контакта относительно КОРПУСА: 0 — в ноги, 1 — над головой.
+    // По ней решается, уходит ли отбой вверх (перевод через перекладину).
+    high: Math.max(0, Math.min(1, (by - lift) / CONFIG.ai.keeper.diveMaxY)),
+  };
 }
 
 // Исход контакта: намертво / отбой / скользящий контакт / выронил.
@@ -158,7 +170,7 @@ function resolveContact(p, ball, match, gk, ctx) {
   // Кончиками пальцев: контакт на самом пределе вытянутой руки. Мяч почти не
   // меняет курса — чаще всего уходит за линию (угловой) или в штангу.
   if (ctx.rel > K.parryTouchFrom || !handsOk) {
-    deflect(p, ball, K.parryTouchAngle * (0.5 + Math.random()), 0.82, 0.6);
+    deflect(p, ball, K.parryTouchAngle * (0.5 + Math.random()), 0.82, 0.6, ctx);
     return 'touch';
   }
 
@@ -196,34 +208,83 @@ function resolveContact(p, ball, match, gk, ctx) {
     return 'catch';
   }
 
-  // Отбой. «Правильный» — от створа в сторону/за линию; «неудачный» —
-  // недалеко в опасную зону, откуда добивают (главный источник добиваний).
-  const good = Math.random() < K.parryWide * (0.6 + 0.7 * handling);
-  if (good) {
-    // Отбой «в сторону» ЦЕЛИТСЯ ЗА ШТАНГУ — в точку на линии ворот заведомо
-    // снаружи створа. Раньше направление задавалось фиксированным вектором,
-    // и с позиции в метре перед линией «широкий» отбой центрального удара
-    // регулярно заканчивался в собственных воротах (замер 26.07).
-    const G = CONFIG.goal;
-    const zs = bp.z !== 0 ? Math.sign(bp.z) : (Math.random() < 0.5 ? -1 : 1);
-    const tx = team.ownGoalX - into * 0.6;             // чуть ЗА линию
-    const tz = zs * (G.width / 2 + 1.8 + Math.random() * 1.4); // мимо штанги
-    const dx = tx - bp.x;
-    const dz = tz - bp.z;
-    const dl = Math.hypot(dx, dz) || 1;
-    const sp = speed * K.parrySpeedKeep;
-    ball.vel.set((dx / dl) * sp, K.parryLift, (dz / dl) * sp);
-  } else {
-    const zr = (Math.random() * 2 - 1) * 0.8;
-    const fx = into * (0.5 + 0.5 * Math.random());
-    const dl = Math.hypot(fx, zr) || 1;
-    const sp = speed * K.parrySpeedKeep * 0.8;
-    ball.vel.set((fx / dl) * sp, K.parryLift * 0.7, (zr / dl) * sp);
-  }
+  // ===== ОТБОЙ — ОТРАЖЕНИЕ ОТ РУКИ, А НЕ ТЕЛЕПОРТ СКОРОСТИ =====
+  // (правило с 28.07.2026, фидбек Олега «отскоки при парировании нереалистичные»).
+  //
+  // Что было. Мячу НАЗНАЧАЛАСЬ новая скорость: направление — на точку за
+  // штангой, модуль — доля прежнего, вертикаль — константа `parryLift` = 2.2.
+  // Входящее направление не участвовало ВООБЩЕ. Поэтому пушка с 8 метров в
+  // упор и слабый навесной откат уходили от вратаря совершенно одинаково, а
+  // мяч в живот отскакивал вбок «сам по себе» — это читается как телепорт,
+  // а не как отбитый мяч.
+  //
+  // Что стало. Честное отражение от плоскости кисти:
+  //   v' = v − (1 + e)·(v·n)·n  плюс добавка от хода самой руки,
+  // где n — нормаль контакта (от корпуса вратаря к мячу, посчитана в
+  // sweptContact), e — упругость перчатки. Отсюда всё само собой правильно:
+  // мяч в центр корпуса летит НАЗАД в поле (и это опасный отбой), мяч на
+  // краю ладони уходит вбок по касательной, верховой — переводится вверх.
+  //
+  // Мастерство не подменяет физику, а ДОВОРАЧИВАЕТ НОРМАЛЬ: хороший вратарь
+  // подставляет ладонь так, чтобы увести мяч от створа. Это единственное
+  // место, где решает навык, и именно так это и работает в жизни.
+  const G = CONFIG.goal;
+  const skill = 0.45 + 0.55 * handling;
+  // Куда «надо» увести: наружу от центра створа и от ворот
+  const zs = bp.z !== 0 ? Math.sign(bp.z) : (Math.random() < 0.5 ? -1 : 1);
+  const wantX = into;                        // прочь от своих ворот
+  const wantZ = zs * K.parryOutZ;            // и в сторону от створа
+  const wl = Math.hypot(wantX, wantZ) || 1;
+  // Доворот нормали к желаемому. Полный поворот запрещён: мяч, пришедший в
+  // живот, физически не может уйти под прямым углом, сколько ни старайся
+  const aim = K.parryAim * skill;
+  let nx = ctx.nx * (1 - aim) + (wantX / wl) * aim;
+  let nz = ctx.nz * (1 - aim) + (wantZ / wl) * aim;
+  const nl = Math.hypot(nx, nz) || 1;
+  nx /= nl; nz /= nl;
+  // Вертикаль нормали: чем выше контакт, тем сильнее мяч идёт ВВЕРХ (перевод
+  // через перекладину), у самого газона — наоборот, прижимается
+  const ny = K.parryUp * (ctx.high - K.parryUpFrom);
+
+  const vn = ball.vel.x * nx + ball.vel.y * ny + ball.vel.z * nz;
+  const e = K.parryBounce;
+  // Ход руки/корпуса: вратарь в броске добавляет мячу своей скорости
+  const push = K.parryPush * (0.5 + 0.5 * skill) *
+    (p.diveT > 0 ? 1 : 0.45) * Math.max(0, -vn / Math.max(4, speed));
+  ball.vel.x -= (1 + e) * vn * nx;
+  ball.vel.y -= (1 + e) * vn * ny;
+  ball.vel.z -= (1 + e) * vn * nz;
+  ball.vel.x += nx * push;
+  ball.vel.y += ny * push + K.parryScoop;
+  ball.vel.z += nz * push;
+  // Перчатка гасит удар: без этого мяч уходит от вратаря быстрее, чем прилетел
+  ball.vel.multiplyScalar(K.parrySpeedKeep + K.parryKeepSkill * skill);
+  // ЖЁСТКИЙ ПОТОЛОК. Отражение с добавкой от руки может в сумме дать мячу
+  // больше, чем он принёс: замер на стенде показал уходящие 20 м/с при
+  // входящих 24. Отбитый мяч ФИЗИЧЕСКИ не может быть быстрее удара — рука
+  // отдаёт куда меньше, чем нога. Держим долю от входящей скорости.
+  const out = ball.vel.length();
+  const cap = speed * K.parryMaxKeep;
+  if (out > cap && out > 0.01) ball.vel.multiplyScalar(cap / out);
+
+  // Опасен ли отбой — это ИТОГ, а не бросок монеты: мяч, ушедший в поле
+  // перед воротами, и есть тот самый подарок на добивание.
+  const away = ball.vel.x * into;                    // > 0 — прочь от ворот
+  const wide = Math.abs(ball.vel.z) > Math.abs(ball.vel.x) * 0.6;
+  const good = away > 1.5 || wide;
+
   ball.spin = 0;
   ball.afterTouch = 0;
   p.kickCooldown = Math.max(p.kickCooldown, K.catchCooldown);
-  if (p.diveT <= 0) p.playOneShot('gk_dive', 1.5, 0.25);
+  // Отбой стоя — тоже движение: раньше здесь всегда играл gk_dive, то есть
+  // вратарь падал вбок от мяча, отбитого в упор. Клип выбирается по стороне
+  if (p.diveT <= 0) {
+    // Та же проверенная форма, что в updateLoco и startKeeperDive:
+    // side = fx·nz − fz·nx, > 0 — мяч ушёл вправо от взгляда
+    const side = Math.sin(p.rot) * ctx.nz - Math.cos(p.rot) * ctx.nx;
+    p.playOneShot(Math.abs(side) < 0.35 ? 'gk_block'
+      : (side > 0 ? 'gk_dive_r' : 'gk_dive'), 1.9, 0.25);
+  }
   // Удачно отбил — встаёт быстрее: лежать 0.8 с после чистого отбоя значит
   // подарить добивание (константа recoverHold существовала, но не читалась)
   if (good && p.downT > 0) p.downT = Math.min(p.downT, K.recoverHold);
@@ -235,7 +296,7 @@ function resolveContact(p, ball, match, gk, ctx) {
 // уводит НАРУЖУ от центра створа — классический перевод на угловой (или в
 // штангу). Направление задаём добавкой поперечной скорости, а не поворотом
 // вектора: поворот на знак z заворачивал мяч ВНУТРЬ ворот.
-function deflect(p, ball, angleDeg, keep, lift) {
+function deflect(p, ball, angleDeg, keep, lift, ctx = null) {
   const bp = ball.mesh.position;
   const zs = bp.z !== 0 ? Math.sign(bp.z) : (Math.random() < 0.5 ? -1 : 1);
   const vx = ball.vel.x * keep;
@@ -245,10 +306,23 @@ function deflect(p, ball, angleDeg, keep, lift) {
   ball.spin = 0;
   ball.afterTouch = 0;
   p.kickCooldown = Math.max(p.kickCooldown, CONFIG.ai.keeper.catchCooldown);
+  // Касание кончиками пальцев — тоже ДВИЖЕНИЕ. Раньше оно не играло ничего:
+  // мяч менял курс у неподвижного вратаря, и это читалось как отскок от
+  // воздуха. Клип выбираем по стороне тем же выражением, что и везде.
+  if (ctx && p.diveT <= 0 && p.downT <= 0) {
+    const side = Math.sin(p.rot) * ctx.nz - Math.cos(p.rot) * ctx.nx;
+    p.playOneShot(Math.abs(side) < 0.35 ? 'gk_block'
+      : (side > 0 ? 'gk_dive_r' : 'gk_dive'), 2.1, 0.3);
+  }
 }
 
 function catchBall(p, ball, match) {
   const K = CONFIG.ai.keeper;
+  // ЛОВЛЯ БЕЗ КЛИПА — это и было половиной «нереалистичных сейвов»: мяч просто
+  // прилипал к рукам бегущего вратаря, и ноги продолжали перебирать. Клип
+  // gk_catch лежал в модели с самого начала и не проигрывался НИ РАЗУ.
+  // В броске не трогаем: там уже идёт gk_dive и мяч ловится в падении.
+  if (p.diveT <= 0 && p.downT <= 0) p.playOneShot('gk_catch', 1.35, 0.15);
   p.ai.holding = true;
   p.ai.holdAge = 0;
   p.ai.act = null;
@@ -714,8 +788,19 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
     land = { x, z, y, t };
     return true;
   }, K.readHorizon);
-  // Мяча в воздухе больше нет (сбит, принят, укатился) — выход окончен
-  if (!land || (ball.seq || 0) !== seq) { gk.claim = null; return false; }
+  // Мяча в воздухе больше нет (сбит, принят, укатился) — выход окончен.
+  // Если вратарь при этом уже бежал и мяч ушёл далеко — это ФЛАП, и он обязан
+  // быть ВИДЕН: кипер хватает воздух (gk_miss). Молча развернуться и потрусить
+  // назад — значит спрятать собственную ошибку, а в трансляции 98-го такие
+  // моменты как раз и крутили в повторе.
+  if (!land || (ball.seq || 0) !== seq) {
+    const far = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    if (gk.claim && far > K.punchRadius && p.diveT <= 0 && p.downT <= 0) {
+      p.playOneShot('gk_miss', 1.5, 0.3);
+    }
+    gk.claim = null;
+    return false;
+  }
   gk.claim = land;
   const dLand = Math.hypot(land.x - pos.x, land.z - pos.z);
 
@@ -821,12 +906,15 @@ function tryRush(p, dt, ball, match, gk, K, faceBall) {
         return true;
       }
       // Вплотную — «звезда»: раскрываемся, низом и по центру не пробить.
-      // Дальше сработает обычная проверка контакта (мяч влетит в зону рук)
+      // Дальше сработает обычная проверка контакта (мяч влетит в зону рук).
+      // Клип здесь СВОЙ: раньше играл боковой бросок, и вратарь в момент
+      // выхода один на один валился вбок от мяча, летящего ему в живот.
       if (!gk.diving) {
         p.startKeeperDive(team.side, 0, {
           dur: K.diveTime * 0.7,
           speed: K.lungeSpeed * 0.5,
           recover: K.recover,
+          clip: 'gk_block',
           face: Math.atan2(bp.x - pos.x, bp.z - pos.z),
         });
         gk.diving = true;

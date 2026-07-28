@@ -133,9 +133,14 @@ export function setLookTarget(pos) { _lookTarget = pos; }
 const ONE_SHOT = new Set([
   'fallen',
   'kick', 'kick_r', 'kick_run', 'penalty', 'header', 'tackle', 'trip', 'getup',
-  'throwin', 'receive', 'gk_catch', 'gk_dive', 'gk_dropkick', 'gk_throw',
-  'gk_scoop', 'gk_pass',
+  'throwin', 'receive', 'gk_catch', 'gk_dive', 'gk_dive_r', 'gk_block',
+  'gk_miss', 'gk_dropkick', 'gk_throw', 'gk_scoop', 'gk_pass',
 ]);
+
+// Клипы, у которых СВОЙ ход таза по горизонтали спорит с движением игры.
+// Все вратарские падения: Mixamo рисует их с настоящим полётом тела на
+// 1.7–1.9 м (после детренда), а перемещение у нас считает физика. См. lockRootXZ.
+const ROOT_LOCKED = new Set(['gk_dive', 'gk_dive_r', 'gk_block', 'gk_catch', 'gk_miss']);
 
 export class Player {
   // opts.kitTexture — путь к PNG-атласу; kitColor — цвет старого фолбэка/капсулы.
@@ -370,6 +375,16 @@ export class Player {
     this._prevFwd = 0;
     // Кости слоя «живой корпус» ищем один раз (getObjectByName обходит дерево)
     this._headBoneLook = this.model.getObjectByName('mixamorigHead') || null;
+    // Поза покоя таза: к ней возвращаем горизонталь во время падений (lockRootXZ).
+    // Вертикальную ось берём ЗАМЕРОМ — у неё смещение на порядок больше (рост
+    // таза около метра против сантиметров у горизонтальных).
+    this._hips = this.model.getObjectByName('mixamorigHips') || null;
+    if (this._hips) {
+      this._hipsRest = this._hips.position.clone();
+      const r = this._hipsRest;
+      const m = Math.max(Math.abs(r.x), Math.abs(r.y), Math.abs(r.z));
+      this._upAxis = m === Math.abs(r.x) ? 'x' : (m === Math.abs(r.y) ? 'y' : 'z');
+    }
     this._chestBone = this.model.getObjectByName('mixamorigSpine2')
       || this.model.getObjectByName('mixamorigSpine1') || null;
     this._spineBone = this.model.getObjectByName('mixamorigSpine') || null;
@@ -609,6 +624,40 @@ export class Player {
       this.currentName = lead;
     }
     this.locoName = lead;
+  }
+
+  // ГАШЕНИЕ СОБСТВЕННОГО ХОДА КЛИПА (правило с 28.07.2026).
+  //
+  // Вратарские броски Mixamo несут огромный root motion: сырой клип уводит таз
+  // на 2.9–3.5 м вбок. Скрипт пересборки снимает у него ЛИНЕЙНЫЙ тренд (снос от
+  // начала к концу), но у броска этот снос почти нулевой — тело уезжает и
+  // возвращается, — поэтому после детренда в клипе остаётся горб в 1.7–1.9 м.
+  // А игра в это же время двигает `group.position` своей физикой (diveSpeed ×
+  // diveTime). Два хода складываются, и КАРТИНКА РАСХОДИТСЯ С ФИЗИКОЙ: замер
+  // 28.07.2026 на броске вправо дал группу на z = +2.34 при тазе модели на
+  // z = −1.98, то есть 4.2 м расхождения. Мяч играл невидимый вратарь, а тело
+  // летело куда-то в сторону — ровно «анимация сейвов нереалистичная».
+  //
+  // Гасим ровно ГОРИЗОНТАЛЬ таза, оставляя высоту: падение, кувырок и вся
+  // работа рук — это повороты костей, они не трогаются. Единственным
+  // источником перемещения остаётся физика игры.
+  //
+  // КАКАЯ ОСЬ ВЕРТИКАЛЬНАЯ — ЗАМЕРЯЕМ, А НЕ УГАДЫВАЕМ. У кости таза Mixamo
+  // оси повёрнуты: мировое «вверх» — это локальная −Z (то же самое написано
+  // про скиннинг в src/cloth.js). Первый заход заморозил x и z, то есть одну
+  // горизонталь и ВЕРТИКАЛЬ: вратарь перестал падать вовсе (таз опускался на
+  // 16 см вместо метра), а вторая горизонталь осталась свободной и дала
+  // остаточное расхождение в метр. Ось находим по позе покоя: вертикальная —
+  // та, у которой смещение самое большое по модулю (рост таза ≈ 1 м против
+  // сантиметров у остальных).
+  lockRootXZ() {
+    if (!this._hips || !ROOT_LOCKED.has(this.currentName)) return;
+    const p = this._hips.position;
+    const r = this._hipsRest;
+    if (this._upAxis !== 'x') p.x = r.x;
+    if (this._upAxis !== 'y') p.y = r.y;
+    if (this._upAxis !== 'z') p.z = r.z;
+    this._hips.updateMatrix();
   }
 
   // Живой корпус поверх клипа: доворот на мяч и завал в поворот.
@@ -1198,6 +1247,7 @@ export class Player {
       }
       this.updateLoco(dt, speed);
       this.mixer.update(dt);
+      this.lockRootXZ();
       this.updatePose(dt, speed);
       // Волосы и ткань — ПОСЛЕДНИМИ. Раньше нельзя: и микшер, и слой «живой
       // корпус» переписывают поворот головы, и причёска поехала бы за ним
@@ -2880,9 +2930,40 @@ export class Player {
     // Корпус разворачивается ЛИЦОМ к мячу (кипер летит боком, а не спиной)
     if (opts.face != null) this.rot = opts.face;
     if (opts.lift > 0.05) this.startJump(Math.max(0.06, opts.liftIn || 0.14), opts.lift);
-    // Темп клипа подобран так, чтобы (2.067 − 0.12) / rate ≈ diveTime + recover:
-    // теперь клип — единственный источник силуэта, и обрывать его подъём нельзя
-    this.playOneShot('gk_dive', opts.clipRate || 1.44, 0.12);
+
+    // КЛИП ВЫБИРАЕТСЯ ПО СТОРОНЕ БРОСКА (правило с 28.07.2026). В модели лежал
+    // ровно один бросок — влево, — и он играл на оба направления: половина
+    // сейвов шла телом ПРОТИВ движения. Сторону считаем не по знаку dz (он в
+    // мировых осях, а команды играют в разные ворота), а честно: проекцию
+    // направления броска на вектор «вправо» самого вратаря.
+    //
+    // Форма выражения взята ОДИН В ОДИН из updateLoco (`side = fx·vz − fz·vx`),
+    // и это не косметика: там она уже проверена — по ней выбирается приставной
+    // шаг влево/вправо. Свой вывод «right = (cos rot, −sin rot)» я написал
+    // зеркально и получил бросок влево на клипе вправо; правильный вектор
+    // right = forward × up = (−fz, 0, fx) при forward = (sin rot, 0, cos rot).
+    let name = opts.clip || null;
+    if (!name) {
+      const fx = Math.sin(this.rot);
+      const fz = Math.cos(this.rot);
+      const toRight = fx * this.diveDir.z - fz * this.diveDir.x;
+      name = toRight > 0 ? 'gk_dive_r' : 'gk_dive';
+    }
+    // Темп подгоняется ПОД ФИЗИКУ, а не берётся числом: клипы разной длины
+    // (gk_dive 2.07 с, gk_dive_r 3.27 с), и общий множитель растянул бы один
+    // из них вдвое.
+    //
+    // Якорь — МОМЕНТ КАСАНИЯ ГАЗОНА, а не общая длина. Замер обоих клипов:
+    // таз приходит вниз ровно на половине длины у каждого. Если растягивать
+    // клип на «полёт + подъём», к концу полёта фигура успевает пройти лишь 40 %
+    // клипа — то есть максимум растяжки наступает уже ПОСЛЕ того, как руки
+    // должны встретить мяч, и на кадре сейва вратарь ещё в подседе.
+    const act = this.actions[name];
+    const DV = CONFIG.player.aerial.dive;
+    const clipDur = act ? act.getClip().duration : 2.067;
+    const start = clipDur * DV.clipStart;
+    const rate = (clipDur * DV.clipGround - start) / Math.max(0.12, dur);
+    this.playOneShot(name, opts.clipRate || rate, start);
   }
 
   // Снос: игрок сбит и лежит dur секунд (клип fallen), потом встаёт.
