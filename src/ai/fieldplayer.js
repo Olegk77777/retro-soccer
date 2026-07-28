@@ -359,6 +359,12 @@ function pressBall(p, dt, ball, match) {
         };
       }
     }
+    // ЗАВЕРШЕНИЕ В ПАДЕНИИ. Мяч свободен, я ближе всех и уже у чужих ворот, но
+    // ногой стоя не достаю — иду в слайд и пробую дотянуться. Условия сидят
+    // внутри trySlideFinish и узкие нарочно: падать по всему полю нельзя.
+    if (p.trySlideFinish && p.trySlideFinish(ball)) {
+      return { move: { x: 0, z: 0 }, sprint: false, face: null, speedCap: null };
+    }
     return {
       move: pursuitBall(pos.x, pos.z, ball, P.speed),
       sprint: myBallDist > AI.sprintDist,

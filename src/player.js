@@ -896,14 +896,35 @@ export class Player {
   setStrikeLean(opts) {
     const L = CONFIG.player.anim.strikeLean;
     if (!L || !L.enabled || !this.model) return;
+    // УДАР ГОЛОВОЙ НАКЛОНА НЕ ПОЛУЧАЕТ, и это не стилевое решение, а
+    // ОБЯЗАТЕЛЬНОЕ. Точка удара кивком — сам ЛОБ, а он висит на цепочке
+    // Spine → Neck → Head: доворот позвоночника уводит его на 0.08…0.20 м.
+    // Для ноги это безвредно (носок висит на тазе, замер дал ровно 0.0000),
+    // а для головы это сдвиг ТОЧКИ КОНТАКТА, то есть уже не косметика,
+    // а вмешательство в игру: автосимуляция поймала скачок с 3.5 до 5.8 гола
+    // за матч ровно на этом.
+    const clip = opts.clip || this.currentName;
+    if (clip === 'header' || clip === 'header2' || opts.header) {
+      this._leanWant = null;
+      this._leanT = 0;
+      return;
+    }
     const power = Math.max(0, Math.min(1.3, opts.power != null ? opts.power : 0.6));
     // Подъём мяча кладёт корпус НАЗАД, настильный удар — ВПЕРЁД. Это не вкус:
     // чтобы поднять мяч, бьющий откидывает плечи за опорную ногу, а чтобы
     // прошить низом — наваливается над мячом.
+    //
+    // И считаем мы ПОПРАВКУ ДО ЦЕЛИ, а не добавку. Клипы уже несут свой наклон
+    // (замер: penalty −23.0°, kick_r +17.7°, kick_run −6.9°), и прежняя редакция
+    // складывалась с ним — на подъёме выходило 41° назад при человеческих
+    // 13–17°. Теперь слой доводит корпус до цели по литературе и молчит там,
+    // где клип уже стоит правильно.
     const lift = opts.lift != null ? opts.lift : 0;
-    let pitch = lift > L.liftFrom
-      ? -Math.min(L.backMax, (lift - L.liftFrom) * L.backPerLift)
-      : L.driveFwd * (1 - Math.min(1, Math.max(0, lift) / Math.max(0.01, L.liftFrom)));
+    const k = Math.min(1, Math.max(0, lift - L.liftFrom) / Math.max(0.01, L.backMaxLift - L.liftFrom));
+    const targetDeg = L.targetLow + (L.targetHigh - L.targetLow) * k;
+    const baseDeg = (L.clipBase && L.clipBase[clip] != null) ? L.clipBase[clip] : 0;
+    let adjDeg = Math.max(-L.maxAdjust, Math.min(L.maxAdjust, targetDeg - baseDeg));
+    let pitch = (adjDeg * Math.PI) / 180;
     pitch *= 0.6 + 0.4 * power;
     // Боковой завал — В СТОРОНУ ОПОРНОЙ ноги (бьёт правая — валимся влево).
     // «Вправо при взгляде в +Z» у нас −X, и положительный поворот по локальной
@@ -1102,6 +1123,8 @@ export class Player {
     this.runCd = 0;          // кулдаун рывка без мяча (ресёрч 15: 5–6 с)
     this.slideRecover = false;
     this._tackleVictim = null;
+    this.slideFinish = null;
+    this._slideCd = 0;
     this.group.position.y = 0;
     this.group.rotation.x = 0;
     if (this.ai) {
@@ -1598,6 +1621,7 @@ export class Player {
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
     if (this.challengeCd > 0) this.challengeCd -= dt;
     if (this.tackleCd > 0) this.tackleCd -= dt;
+    if (this._slideCd > 0) this._slideCd -= dt;
     // Эпизод владения тает и у AI: updateToucher смотрит его у всех 22,
     // иначе бывший управляемый «зависал» вечным хозяином оттолкнутого мяча
     if (this.ownEpisodeT > 0) this.ownEpisodeT -= dt;
@@ -1727,6 +1751,7 @@ export class Player {
     if (this.kickCooldown > 0) this.kickCooldown -= dt;
     if (this.challengeCd > 0) this.challengeCd -= dt;
     if (this.tackleCd > 0) this.tackleCd -= dt;
+    if (this._slideCd > 0) this._slideCd -= dt;
     this.updateTackle(dt, ball); // скольжение подката и его контакты
     const downed = this.downT > 0; // лежим после броска — ввод не работает
 
@@ -2252,8 +2277,17 @@ export class Player {
         // завершение после навеса должно ощущаться ударом, а не отскоком)
         ps.ttl = Math.max(ps.ttl, P.aerial.buffer);
       } else {
-        ps.ttl -= dt;
-        if (ps.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+        // ЗАВЕРШЕНИЕ В ПАДЕНИИ. Удар заказан, мяч низко и уже за пределами
+        // зоны ноги — вместо того чтобы дать заказу сгореть, пробуем достать
+        // вытянутой ногой в слайде. Достанет или нет — решит проверка ноги,
+        // ровно как в обычном подкате: гарантий нет, и в этом весь смысл.
+        if ((ps.type === 'shot' || (ps.type === 'swipe' && ps.v && ps.v.kind === 'shot')) &&
+            this.trySlideFinish(ball)) {
+          this.pendingStrike = null;
+        } else {
+          ps.ttl -= dt;
+          if (ps.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
+        }
       }
     }
 
@@ -3315,6 +3349,27 @@ export class Player {
       this.oneShot.timeScale = SY.followRate;
       this.hitStop(as.charge != null ? as.charge : 1);
     }
+    // КОРПУС В ЗАМЫКАНИИ. Через shoot() наклон сюда не доходит: в режиме
+    // compute она возвращает вектор и выходит раньше, а у AI (as.aiVel) не
+    // вызывается вовсе. А ведь замыкание — самый зрелищный удар в игре, и
+    // деревянный корпус виден в нём сильнее всего.
+    //
+    // Волей с лёта кладёт корпус НАЗАД и в сторону опорной ноги сильнее
+    // наземного удара: опоры нет, и противовесом работает всё тело. Кивок
+    // головой — наоборот, наклон ВПЕРЁД сквозь мяч. У кивка при этом трогать
+    // шею и голову нельзя (голова и есть точка удара), но позвоночник можно:
+    // замер показал, что он не двигает точку удара.
+    const LN = CONFIG.player.anim.strikeLean;
+    if (LN && LN.enabled) {
+      const pw = as.charge != null ? Math.min(1.3, as.charge) : 0.9;
+      this.setStrikeLean({
+        clip: as.clipName,
+        header: as.styleName === 'header',
+        lift: LN.volleyLift,
+        power: pw,
+        foot: (this.lastKick && this.lastKick.foot) || CONFIG.player.dominantFoot,
+      });
+    }
     this.lastStrikeStyle = as.styleName;
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0;
@@ -3456,6 +3511,44 @@ export class Player {
         this.playOneShot('getup', F.getupRate, 0, null, blendTime('getup'));
       }
     }
+  }
+
+  // ЗАВЕРШЕНИЕ В ПАДЕНИИ: догоняю передачу, ногой уже не достаю — иду в слайд
+  // и пробую дотянуться. Возвращает true, если бросок начат.
+  //
+  // Условия узкие нарочно, иначе игрок будет падать по всему полю: мяч НИЗКО,
+  // он в «полосе недотяга» (дальше зоны ноги, но ближе вытянутой ноги в слайде),
+  // мы РЯДОМ С ЧУЖИМИ ВОРОТАМИ и бежим на мяч, а не стоим. Достанет или нет —
+  // решает та же проверка ноги, что и в обычном подкате: гарантий нет.
+  trySlideFinish(ball) {
+    const F = CONFIG.player.slideFinish;
+    const TK = CONFIG.player.tackle;
+    if (!F.enabled || !this.team) return false;
+    if (this.tackleCd > 0 || this.tackleT > 0 || this.downT > 0 ||
+        this.diveT > 0 || this.kickCooldown > 0 || this.slideRecover) return false;
+    if (this._slideCd > 0) return false;
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+    if (bp.y > F.ballMaxY) return false;
+    const d = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+    // Полоса недотяга: ногой стоя уже не дотянуться, а вытянутой в слайде — ещё да
+    if (d < F.fromDist || d > F.toDist) return false;
+    // Только у чужих ворот: падать в подкат в центре поля незачем
+    const gx = this.team.attackGoalX;
+    if (Math.hypot(gx - pos.x, pos.z) > F.goalRange) return false;
+    // И только НА ХОДУ к мячу: стоя в падение не бросаются
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+    if (sp < F.minSpeed) return false;
+    const toB = { x: (bp.x - pos.x) / d, z: (bp.z - pos.z) / d };
+    if ((this.vel.x * toB.x + this.vel.z * toB.z) / sp < F.closingCos) return false;
+    // Прицел — в ворота из точки мяча
+    const ax = gx - bp.x;
+    const az = -bp.z;
+    const al = Math.hypot(ax, az) || 1;
+    this.slideFinish = { dir: { x: ax / al, z: az / al } };
+    this._slideCd = F.cooldown;
+    this.startTackle(toB.x, toB.z);
+    return true;
   }
 
   // ===== Подкат (ресёрч 09/12/13: ○ в PES 5/6 — high risk / high reward) =====
@@ -3666,7 +3759,32 @@ export class Player {
     };
 
     // Вытянутая нога достаёт мяч — выбить
-    if (!this.tackleHit && legHit()) knock();
+    // ЗАВЕРШЕНИЕ В ПАДЕНИИ. Тот же слайд, но нога не ВЫБИВАЕТ мяч, а бьёт по
+    // воротам. Фидбек Олега: «если футболист пытается догнать передачу, он мог
+    // в падении попробовать завершить удар — а там уже достанет или не достанет
+    // в зависимости от ситуации». Именно так: дотянулась вытянутая нога — гол
+    // возможен, не дотянулась — мяч уходит, а игрок лежит. Никаких гарантий.
+    //
+    // Переиспользуем подкат, а не заводим новый клип: у него УЖЕ есть честное
+    // падение, вымеренное окно подметания и вынос носка на 1.07 м вперёд от
+    // таза — те самые лишние полтора метра, ради которых в падение и идут.
+    if (!this.tackleHit && this.slideFinish && legHit()) {
+      const sf = this.slideFinish;
+      const spd = Math.hypot(this.vel.x, this.vel.z);
+      const F = CONFIG.player.slideFinish;
+      // Бьём слабее и грязнее обычного: опоры нет, и это цена риска
+      const power = F.power * (0.75 + 0.25 * Math.min(1, spd / 6));
+      const nz = (Math.random() * 2 - 1) * F.noise;
+      const d = { x: sf.dir.x + nz * -sf.dir.z, z: sf.dir.z + nz * sf.dir.x };
+      const dl = Math.hypot(d.x, d.z) || 1;
+      ball.strike({ x: d.x / dl, z: d.z / dl }, power, F.lift);
+      ball.afterTouch = 0;
+      this.tackleHit = true;
+      this.lastStrikeStyle = 'slide';
+      this.kickCooldown = CONFIG.player.kickCooldown;
+      if (this.team) this.team.bump('shot');
+      this.slideFinish = null;
+    } else if (!this.tackleHit && legHit()) knock();
 
     // Столкновение с соперником (одна жертва за слайд)
     const m = this.team && this.team.match;
