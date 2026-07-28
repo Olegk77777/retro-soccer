@@ -4712,9 +4712,49 @@ export class Player {
       k = Math.max(0, Math.min(1, (deg - A.turnFrom) / (A.turnFull - A.turnFrom)));
       k = k * k * (3 - 2 * k); // smoothstep: без ступеньки на пороге
     }
-    const keep = 1 - k * (1 - A.keepK);
-    let vx = (ux * part.keepIn + this.vel.x * T.keepRun) * keep + ax * part.push * k;
-    let vz = (uz * part.keepIn + this.vel.z * T.keepRun) * keep + az * part.push * k;
+    // ПРОБРОС НА ХОД. Игрок, бегущий на мяч ПО ХОДУ атаки, его не
+    // останавливает — он пробрасывает вперёд и бежит дальше. Обычное гашение
+    // на забеге читается поломкой: замер по трассе заброса дал бег 9.1 м/с
+    // против мяча 3.8 после приёма, и через четыре кадра мяч оказывался ПОЗАДИ
+    // игрока, а тот тормозил с 8.4 до 2.6 и разворачивался за ним.
+    const K = T.knock;
+    const runSp = Math.hypot(this.vel.x, this.vel.z);
+    let knock = null;
+    if (K && runSp >= K.fromSpeed) {
+      const rx = this.vel.x / runSp;
+      const rz = this.vel.z / runSp;
+      // Бег должен совпадать и с ходом мяча, и с намерением игрока: проброс
+      // «в сторону» — это не проброс, а потеря мяча
+      const alongBall = insp > 0.5 ? rx * ux + rz * uz : 1;
+      const alongAim = al > A.dead ? rx * ax + rz * az : 1;
+      if (alongBall >= K.alignCos && alongAim >= K.alignCos) {
+        // …и впереди должно быть СВОБОДНО: пробрасывать в защитника нельзя
+        let clear = true;
+        if (this.team && this.team.opponents) {
+          const pos0 = this.group.position;
+          const tx = pos0.x + rx * K.spaceAhead;
+          const tz = pos0.z + rz * K.spaceAhead;
+          for (const o of this.team.opponents) {
+            if (o.isKeeper) continue;
+            const op = o.group.position;
+            if (Math.hypot(op.x - tx, op.z - tz) < K.spaceClear) { clear = false; break; }
+          }
+        }
+        if (clear) knock = { rx, rz };
+      }
+    }
+
+    let vx;
+    let vz;
+    if (knock) {
+      const sp = Math.min(K.out, runSp * K.keepRun + K.push);
+      vx = knock.rx * sp;
+      vz = knock.rz * sp;
+    } else {
+      const keep = 1 - k * (1 - A.keepK);
+      vx = (ux * part.keepIn + this.vel.x * T.keepRun) * keep + ax * part.push * k;
+      vz = (uz * part.keepIn + this.vel.z * T.keepRun) * keep + az * part.push * k;
+    }
 
     // ОШИБКА ПЕРВОГО КАСАНИЯ — из ситуации, а не из кубика поверх всего.
     // Скорость меряется ОТНОСИТЕЛЬНАЯ: бегущему навстречу мяч приходит жёстче
@@ -4735,7 +4775,7 @@ export class Player {
     let err = (E.base +
       E.relAdd * Math.min(1, rel / E.relRef) +
       E.turnAdd * k +
-      E.pressAdd * press) * part.err;
+      E.pressAdd * press) * part.err * (knock ? K.errK : 1);
     err *= Math.max(0.35, 1 - E.skillK * (skill - 0.5) * 2);
     err = Math.min(E.maxOut, err);
     // ОШИБКА — ЭТО УВОД ВБОК, А НЕ РАЗВОРОТ НАЗАД. Первая редакция бросала её
@@ -4757,10 +4797,11 @@ export class Player {
     const along = vx * bx + vz * bz;
     if (along < 0) { vx -= bx * along; vz -= bz * along; } // назад — не приём, а отскок
 
+    const cap = knock ? K.out : part.out;
     const sp = Math.hypot(vx, vz);
-    if (sp > part.out) {
-      vx = (vx / sp) * part.out;
-      vz = (vz / sp) * part.out;
+    if (sp > cap) {
+      vx = (vx / sp) * cap;
+      vz = (vz / sp) * cap;
     }
     // Вниз — тем сильнее, чем выше приняли: мяч у самой земли не вколачиваем
     const drop = T.dropSpeed * part.drop *
@@ -4768,16 +4809,18 @@ export class Player {
     ball.vel.set(vx, -drop, vz);
     ball.spin = 0;
     ball.afterTouch = 0;
-    this.kickCooldown = T.settle; // мяч опускается — нога ждёт
+    // ПРОБРОС НЕ ВЫКЛЮЧАЕТ ИГРОКА. Обычный приём ставит паузу 0.28 с — мяч
+    // опускается, нога ждёт; на забеге эти 17 кадров и есть «сбитый темп»
+    this.kickCooldown = knock ? K.settle : T.settle;
     this.trapCushion = T.cushionTime; // корпус «мягкий»: видно, что приняли
-    this.trapTilt = part.tilt;        // …и «мягкость» своя у каждой части тела
+    this.trapTilt = knock ? K.tilt : part.tilt; // на пробросе фигура не тормозит
     this.lastTrapPart = c.part;
     this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
     this.cancelBallApproach();
     // ПРОБРОС ЧИТАЕТСЯ КОРПУСОМ. Мяч уходит в сторону — туда же доезжает и
     // фигура: без этого проброс выглядел бы отскоком мяча от неподвижной
     // спины, а не решением игрока
-    if (k > 0.25) this.faceStrike(Math.atan2(ax, az));
+    if (k > 0.25 && !knock) this.faceStrike(Math.atan2(ax, az));
     // Приём НОГОЙ играет свой клип. Он лежал в модели с самой пересборки и не
     // проигрывался НИ РАЗУ (grep 'receive' по src/ давал одну строку — список
     // ONE_SHOT). Нам нужна не вся сцена из Mixamo, а её ОКНО: замер по риггу
@@ -4785,9 +4828,11 @@ export class Player {
     // вперёд, к 1.55 опускается обратно. Груди и голове клипа нет — там всю
     // работу делает подсед корпуса, и это осознанно: приём должен оставаться
     // «привязанным к месту» (просьба Олега 23.07), без прыжков и подскоков
+    // …и только на ОСТАНАВЛИВАЮЩЕМ приёме: клип `receive` тормозит фигуру, а
+    // проброс — это продолжение бега, ему нужна беговая лестница
     const CL = T.clip;
-    if (c.part === 'foot' && c.y <= CL.maxY && this.actions && this.actions.receive &&
-        !this.oneShot) {
+    if (!knock && c.part === 'foot' && c.y <= CL.maxY &&
+        this.actions && this.actions.receive && !this.oneShot) {
       this.playOneShot('receive', CL.rate, CL.from, CL.end);
     }
   }
