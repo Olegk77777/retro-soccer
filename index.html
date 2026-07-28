@@ -120,7 +120,6 @@
     body.tv-full #tv { padding: 0; gap: 0; }
     body.tv-full #tv-panel { display: none; }
     body.tv-full #tv-screen { border-radius: 0; box-shadow: none; }
-    body.tv-full #bug { right: 54px; }   /* уступаем угол кнопке выхода */
 
     #fs-exit {
       position: fixed; top: 10px; right: 12px;
@@ -248,23 +247,13 @@
        textures.channelLogo): у своей сборки реальный УТ-1, у публичной
        вымышленный УГ-1. Пак без логотипа — блок просто не показывается. */
     #channel-logo {
-      position: fixed; top: 12px; left: 16px;
-      height: clamp(24px, 4.4vh, 46px); width: auto;
+      position: fixed; top: 38px; left: 28px;
+      height: clamp(40px, 7.6vh, 78px); width: auto;
       opacity: 0.82; pointer-events: none; display: none;
       filter: drop-shadow(0 0 6px rgba(120, 200, 255, 0.55))
               drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.55));
     }
     #channel-logo.show { display: block; }
-
-    /* «Жучок» игры в правом углу — как логотип канала в эфире 98-го */
-    #bug {
-      position: fixed; top: 12px; right: 16px;
-      font-family: var(--tv-font);
-      color: rgba(255, 255, 255, 0.78);
-      font-weight: 700; font-size: 24px; letter-spacing: 3px;
-      text-shadow: 0 0 7px rgba(120, 200, 255, 0.85), 2px 2px 0 rgba(0,0,0,0.6);
-      pointer-events: none;
-    }
 
     /* ================= ТЕЛЕГРАФИКА =================
        Стиль один на всю инфографику матча и снят с логотипа УТ-1: плоский
@@ -567,7 +556,6 @@
  <div id="tv-screen">
   <canvas id="game"></canvas>
   <img id="channel-logo" alt="">
-  <div id="bug">Ф·98</div>
   <div id="scoreboard"><span class="sb-mark" id="sb-home-mark"></span><span class="sb-team" id="sb-home">КРА</span><span id="sb-score">0:0</span><span class="sb-team" id="sb-away">СИН</span><span class="sb-mark" id="sb-away-mark"></span><span id="sb-time">0'</span></div>
   <div id="goal-flash">ГОЛ!</div>
   <div id="goal-card"><span class="gc-mark" id="gc-mark"></span><span class="gc-team" id="gc-team"></span><span class="gc-min" id="gc-min"></span></div>
