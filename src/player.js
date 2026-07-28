@@ -121,6 +121,25 @@ const _leanQuat = new THREE.Quaternion();
 const _leanAxis = new THREE.Vector3();
 const _leanParent = new THREE.Quaternion();
 
+// Какой ногой бьёт КЛИП. Имя клипа про ногу говорит честно, имя стиля
+// («volley») не говорит ничего — на этом уже один раз погорела точка удара
+// (см. `_pointBone`). Нужна там, где клип выбирается не по ноге, а по высоте
+// мяча: в замыкании.
+const CLIP_FOOT = {
+  kick: 'L', knee_l: 'L',
+  kick_run_l: 'L', penalty_l: 'L', volley_drive_l: 'L',
+  kick_r: 'R', kick_run: 'R', penalty: 'R', volley_drive: 'R',
+  knee_r: 'R', bicycle: 'R',
+};
+
+// Плавная ступенька 0→1 с НУЛЕВОЙ производной на обоих концах. Огибающая позы
+// обязана быть именно такой: линейный подъём даёт излом скорости на старте и в
+// вершине, а стенд рывка (tools/anim-rig.js → runJerk) ловит ровно изломы.
+function _smooth01(x) {
+  const t = x < 0 ? 0 : x > 1 ? 1 : x;
+  return t * t * (3 - 2 * t);
+}
+
 
 // Куда игроки смотрят головой. Мяч — один на всех, и его вектор позиции живой
 // (мутируется на месте), поэтому достаточно отдать его СЮДА один раз при сборке
@@ -145,6 +164,8 @@ const ONE_SHOT = new Set([
   'gk_miss', 'gk_dropkick', 'gk_throw', 'gk_scoop', 'gk_pass',
   // Добавлены 28.07.2026 вместе с пересборкой модели
   'bicycle', 'knee_l', 'knee_r', 'header2', 'tackle2', 'gk_catch_hi',
+  // Зеркальные силовые удары левой (src/mirror.js)
+  'kick_run_l', 'penalty_l', 'volley_drive_l',
 ]);
 
 // Клипы, у которых СВОЙ ход таза по горизонтали спорит с движением игры.
@@ -158,6 +179,8 @@ const ROOT_LOCKED = new Set([
   'gk_dive', 'gk_dive_r', 'gk_block', 'gk_catch', 'gk_miss', 'gk_catch_hi',
   'trip', 'fallen', 'getup', 'tackle', 'tackle2', 'penalty', 'bicycle',
   'gk_dropkick', 'volley_drive',
+  // Зеркала наследуют ход таза оригинала — значит и запрет на него
+  'penalty_l', 'volley_drive_l',
 ]);
 
 export class Player {
@@ -931,35 +954,113 @@ export class Player {
     const foot = opts.foot || CONFIG.player.dominantFoot;
     const side = (foot === 'R' ? 1 : -1) * (L.sideMax / (L.boneK || 1)) *
       (0.5 + 0.5 * power);
-    this._leanWant = { pitch, roll: side, arm: L.armSwing * power, foot };
+    // СКРУТКА ПЛЕЧ. Считается тем же способом, что наклон: цель минус то, что
+    // уже нарисовано в клипе. Знак — от бьющей ноги: бьёт правая, вперёд идёт
+    // ЛЕВОЕ плечо (тот же расклад, что у маха рукой ниже).
+    const tSign = foot === 'R' ? -1 : 1;
+    const twBase = (L.twistBase && L.twistBase[clip] != null) ? L.twistBase[clip] : 0;
+    const twAdj = Math.max(-L.twistAdjust, Math.min(L.twistAdjust,
+      tSign * L.twistMax * Math.min(1, power) - twBase));
+    const twist = (twAdj / (L.twistK || 1) * Math.PI) / 180;
+
+    // ОГИБАЮЩАЯ ПРИВЯЗЫВАЕТСЯ К КЛИПУ, А НЕ К ТАЙМЕРУ. Поза удара живёт ровно
+    // один кадр — тот, в котором нога проходит сквозь мяч, — и вести к нему
+    // корпус обязана фаза клипа. Если клип уже играет и его кадр контакта
+    // известен, запоминаем, откуда и докуда ехать.
+    const act = (this.oneShot && this.currentName === clip) ? this.oneShot : null;
+    const hit = act ? CONFIG.player.anim.contact[clip] : null;
+    // Повторный вызов по тому же клипу (замыкание уточняет силу в момент
+    // удара) НЕ перезапускает огибающую: иначе корпус поехал бы с нуля второй
+    // раз, уже после контакта.
+    const same = this._leanWant && this._leanWant.clip === clip && this._leanPost <= 0;
+    const from = same ? this._leanWant.from : (act ? act.time : null);
+    this._leanWant = {
+      pitch, roll: side, arm: L.armSwing * power, twist, foot,
+      clip, from, hit: (hit != null && from != null && hit > from) ? hit : null,
+    };
+    if (!same) this._leanPost = 0;
     this._leanT = L.hold;
   }
 
   // Наложить наклон корпуса. Вызывать ПОСЛЕ mixer.update и поправки позы.
+  //
+  // ОГИБАЮЩАЯ ИДЁТ ПО ФАЗЕ КЛИПА, А НЕ ПО ТАЙМЕРУ (правило с 28.07.2026).
+  // Прежняя редакция поднимала наклон экспонентой rate = 11 1/с от момента
+  // вызова, а клип удара стартует за 5–6 кадров до контакта: замер по живому
+  // матчу (tools/anim-rig.js → leanTiming, 150 с) показал в кадре удара
+  // 0.70 от заказанного у `kick`, 0.64 у `kick_run` и `kick_r` — то есть слой
+  // честно доводил корпус до литературных 13–17°, но уже ПОСЛЕ того, как мяч
+  // улетел. У замыкания было и вовсе 0.00: там цель ставилась в finishAerial,
+  // то есть в кадре ВЫЛЕТА МЯЧА.
+  //
+  // Теперь максимум приходится РОВНО на кадр контакта, а дальше поза
+  // отпускается за `release` секунд. Обе половины огибающей — smoothstep, у
+  // которого производная на концах нулевая: слой не имеет права добавлять
+  // рывка ни на старте, ни в самой ценной точке движения.
   _updateStrikeLean(dt) {
     const L = CONFIG.player.anim.strikeLean;
     if (!L || !L.enabled) return;
-    const want = (this._leanT > 0 && this._leanWant) ? this._leanWant : null;
+    let want = (this._leanT > 0 && this._leanWant) ? this._leanWant : null;
     if (want) this._leanT -= dt;
-    // Цель гаснет плавно: резкое возвращение корпуса читалось бы вторым ударом
-    const k = Math.min(1, L.rate * dt);
-    this._leanP = (this._leanP || 0) + ((want ? want.pitch : 0) - (this._leanP || 0)) * k;
-    this._leanR = (this._leanR || 0) + ((want ? want.roll : 0) - (this._leanR || 0)) * k;
-    this._leanA = (this._leanA || 0) + ((want ? want.arm : 0) - (this._leanA || 0)) * k;
+    // Огибающая по клипу: до контакта — подъём по фазе, после — спад по времени
+    let env = null;
+    if (want && want.hit != null) {
+      const act = (this.oneShot && this.currentName === want.clip) ? this.oneShot : null;
+      // Клип оборвали (перебит другим ударом, обрезан хвост) — фазы больше нет,
+      // и дальше поза отпускается по времени от того места, где её застали
+      const t = act ? act.time : null;
+      if (t != null && t < want.hit) {
+        const ph = (t - want.from) / Math.max(1e-4, want.hit - want.from);
+        env = _smooth01(ph);
+        this._leanPost = 0;
+      } else {
+        this._leanPost = (this._leanPost || 0) + dt;
+        env = 1 - _smooth01(this._leanPost / Math.max(0.01, L.release));
+        if (env <= 0) { want = null; this._leanWant = null; this._leanT = 0; }
+      }
+    }
+    if (env != null) {
+      // Огибающая гладкая по построению — экспонента поверх неё только
+      // размазала бы её обратно и вернула отставание, ради которого всё
+      this._leanP = want ? want.pitch * env : 0;
+      this._leanR = want ? want.roll * env : 0;
+      this._leanA = want ? want.arm * env : 0;
+      this._leanW = want ? (want.twist || 0) * env : 0;
+    } else {
+      // Фолбэк: клипа с известным кадром контакта нет (наклон заказан вне
+      // одноразового клипа). Цель гаснет плавно, как раньше.
+      const k = Math.min(1, L.rate * dt);
+      this._leanP = (this._leanP || 0) + ((want ? want.pitch : 0) - (this._leanP || 0)) * k;
+      this._leanR = (this._leanR || 0) + ((want ? want.roll : 0) - (this._leanR || 0)) * k;
+      this._leanA = (this._leanA || 0) + ((want ? want.arm : 0) - (this._leanA || 0)) * k;
+      this._leanW = (this._leanW || 0) + ((want ? (want.twist || 0) : 0) - (this._leanW || 0)) * k;
+    }
     if (Math.abs(this._leanP) < 1e-3 && Math.abs(this._leanR) < 1e-3 &&
-        Math.abs(this._leanA) < 1e-3) return;
+        Math.abs(this._leanA) < 1e-3 && Math.abs(this._leanW || 0) < 1e-3) return;
 
     if (!this._spineChain) {
       this._spineChain = ['mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2']
         .map((n) => this.model.getObjectByName(n));
+      this._headBoneLean = this.model.getObjectByName('mixamorigHead') || null;
     }
     for (let i = 0; i < 3; i++) {
       const b = this._spineChain[i];
       if (!b) continue;
       const s = L.share[i];
-      _leanEuler.set(this._leanP * s, 0, this._leanR * s, 'XYZ');
+      // Порядок XYZ: наклон вперёд (X), скрутка вокруг вертикали (Y), завал (Z)
+      _leanEuler.set(this._leanP * s, (this._leanW || 0) * s, this._leanR * s, 'XYZ');
       _leanQuat.setFromEuler(_leanEuler);
       b.quaternion.multiply(_leanQuat);
+    }
+    // ГОЛОВА ОТЫГРЫВАЕТ СКРУТКУ НАЗАД. Плечи разворачиваются, а глаза остаются
+    // на мяче — иначе бьющий уводит лицо вслед за плечевым поясом и в кадре
+    // читается, будто он отвернулся от удара. Ось у кости головы своя
+    // (замерена: +Y вверх вдоль кости), поэтому компенсация идёт по ней, а не
+    // копируется из цепочки позвоночника.
+    if (this._headBoneLean && Math.abs(this._leanW || 0) > 1e-3 && L.headKeep) {
+      _leanEuler.set(0, -this._leanW * L.headKeep, 0, 'XYZ');
+      _leanQuat.setFromEuler(_leanEuler);
+      this._headBoneLean.quaternion.multiply(_leanQuat);
     }
     // МАХ РУКАМИ — ВПЕРЁД И НАЗАД, А НЕ ВВЕРХ.
     //
@@ -1159,6 +1260,16 @@ export class Player {
     this._tackleVictim = null;
     this.slideFinish = null;
     this._slideCd = 0;
+    // Поза удара при телепорте не переносится: розыгрыш с центра или
+    // расстановка под стандарт не должны застать игрока с наклоном и скруткой
+    // от прошлого касания (то же правило, что у пружины причёски)
+    this._leanWant = null;
+    this._leanT = 0;
+    this._leanPost = 0;
+    this._leanP = 0;
+    this._leanR = 0;
+    this._leanA = 0;
+    this._leanW = 0;
     this.group.position.y = 0;
     this.group.rotation.x = 0;
     if (this.ai) {
@@ -1240,6 +1351,8 @@ export class Player {
         kick: lToe,                                  // левоногий тычок
         kick_r: rToe, kick_run: rToe, penalty: rToe,
         volley_drive: rToe,                          // силовой волей
+        // Зеркальные клипы (src/mirror.js) бьют ЛЕВОЙ — точка удара своя
+        kick_run_l: lToe, penalty_l: lToe, volley_drive_l: lToe,
         knee_r: g('mixamorigRightLeg'),               // высокий волей — КОЛЕНО
         knee_l: g('mixamorigLeftLeg'),
         header: head, header2: head,
@@ -1458,6 +1571,9 @@ export class Player {
     }
     // Ниже колена — СИЛОВОЙ волей. Раньше здесь стоял клип паса: удар с лёта
     // анимировался тем же движением, которым отдают передачу на пять метров.
+    // Левой ноге достаётся зеркальный клип — до 28.07.2026 её силовой волей
+    // играл правоногим, и нога уходила «сквозь» опорную.
+    if (foot === 'L' && this.actions.volley_drive_l) return 'volley_drive_l';
     if (this.actions.volley_drive) return 'volley_drive';
     return foot === 'L' || !this.actions.kick_r ? 'kick' : 'kick_r';
   }
@@ -3110,7 +3226,15 @@ export class Player {
     // (st.anim) — там кадр контакта вымерен по риггу и завязан на
     // CONFIG.player.aerial.sync, подменять его нельзя. Наземные удары
     // (носок / подъём / щёчка) выбирают клип по бьющей ноге.
-    if (st.anim) this.playOneShot(st.anim, st.animTs, st.animAt);
+    // БРОСОК КОРПУСОМ СВОЙ КЛИП НЕ ПЕРЕЗАПУСКАЕТ. Он уже играет ныряющую позу,
+    // подогнанную по темпу под длину полёта (см. startDive), и перезапуск в
+    // кадре удара стирал её начисто: `playStrike('volley')` подставлял ЧЕКАНКУ
+    // КОЛЕНОМ, а у 'header' таблицы ударов нет вовсе — и нырок головой
+    // доигрывался фолбэком `kick`, то есть тычком ноги. Ласточка честно
+    // запускалась (замер: 2 раза за 5 минут матча) и сама себя затирала —
+    // отсюда и ощущение, что механики нет.
+    if (opts.dive && this.diveT > 0 && this.oneShot) { /* силуэт уже в кадре */ }
+    else if (st.anim) this.playOneShot(st.anim, st.animTs, st.animAt);
     // УДАР ПО ВОРОТАМ ИГРАЕТ СВОЁ СЕМЕЙСТВО. Раньше он анимационно ничем не
     // отличался от паса — тот же клип-тычок, только строка таблицы другая, и
     // «кайфу от забитого гола» взяться было неоткуда. Тычок в касание (добивание
@@ -3250,6 +3374,7 @@ export class Player {
       if (as.clipDelay <= 0) {
         this.playOneShot(clip, rate, startAt, endFrame);
         as.clipStarted = true;
+        this._leanForAerial();
       }
       return;
     }
@@ -3267,6 +3392,30 @@ export class Player {
       // человеческом темпе — значит это не замыкание, а приём.
       a.timeScale = Math.max(SY.rateMin, Math.min(SY.rateMax * 1.4, rate));
     }
+  }
+
+  // Корпус в ЗАМЫКАНИИ. Вызывается в миг СТАРТА ЗАМАХА, а не в кадре вылета
+  // мяча, и это не перестановка строк, а условие работоспособности слоя:
+  // огибающая ведёт корпус ПО ФАЗЕ КЛИПА к кадру контакта, значит цель обязана
+  // существовать до того, как клип до этого кадра доедет. Пока вызов стоял в
+  // finishAerial, замер по живому матчу давал у волея ровно 0.00 от заказанного
+  // наклона в кадре удара: корпус начинал ложиться, когда мяч уже улетел.
+  //
+  // Нога берётся ПО КЛИПУ, а не из lastKick: на старте замаха в lastKick лежит
+  // ПРОШЛОЕ касание игрока, а клип замыкания выбирается по высоте мяча — то
+  // есть от прошлой ноги не зависит вовсе. Это то же правило, по которому
+  // выбирается точка удара (`_pointBone`): имя клипа про ногу говорит честно.
+  _leanForAerial() {
+    const as = this.aerialStrike;
+    const LN = CONFIG.player.anim.strikeLean;
+    if (!as || !LN || !LN.enabled) return;
+    this.setStrikeLean({
+      clip: as.clipName,
+      header: as.styleName === 'header',
+      lift: LN.volleyLift,
+      power: as.charge != null ? Math.min(1.3, as.charge) : 0.9,
+      foot: CLIP_FOOT[as.clipName] || CONFIG.player.dominantFoot,
+    });
   }
 
   // УДЕРЖАНИЕ КАДРА КОНТАКТА (hit-stop). Приём из файтингов и футсимов: на
@@ -3352,6 +3501,7 @@ export class Player {
       if (as.clipDelay <= 0 || left <= as.clipHit / as.clipRate) {
         this.playOneShot(as.clipName, as.clipRate, as.clipStart, as.clipEnd);
         as.clipStarted = true;
+        this._leanForAerial();
       }
     } else {
       this._scheduleStrikeClip(left, false);
@@ -3437,27 +3587,10 @@ export class Player {
       this.oneShot.timeScale = SY.followRate;
       this.hitStop(as.charge != null ? as.charge : 1);
     }
-    // КОРПУС В ЗАМЫКАНИИ. Через shoot() наклон сюда не доходит: в режиме
-    // compute она возвращает вектор и выходит раньше, а у AI (as.aiVel) не
-    // вызывается вовсе. А ведь замыкание — самый зрелищный удар в игре, и
-    // деревянный корпус виден в нём сильнее всего.
-    //
-    // Волей с лёта кладёт корпус НАЗАД и в сторону опорной ноги сильнее
-    // наземного удара: опоры нет, и противовесом работает всё тело. Кивок
-    // головой — наоборот, наклон ВПЕРЁД сквозь мяч. У кивка при этом трогать
-    // шею и голову нельзя (голова и есть точка удара), но позвоночник можно:
-    // замер показал, что он не двигает точку удара.
-    const LN = CONFIG.player.anim.strikeLean;
-    if (LN && LN.enabled) {
-      const pw = as.charge != null ? Math.min(1.3, as.charge) : 0.9;
-      this.setStrikeLean({
-        clip: as.clipName,
-        header: as.styleName === 'header',
-        lift: LN.volleyLift,
-        power: pw,
-        foot: (this.lastKick && this.lastKick.foot) || CONFIG.player.dominantFoot,
-      });
-    }
+    // КОРПУС В ЗАМЫКАНИИ ставится не здесь, а в `_leanForAerial` на старте
+    // замаха: огибающая ведёт корпус по фазе клипа К КАДРУ КОНТАКТА, а этот
+    // кадр — ровно тот, в котором мы сейчас находимся. Ставить цель тут значит
+    // начинать класть корпус после удара (замер: 0.00 от заказанного).
     this.lastStrikeStyle = as.styleName;
     this.kickCooldown = CONFIG.player.kickCooldown;
     this.ownEpisodeT = 0;
@@ -3470,6 +3603,7 @@ export class Player {
   // Реалистичная зона: reach + бросок, никаких «полётов на 10 метров»
   startDive(dx, dz, contactY = 1.0) {
     const DV = CONFIG.player.aerial.dive;
+    const SY = CONFIG.player.aerial.sync;
     this.diveT = DV.time;
     this.diveDur = DV.time;
     this.diveSpeed = DV.lunge;
@@ -3479,7 +3613,23 @@ export class Player {
     this.vel.x = dx * DV.lunge;
     this.vel.z = dz * DV.lunge;
     this.rot = Math.atan2(dx, dz); // корпус — в сторону броска
-    this.playOneShot(contactY >= DV.headerY ? 'header' : 'kick', 1.0, 0.05);
+    // ТЕМП ПОДГОНЯЕТСЯ ПОД ДЛИНУ ПОЛЁТА — иначе ныряющий кивок не успевает
+    // ФИЗИЧЕСКИ. Раньше клип запускался с 0.05 на темпе 1.0, а кадр контакта у
+    // `header` стоит на 0.967 при полёте 0.38 с: к приземлению клип доходил
+    // только до 0.43 с, то есть лоб встречал мяч уже лёжа. Ставим кадр
+    // контакта на `clipHitAt` долю полёта — та же механика, что у замыкания и
+    // у вратарского броска, только без сервопривода: ласточка мгновенна.
+    const clip = contactY >= DV.headerY ? 'header' : 'kick';
+    const hit = CONFIG.player.anim.contact[clip];
+    const want = Math.max(1 / 60, DV.time * DV.clipHitAt);
+    let from = 0.05;
+    let rate = 1;
+    if (hit != null) {
+      rate = (hit - from) / want;
+      if (rate > SY.rateMax) { rate = SY.rateMax; from = Math.max(0, hit - want * rate); }
+      else if (rate < SY.rateMin) rate = SY.rateMin;
+    }
+    this.playOneShot(clip, rate, from, CONFIG.player.anim.clipEnd[clip] || null);
   }
 
   // Бросок ВРАТАРЯ (ресёрч 16). Отличается от полевой «ласточки» тем, что

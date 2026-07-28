@@ -34,6 +34,7 @@
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
+import { mirrorClip } from './mirror.js';
 
 // Кость → группа, у каждой свой множитель размаха.
 // Предплечье и кисть — ОТДЕЛЬНАЯ группа от плеча: у них разная роль. Плечо
@@ -381,6 +382,34 @@ export function buildDerivedClips(gltf) {
     const clip = deriveClip(src, rest, spec, spec.name, spread);
     gltf.animations.push(clip);
     byName[spec.name] = clip;
+  }
+
+  // ЗЕРКАЛЬНЫЕ КЛИПЫ (src/mirror.js). Все силовые удары в паке Mixamo
+  // правоногие, и левой ноге доставался один тычок `kick` — то есть у
+  // левоногого игрока удара по воротам анимационно не существовало. Зеркало
+  // считается из уже загруженного клипа; отдельный риг и микшер нужны потому,
+  // что поза клона при замере портится, а общий gltf трогать нельзя.
+  if (A.mirror && A.mirror.length) {
+    let rig = null;
+    let mx = null;
+    try {
+      rig = cloneSkeleton(gltf.scene);
+      mx = new THREE.AnimationMixer(rig);
+      for (const spec of A.mirror) {
+        const src = byName[spec.from];
+        if (!src) { console.warn(`Ф-98: нет клипа ${spec.from} для зеркала ${spec.name}`); continue; }
+        if (byName[spec.name]) continue;
+        const clip = mirrorClip(rig, mx, src, spec.name);
+        if (!clip) { console.warn(`Ф-98: зеркало ${spec.name} не собралось`); continue; }
+        gltf.animations.push(clip);
+        byName[spec.name] = clip;
+      }
+    } catch (e) {
+      console.error('Зеркальные клипы не собрались, левая нога останется с тычком:', e);
+    } finally {
+      if (mx) mx.uncacheRoot(rig);
+      if (rig) rig.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+    }
   }
 
   gltf.userData.locoSpeed = calibrate(gltf);

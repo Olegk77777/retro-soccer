@@ -56,6 +56,14 @@ function pct(arr, p) {
   return s[Math.min(s.length - 1, Math.floor(s.length * p))];
 }
 
+// Максимум обходом, а не через spread: `Math.max(...arr)` кладёт каждый элемент
+// в аргументы вызова и на длинной выборке рвёт стек
+function maxOf(arr) {
+  let m = -Infinity;
+  for (let i = 0; i < arr.length; i++) if (arr[i] > m) m = arr[i];
+  return m;
+}
+
 // Что игрок делает в этот кадр — ключ для разбивки замера
 function actOf(p) {
   if (p.oneShot) return 'clip:' + (p.currentName || '?');
@@ -194,7 +202,10 @@ export async function runJerk(opts = {}) {
         p50: +pct(e.all, 0.5).toFixed(2),
         p95: +pct(e.all, 0.95).toFixed(2),
         p99: +pct(e.all, 0.99).toFixed(2),
-        max: +Math.max(...e.all).toFixed(1),
+        // Не `Math.max(...e.all)`: на длинном прогоне это сотни тысяч
+        // аргументов, и стенд падает с «Maximum call stack size exceeded»
+        // ровно там, где замер нужнее всего — на большой выборке
+        max: +maxOf(e.all).toFixed(1),
         pops: e.pops,
         popPct: +((e.pops / e.n) * 100).toFixed(2),
       });
@@ -561,6 +572,312 @@ export async function aerialTrace(opts = {}) {
     console.log('навес за спину %s м: пятился на %s м, мяч «стоял» %d кадров',
       behind, out.maxBack, frozen);
     console.table(rows.filter((r) => r.f % 2 === 0));
+    return out;
+  }, opts);
+}
+
+// === 1e. Успевает ли наклон корпуса К КАДРУ КОНТАКТА ===
+//
+// leanProbe меряет УСТОЯВШИЙСЯ наклон — тот, что накопится за hold секунд. Но
+// зрителю виден не он, а поза в КАДРЕ УДАРА, а клип стартует за 2–3 кадра до
+// контакта. При экспоненте rate = 11 1/с за три кадра набирается лишь половина
+// цели: слой честно доводит корпус до литературных 13–17°, только уже ПОСЛЕ
+// того, как мяч улетел.
+//
+// Стенд ловит настоящий момент истины в живом матче: кадр, в котором время
+// одноразового клипа переходит через CONFIG.player.anim.contact[клип], и пишет
+// отношение «сколько наклона есть» к «сколько заказано».
+export async function leanTiming(opts = {}) {
+  const seconds = opts.seconds != null ? opts.seconds : 120;
+  const chunk = opts.chunk != null ? opts.chunk : 1800;
+  return harness(async ({ match, ball, goals, CONFIG }) => {
+    match.kickoff(0);
+    match.state = 'kickoff';
+    match.stateTimer = 0;
+    for (let i = 0; i < 60; i++) step(match, ball, goals);
+
+    const CT = CONFIG.player.anim.contact;
+    const all = [];
+    for (const t of match.teams) for (const p of t.players) all.push(p);
+    const prevT = new Map();
+    const hits = [];
+    // Фактическая скрутка плеч против таза — то же, что мерит twistProbe, но
+    // на ЖИВОЙ фигуре в кадре удара: по клипу видно только авторскую позу, а
+    // здесь поверх неё уже лёг слой.
+    const inv = new THREE.Matrix4();
+    const v3 = new THREE.Vector3();
+    const twistOf = (p) => {
+      const g = (n) => p.model && p.model.getObjectByName(n);
+      const lA = g('mixamorigLeftArm');
+      const rA = g('mixamorigRightArm');
+      const lL = g('mixamorigLeftUpLeg');
+      const rL = g('mixamorigRightUpLeg');
+      if (!lA || !rA || !lL || !rL) return null;
+      p.group.updateMatrixWorld(true);
+      inv.copy(p.group.matrixWorld).invert();
+      const loc = (b) => b.getWorldPosition(v3.clone()).applyMatrix4(inv);
+      const yaw = (a, b) => Math.atan2(b.x - a.x, b.z - a.z) * RAD2DEG;
+      let d = yaw(loc(rA), loc(lA)) - yaw(loc(rL), loc(lL));
+      while (d > 180) d -= 360;
+      while (d < -180) d += 360;
+      return d;
+    };
+    const total = Math.round(seconds * 60);
+    for (let f = 0; f < total; f += chunk) {
+      const n = Math.min(chunk, total - f);
+      for (let k = 0; k < n; k++) {
+        step(match, ball, goals);
+        for (const p of all) {
+          const clip = p.oneShot ? p.currentName : null;
+          const tc = clip ? CT[clip] : null;
+          const now = clip ? p.oneShot.time : null;
+          const was = prevT.get(p);
+          prevT.set(p, now);
+          if (tc == null || now == null || was == null) continue;
+          // Кадр, в котором клип ПЕРЕШЁЛ через точку контакта
+          if (!(was < tc && now >= tc)) continue;
+          const want = p._leanWant;
+          if (!want) { hits.push({ clip, доля: 0, безЦели: true }); continue; }
+          const w = Math.abs(want.pitch);
+          hits.push({
+            clip,
+            доля: w > 1e-4 ? +(Math.abs(p._leanP || 0) / w).toFixed(3) : null,
+            естьГрад: +((p._leanP || 0) * 180 / Math.PI).toFixed(1),
+            цельГрад: +(want.pitch * 180 / Math.PI).toFixed(1),
+            махДоля: want.arm > 1e-4 ? +((p._leanA || 0) / want.arm).toFixed(3) : null,
+            скрутка: twistOf(p),
+          });
+        }
+      }
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    const byClip = new Map();
+    for (const h of hits) {
+      if (h.доля == null) continue;
+      let e = byClip.get(h.clip);
+      if (!e) { e = { clip: h.clip, n: 0, share: [], arm: [], tw: [] }; byClip.set(h.clip, e); }
+      e.n++; e.share.push(h.доля);
+      if (h.махДоля != null) e.arm.push(h.махДоля);
+      // Скрутку берём по МОДУЛЮ: знак зависит от бьющей ноги, и усреднять
+      // левоногие с правоногими значит получить ноль на ровном месте
+      if (h.скрутка != null) e.tw.push(Math.abs(h.скрутка));
+    }
+    const rows = [...byClip.values()].map((e) => ({
+      клип: e.clip,
+      касаний: e.n,
+      медианаДоли: +pct(e.share, 0.5).toFixed(3),
+      худшая: +pct(e.share, 0.05).toFixed(3),
+      лучшая: +pct(e.share, 0.95).toFixed(3),
+      махМедиана: e.arm.length ? +pct(e.arm, 0.5).toFixed(3) : null,
+      скруткаГрад: e.tw.length ? +pct(e.tw, 0.5).toFixed(1) : null,
+    })).sort((a, b) => b.касаний - a.касаний);
+    const allShare = hits.filter((h) => h.доля != null).map((h) => h.доля);
+    const out = {
+      касанийВсего: allShare.length,
+      медианаПоВсем: +pct(allShare, 0.5).toFixed(3),
+      безЦели: hits.filter((h) => h.безЦели).length,
+      rows,
+    };
+    window.LEANT = out;
+    console.log('наклон в кадре контакта: медиана %s от заказанного (%d касаний)',
+      out.медианаПоВсем, out.касанийВсего);
+    console.table(rows);
+    return out;
+  }, opts);
+}
+
+// === 1f. Скрутка плеч относительно таза (X-фактор) ===
+//
+// В настоящем ударе плечевой пояс развёрнут ПРОТИВ таза, и к контакту эта
+// пружина раскручивается — именно она отличает удар от «пихнул ногой». Мерим
+// угол между линией плеч и линией бёдер вокруг вертикали, в системе координат
+// фигуры. Точка отсчёта — спокойная трусца: если в ударе скрутки МЕНЬШЕ, чем
+// при обычном беге, то в кадре удара корпус мёртвый.
+export async function twistProbe(opts = {}) {
+  const list = opts.clips || ['kick', 'kick_r', 'kick_run', 'penalty',
+    'volley_drive', 'knee_r', 'knee_l', 'bicycle', 'header', 'run'];
+  return harness(async ({ match, CONFIG }) => {
+    const p = match.teams[0].players.find((x) => !x.isKeeper && x.model);
+    if (!p) throw new Error('модель не загрузилась');
+    const g = p.group;
+    const B = {
+      lArm: p.model.getObjectByName('mixamorigLeftArm'),
+      rArm: p.model.getObjectByName('mixamorigRightArm'),
+      lLeg: p.model.getObjectByName('mixamorigLeftUpLeg'),
+      rLeg: p.model.getObjectByName('mixamorigRightUpLeg'),
+      hips: p.model.getObjectByName('mixamorigHips'),
+      neck: p.model.getObjectByName('mixamorigNeck'),
+    };
+    const inv = new THREE.Matrix4();
+    const v = new THREE.Vector3();
+    const loc = (b) => b.getWorldPosition(v.clone()).applyMatrix4(inv);
+    // Угол линии (a → b) в горизонтальной плоскости фигуры
+    const yawOf = (a, b) => Math.atan2(b.x - a.x, b.z - a.z) * RAD2DEG;
+    const grab = () => {
+      g.updateMatrixWorld(true);
+      inv.copy(g.matrixWorld).invert();
+      const sh = yawOf(loc(B.rArm), loc(B.lArm));
+      const hp = yawOf(loc(B.rLeg), loc(B.lLeg));
+      let d = sh - hp;
+      while (d > 180) d -= 360;
+      while (d < -180) d += 360;
+      return d;
+    };
+    // Наклон корпуса от вертикали, градусы (плюс — ВПЕРЁД, над мячом). Это то
+    // самое `clipBase`, которое слой наклона вычитает из цели; правило проекта
+    // требует его ПЕРЕМЕРЯТЬ, а не переписывать из прошлого отчёта.
+    const leanOf = () => {
+      if (!B.hips || !B.neck) return null;
+      g.updateMatrixWorld(true);
+      inv.copy(g.matrixWorld).invert();
+      const h = loc(B.hips);
+      const n = loc(B.neck);
+      return Math.atan2(n.z - h.z, n.y - h.y) * RAD2DEG;
+    };
+    const CT = CONFIG.player.anim.contact;
+    const out = {};
+    for (const name of list) {
+      const a = p.actions[name];
+      if (!a) { out[name] = { ошибка: 'нет клипа' }; continue; }
+      for (const n in p.actions) p.actions[n].setEffectiveWeight(0);
+      if (p.loco) for (const n in p.loco) p.loco[n].w = 0;
+      a.reset(); a.enabled = true; a.setEffectiveWeight(1); a.timeScale = 0; a.play();
+      const dur = a.getClip().duration;
+      // Размах по всему клипу и значение РОВНО в кадре контакта
+      const steps = 60;
+      let mn = Infinity;
+      let mx = -Infinity;
+      for (let i = 0; i <= steps; i++) {
+        a.time = (i / steps) * dur;
+        p.mixer.update(0);
+        const d = grab();
+        if (d < mn) mn = d;
+        if (d > mx) mx = d;
+      }
+      let atContact = null;
+      let leanAt = null;
+      if (CT[name] != null) {
+        // Время ставим ДВАЖДЫ через разные значения: mixer.update(0) не
+        // перезаписывает позу, если время не изменилось, и замер молча
+        // показал бы предыдущий кадр
+        a.time = CT[name] > 0 ? 0 : dur * 0.5;
+        p.mixer.update(0);
+        a.time = CT[name];
+        p.mixer.update(0);
+        atContact = grab();
+        leanAt = leanOf();
+      }
+      a.setEffectiveWeight(0); a.stop();
+      out[name] = {
+        вКонтакте: atContact == null ? null : +atContact.toFixed(1),
+        наклонВКонтакте: leanAt == null ? null : +leanAt.toFixed(1),
+        минимум: +mn.toFixed(1),
+        максимум: +mx.toFixed(1),
+        размах: +(mx - mn).toFixed(1),
+      };
+    }
+    window.TWIST = out;
+    console.table(out);
+    return out;
+  }, opts);
+}
+
+// === 1g. Живой ли startDive («ласточка») ===
+//
+// Механика есть в двух ветках — у человека (player.js) и у AI
+// (ai/fieldplayer.js), — а срабатывает ли она хоть раз, никто не проверял.
+// Считаем не только вызовы, но и ВОРОНКУ условий: где именно отваливается.
+export async function diveCount(opts = {}) {
+  const seconds = opts.seconds != null ? opts.seconds : 240;
+  const chunk = opts.chunk != null ? opts.chunk : 1800;
+  return harness(async ({ match, ball, goals, CONFIG }) => {
+    match.kickoff(0);
+    match.state = 'kickoff';
+    match.stateTimer = 0;
+    for (let i = 0; i < 60; i++) step(match, ball, goals);
+
+    const AP = CONFIG.player.aerial;
+    const AI = CONFIG.ai;
+    const proto = Object.getPrototypeOf(match.teams[0].players[1]);
+    const orig = proto.startDive;
+    let calls = 0;
+    // Мало сосчитать вызовы: ласточка честно запускалась и раньше, но её клип
+    // либо не доезжал до кадра контакта (кивок при полёте 0.38 с), либо его
+    // затирал удар. Поэтому следим за каждым броском до конца.
+    const flights = [];
+    proto.startDive = function (...a) {
+      calls++;
+      const rec = { clip: null, доКонтакта: false, перебит: null, contactY: +(a[2] || 0).toFixed(2) };
+      flights.push(rec);
+      const r = orig.apply(this, a);
+      rec.clip = this.currentName;
+      rec.старт = this.oneShot ? +this.oneShot.time.toFixed(3) : null;
+      rec.темп = this.oneShot ? +this.oneShot.timeScale.toFixed(2) : null;
+      this._diveWatch = rec;
+      return r;
+    };
+
+    const F = { назначен: 0, высота: 0, дистанция: 0, зона: 0, скорость: 0, мимо: 0 };
+    const total = Math.round(seconds * 60);
+    try {
+      for (let f = 0; f < total; f += chunk) {
+        const n = Math.min(chunk, total - f);
+        for (let k = 0; k < n; k++) {
+          step(match, ball, goals);
+          const bp = ball.mesh.position;
+          // Досматриваем начатые броски: дошёл ли клип до кадра контакта и не
+          // подменили ли его на другой (тычок вместо нырка)
+          for (const t of match.teams) {
+            for (const p of t.players) {
+              const w = p._diveWatch;
+              if (!w) continue;
+              if (p.currentName !== w.clip) { w.перебит = p.currentName; p._diveWatch = null; continue; }
+              const tc = CONFIG.player.anim.contact[w.clip];
+              if (tc != null && p.oneShot && p.oneShot.time >= tc) w.доКонтакта = true;
+              if (p.diveT <= 0 && !p.oneShot) p._diveWatch = null;
+            }
+          }
+          for (const t of match.teams) {
+            const p = t.receiver;
+            if (!p || p.isKeeper || p.diveT > 0 || p.kickCooldown > 0) continue;
+            F.назначен++;
+            if (!(bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)) continue;
+            F.высота++;
+            const pos = p.group.position;
+            const d = Math.hypot(bp.x - pos.x, bp.z - pos.z);
+            if (!(d >= AP.reach && d < AP.dive.reach)) continue;
+            F.дистанция++;
+            if (!(Math.hypot(t.attackGoalX - pos.x, pos.z) < AI.aerial.headerRange + 4)) continue;
+            F.зона++;
+            const sp2 = ball.vel.x * ball.vel.x + ball.vel.z * ball.vel.z;
+            if (!(sp2 > 9)) continue;
+            F.скорость++;
+            const relX = bp.x - pos.x;
+            const relZ = bp.z - pos.z;
+            const tCa = Math.max(0, -(relX * ball.vel.x + relZ * ball.vel.z) / sp2);
+            const closest = Math.hypot(relX + ball.vel.x * tCa, relZ + ball.vel.z * tCa);
+            if (closest > AP.reach * 0.75) F.мимо++;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    } finally {
+      proto.startDive = orig;
+    }
+    const out = {
+      минут: +(seconds / 60).toFixed(1),
+      вызовов: calls,
+      доКонтакта: flights.filter((f) => f.доКонтакта).length,
+      перебито: flights.filter((f) => f.перебит).length,
+      броски: flights,
+      воронка: F,
+    };
+    window.DIVES = out;
+    console.log('ласточек за %s мин: %d, доиграли до удара: %d, перебито: %d',
+      out.минут, calls, out.доКонтакта, out.перебито);
+    console.table(flights);
+    console.table([F]);
     return out;
   }, opts);
 }
