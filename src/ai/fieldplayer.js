@@ -206,13 +206,21 @@ export function updateFieldPlayer(p, dt, ball) {
       // стоят на точке прилёта: прежний порог 1.2 м срывал адресата с места
       // ровно на последних метрах (pursuit целится с упреждением ВПЕРЁД мяча),
       // и опускающийся мяч проходил у него за спиной
-      if (myBallDist < 6 && bp.y < CONFIG.player.kickMaxBallY) {
+      // ПАС В ЗОНУ ДЕРЖИТ АДРЕСАТА НА ТОЧКЕ ДОЛЬШЕ. Мяч там идёт низом с самого
+      // начала, и обычное правило «ближе 6 м — гонись за мячом» срывало бегущего
+      // с линии на полпути: pursuit целится с упреждением ВПЕРЁД мяча, то есть
+      // уводит наперерез — а мяч и так едет в ту самую точку, в которую бежит
+      // адресат. Переключаемся на погоню, только когда мяч уже почти на месте
+      const ballToT = Math.hypot(t.x - bp.x, t.z - bp.z);
+      const holdLine = team.receiveSpace && ballToT > 2.5;
+      if (myBallDist < 6 && bp.y < CONFIG.player.kickMaxBallY && !holdLine) {
         move = pursuitBall(pos.x, pos.z, ball, CONFIG.player.speed);
       } else {
         move = arrive(pos.x, pos.z, t.x, t.z, 1.6);
         if (dT < 0.5) face = Math.atan2(bp.x - pos.x, bp.z - pos.z);
       }
-      sprint = myBallDist > AI.sprintDist || (bp.y > 1.2 && dT > 2);
+      sprint = myBallDist > AI.sprintDist || (bp.y > 1.2 && dT > 2) ||
+        (holdLine && dT > 1.5);
     } else if (team.chaser === p && !mateHasBall && !passEnRoute) {
       // Первый защитник (pressure): свободный мяч догоняем, владеющего
       // соперника прессингуем по-PES — агрессивно в чужой половине,
@@ -673,9 +681,32 @@ function aerialPlay(p, ball, diving = false) {
   // и звезды — читалось как поломанная анимация приёма). У чужих ворот
   // приём не включается: там подачу ЗАМЫКАЮТ.
   if (!diving && isReceiver && distGoal >= AIR.headerRange) {
+    // ПАС В КАСАНИЕ. Прежде адресат верховой передачи ВСЕГДА принимал мяч —
+    // игры в касание у компьютера не существовало вовсе. Играем её там, где
+    // она и нужна: опекун рядом (принимать некогда) и есть надёжный вариант
+    const FT = CONFIG.ai.firstTouch;
+    let press = Infinity;
+    for (const o of team.opponents) {
+      if (o.isKeeper) continue;
+      const op = o.group.position;
+      press = Math.min(press, Math.hypot(op.x - pos.x, op.z - pos.z));
+    }
+    if (p.kickCooldown <= 0 && press < FT.passPress) {
+      const pass = team.choosePass(p, ball);
+      if (pass && pass.score >= FT.passScore) {
+        p.aiAerial(ball, pass.dir, pass.power * FT.passPowerK, pass.lift);
+        team.commitPass(pass, p);
+        return;
+      }
+    }
     // Гасим ТОЛЬКО когда мяч реально коснулся корпуса: раньше приём срабатывал,
-    // едва мяч влетал в радиус 1.5 м, и мяч менял курс в метре от груди
-    p.trapBall(ball, p.bodyContactPoint(bp));
+    // едва мяч влетал в радиус 1.5 м, и мяч менял курс в метре от груди.
+    // Направление первого касания у AI — В СТОРОНУ АТАКИ: принимая спиной к
+    // чужим воротам, он подрабатывает мяч себе на разворот, а не гасит намертво
+    const tgx = goalX - pos.x;
+    const tgz = -pos.z;
+    const tgl = Math.hypot(tgx, tgz) || 1;
+    p.trapBall(ball, p.bodyContactPoint(bp), { x: tgx / tgl, z: tgz / tgl });
     return;
   }
 

@@ -11,6 +11,7 @@ import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace, passPower, passStrikeKind } from './ai/steering.js';
+import { solveSpacePass } from './ai/passing.js';
 import { playWhistle, setCrowdIntensity, crowdCheer, flareHiss } from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
@@ -212,9 +213,18 @@ export class Match {
     this._hudCache = '';
     this._phase = ''; // фаза для контекстных тач-кнопок (атака/оборона)
 
-    // Пас-ассист для игроков человека (AI пасует своим умом в team.js)
+    // Пас-ассист для игроков человека (AI пасует своим умом в team.js).
+    // ЧЕТВЁРТЫЙ АРГУМЕНТ (направление стика) РАНЬШЕ ТЕРЯЛСЯ ЗДЕСЬ. Стрелка
+    // писала намерение в pendingStrike.aim, player.js честно передавал его
+    // пятым параметром — а эта стрелочная функция принимала только три и
+    // молча его роняла. Конус поиска адресата строился вокруг ВЗГЛЯДА игрока,
+    // и пока корпус доворачивался (turnMax 11 рад/с, разворот на 180° — 0.29 с),
+    // пас искал партнёра там, куда игрок ещё смотрел, а не туда, куда его
+    // послали. Ровно это и читалось как «не свободен выкатить в любом
+    // направлении» (фидбек Олега 28.07.2026)
     for (const p of this.humanTeam.players) {
-      p.passAssist = (player, type, power) => this.resolvePass(player, type, power);
+      p.passAssist = (player, type, power, aimDir, opts) =>
+        this.resolvePass(player, type, power, aimDir, opts);
     }
 
     // Бригада арбитров: чисто визуальные фигуры, в игру не вмешиваются
@@ -251,6 +261,7 @@ export class Match {
     for (const team of this.teams) {
       team.attacking = false; // расстановка — оборонительная, своя половина
       team.receiver = null;
+      team.receiveSpace = false;
       team.receiveTarget = null;
       team.supporter = null;
       team.chaser = null;
@@ -439,6 +450,7 @@ export class Match {
       st1.rot = Math.atan2(dx, dz);
       st1.aiKick(this.ball, { x: dx / d, z: dz / d }, power, 0, 0, 'pass');
       kt.receiver = st2;
+      kt.receiveSpace = false;
       kt.receiveTarget = { x: p2.x, z: p2.z };
       kt.receiveTimer = CONFIG.ai.receiveGiveUp;
       // Курсор — на ПАСУЮЩЕМ: адресат остаётся AI-приёмщиком, сам добежит и
@@ -901,11 +913,47 @@ export class Match {
   // Уровень помощи (слайдер 10–30%, как у ударов): шире конус поиска и
   // подтяжка силы полоски к дистанции адресата. aimDir — направление
   // намерения (стик в момент паса), по умолчанию взгляд игрока.
-  resolvePass(player, type, power, aimDir = null) {
+  resolvePass(player, type, power, aimDir = null, opts = {}) {
     const HP = CONFIG.ai.humanPass;
     const AS = HP.assist;
     const team = player.team;
     if (!team) return null;
+
+    // ПАС В ЗОНУ (W и Q+W) идёт своим решателем: мяч летит не в игрока, а в
+    // ТОЧКУ, куда игрок добежит. Разделение каноничное — в PES это ⨯ против △.
+    if (type === 'through' || type === 'lob') {
+      const sp = solveSpacePass(player, {
+        aim: aimDir ? { x: aimDir.x, z: aimDir.z } : null,
+        charge: opts.charge != null ? opts.charge : 0.6,
+        lob: type === 'lob',
+        level: AS.level,
+      });
+      if (sp) {
+        team.receiver = sp.mate;
+        team.receiveSpace = true;
+        team.receiveTarget = { x: sp.target.x, z: sp.target.z };
+        team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, sp.flight + sp.wait + 0.8);
+        // Курсор СРАЗУ на бегущего под пас (принцип PES «курсор на
+        // принимающего»): смысл паса в зону в том, чтобы человек сам вёл
+        // рывок. Ждать авто-переключения по касанию значит отдать самое
+        // ценное — сам забег — автомату
+        if (team === this.humanTeam && sp.mate !== this.controlled) {
+          this.setControlled(sp.mate, 0.4);
+        }
+        return {
+          dir: new THREE.Vector3(sp.dir.x, 0, sp.dir.z),
+          power: sp.power,
+          lift: sp.lift,
+          space: true,
+          target: sp.target,
+        };
+      }
+      // Под стик ничего разумного не нашлось — мяч летит СТРОГО как нарисован.
+      // Это и есть обещанная свобода: помощь выбирает точку в секторе, который
+      // человек указал, а не подменяет его решение
+      if (type === 'lob') return null;
+    }
+
     const f = aimDir || player.facing;
     const pos = player.group.position;
     const coneCos = AS.coneBase - AS.level * AS.coneWiden;
@@ -954,6 +1002,7 @@ export class Match {
     const d = Math.hypot(tx - pos.x, tz - pos.z) || 1;
 
     team.receiver = best.mate;
+    team.receiveSpace = false;
     team.receiveTarget = { x: tx, z: tz };
     team.receiveTimer = CONFIG.ai.receiveGiveUp;
     // Пас под прессингом — пасующий предлагает стеночку: сам рвёт вперёд,
@@ -1057,6 +1106,7 @@ export class Match {
     this.possession = team; // тренеры строятся: одни в атаку, другие в оборону
     for (const t of this.teams) {
       t.receiver = null;
+      t.receiveSpace = false;
       t.receiveTarget = null;
       t.runner = null;
       t.runnerTarget = null;
@@ -1382,6 +1432,7 @@ export class Match {
         dir = { x: (txx - tp.x) / dl, z: (tzz - tp.z) / dl };
         power = Math.max(R.powerMin, Math.min(R.aiPowerMax, best.dist * 0.85));
         team.receiver = best.mate; // адресат бросается встречать
+        team.receiveSpace = false;
         team.receiveTarget = { x: txx, z: tzz };
         team.receiveTimer = CONFIG.ai.receiveGiveUp;
       } else {

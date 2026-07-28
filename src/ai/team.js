@@ -28,6 +28,7 @@ export class Team {
     this.coverer = null;      // кто страхует за спиной прессингующего (cover)
     this.marks = new Map();   // персональный разбор в своей трети: защитник → соперник
     this.receiver = null;     // кто ждёт адресованный ему пас
+    this.receiveSpace = false; // пас отдан В ЗОНУ: адресат бежит в ТОЧКУ, а не за мячом
     this.receiveTarget = null; // куда этот пас летит
     this.receiveTimer = 0;
     this.supporter = null;    // кто открывается впереди под пас
@@ -39,6 +40,7 @@ export class Team {
     this.runnerTarget = null;
     this.runnerTimer = 0;
     this._runCheckTimer = 0;
+    this._armCd = 0;          // кулдаун ручного открывания под пас (armSpaceRun)
 
     // Подключение крайнего защитника по бровке (overlap, ресёрч 14):
     // отдельный слот — рывок снаружи, не конкурирует с runner
@@ -135,6 +137,7 @@ export class Team {
         this._passLive = null;
         this.receiver = null;
         this.receiveTarget = null;
+        this.receiveSpace = false;
       }
     }
 
@@ -219,6 +222,7 @@ export class Team {
     }
 
     if (this._runCheckTimer > 0) this._runCheckTimer -= dt;
+    if (this._armCd > 0) this._armCd -= dt;
     if (this._spotTimer > 0) this._spotTimer -= dt;
 
     this._coachTimer -= dt;
@@ -558,6 +562,7 @@ export class Team {
     }
     if (!best) return null;
     this.receiver = best;
+    this.receiveSpace = false;
     this.receiveTarget = { x: land.x, z: land.z };
     this.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, land.t + 0.8);
     return best;
@@ -641,6 +646,59 @@ export class Team {
     this.runner = runner;
     this.runnerTarget = { x: tx, z: tz };
     this.runnerTimer = R.durationSec;
+  }
+
+  // ОТКРЫВАНИЕ ПОД ПАС, ПОКА КНОПКА ЕЩЁ ЗАЖАТА (правило с 28.07.2026).
+  // Просьба Олега про заброс: «чтобы игроки хорошо открывались под него».
+  // В FC это отдельная кнопка (Trigger Run на L1/LB), но заводить её некуда и
+  // незачем: ЗАМАХ И ЕСТЬ СИГНАЛ НАМЕРЕНИЯ. Человек держит W — тренер заранее
+  // отправляет одного партнёра в сектор прицела, и к моменту отпускания кнопки
+  // тот уже разогнан. Это ровно тайминг из футбольной методики: бегущий
+  // стартует ВО ВРЕМЯ замаха, а не после паса, иначе приезжает на полсекунды
+  // позже и упирается в линию.
+  //
+  // Триггер — БОНУС К ТОЧНОСТИ открывания, а не выключатель: обычные рывки
+  // tryStartRun продолжают идти сами по своему таймеру. FC 26 официально шёл
+  // ровно в эту сторону — «increased attacking runs to reduce reliance on
+  // triggered runs»: если без кнопки никто не бежит, атака ощущается мёртвой.
+  armSpaceRun(passer, aim, charge01) {
+    const R = CONFIG.ai.attack.runs;
+    if (!passer || passer.isKeeper) return;
+    if (charge01 < R.armFrom) return;          // тап — это накат, рывок ни к чему
+    if (this._armCd > 0 || this.runner) return;
+    const F = CONFIG.field;
+    const pp = passer.group.position;
+    const ax = aim ? aim.x : this.side;
+    const az = aim ? aim.z : 0;
+    const al = Math.hypot(ax, az) || 1;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const p of this.players) {
+      if (p === passer || p.isKeeper || p === this.match.controlled) continue;
+      if (p.downT > 0 || p.tackleT > 0) continue;
+      const mp = p.group.position;
+      const d = Math.hypot(mp.x - pp.x, mp.z - pp.z);
+      if (d < 6 || d > R.maxDist) continue;
+      const cos = ((mp.x - pp.x) * ax / al + (mp.z - pp.z) * az / al) / d;
+      if (cos < R.armCone) continue;
+      // Ценим направление по прицелу и свободу зоны ЗА игроком — туда он и побежит
+      const tx0 = mp.x + this.side * R.behindLine;
+      const score = cos * 10 + freeSpace(tx0, mp.z, this.opponents) * 6 - d * 0.05;
+      if (score > bestScore) { bestScore = score; best = p; }
+    }
+    if (!best) return;
+    const rp = best.group.position;
+    const oppLine = this.match.otherTeam(this).defLineX;
+    let tx = oppLine + this.side * R.behindLine;
+    // Рывок обязан быть ВПЕРЁД относительно самого бегущего, иначе «открывание»
+    // выродится в бег назад к своим воротам
+    if (this.side * (tx - rp.x) < R.armMinGain) tx = rp.x + this.side * R.armMinGain;
+    const maxDepth = F.length / 2 - 8; // не в объятия вратарю
+    if (this.side * tx > maxDepth) tx = this.side * maxDepth;
+    this.runner = best;
+    this.runnerTarget = { x: tx, z: Math.max(-20, Math.min(20, rp.z * 0.75)) };
+    this.runnerTimer = R.armTtl;
+    this._armCd = R.armCd;
   }
 
   // Пас отдан — пасующий предлагает СТЕНОЧКУ (give-and-go, ресёрч 14):
@@ -1034,10 +1092,34 @@ export class Team {
       if (runSpeed > 1.5 || mate === this.runner || mate === this.overlapper) {
         cands.push({ kind: 'through', lead: 1.5, ahead: 2.0 });
       }
+      // ПАС НА ПЕРСПЕКТИВУ. Отличается от `through` не числом, а ПРИРОДОЙ
+      // ТОЧКИ: у `through` она выводится из СКОРОСТИ адресата, и у стоящего
+      // партнёра вариант вырождается в пас в ноги (ровно это EA и признаёт про
+      // свой through ball: «if they remain stationary, these techniques will
+      // not work»). Здесь точка берётся из направления АТАКИ и свободного
+      // места — то есть мяч можно положить в зону ПЕРВЫМ, а партнёр побежит
+      // туда уже под отданный пас. Просьба Олега 28.07.2026: «пасы в прострел
+      // и закиды должны работать как пас на перспективу, когда ты
+      // догадываешься, что футболист туда забежит, а не когда он уже там».
+      // Замер до правки: AI выбирал `through` в 55 % случаев, и средняя
+      // дистанция доставки у него была 20.1 м против 19.9 м у паса в ноги —
+      // то есть это был один и тот же пас с разными подписями.
+      if (this.side * (mate.group.position.x - fp.x) > -4) {
+        cands.push({ kind: 'space', lead: 0, ahead: PM.spaceAhead, space: true });
+      }
 
       for (const c of cands) {
-        const arrive = c.kind === 'through' || underPressure
-          ? AI.passArriveDriven : AI.passArriveNormal;
+        const arrive = c.kind === 'feet' && !underPressure
+          ? AI.passArriveNormal : AI.passArriveDriven;
+        // Направление выноса. У паса на ход — по бегу адресата; у паса В ЗОНУ —
+        // по атаке (бегущему всё равно доверяем его вектор: он уже показал,
+        // куда собрался). Иначе точка легла бы за спину бегущему партнёру
+        let ux = runSpeed > 0.3 ? mate.vel.x / runSpeed : 0;
+        let uz = runSpeed > 0.3 ? mate.vel.z / runSpeed : 0;
+        if (c.kind === 'space' && runSpeed <= 1.5) {
+          ux = this.side;
+          uz = 0;
+        }
         // Две итерации неподвижной точки: цель зависит от времени полёта,
         // время полёта — от дистанции до цели
         let tx = mp.x;
@@ -1050,14 +1132,28 @@ export class Team {
             Math.min(AI.passSpeedMax, passPower(dist, arrive)));
           flight = passTime(dist, power);
           if (!isFinite(flight)) break;
-          const ux = runSpeed > 0.3 ? mate.vel.x / runSpeed : 0;
-          const uz = runSpeed > 0.3 ? mate.vel.z / runSpeed : 0;
           tx = mp.x + mate.vel.x * flight * c.lead + ux * c.ahead;
           tz = mp.z + mate.vel.z * flight * c.lead + uz * c.ahead;
           dist = Math.hypot(tx - fp.x, tz - fp.z) || 1;
         }
         if (!isFinite(flight)) continue;
         if (Math.abs(tx) > F.length / 2 - 1.5 || Math.abs(tz) > F.width / 2 - 1.5) continue;
+        // ДОСТИЖИМОСТЬ ЦЕЛИ ПРОВЕРЯЕТСЯ ЧЕСТНО. Итерация неподвижной точки
+        // считает power и flight по дистанции ПРЕДЫДУЩЕГО шага, а `dist`
+        // обновляет в самом конце — то есть последняя цель не проверена ничем.
+        // Замер на двух матчах: 1.7 % выбранных пасов летели дальше предела
+        // v0/λ (медиана недолёта 7.2 м, максимум 23.2), и качество приёма у них
+        // выходило МАКСИМАЛЬНЫМ — приходящая скорость считалась нулевой, то
+        // есть модель награждала пас, умирающий на полпути
+        if (dist > (power / ROLL_LAMBDA) * 0.98) continue;
+        // Успеет ли адресат в точку? Для паса в зону это не украшение, а
+        // условие: мяч кладётся туда, где партнёра ЕЩЁ НЕТ
+        if (c.kind === 'space') {
+          const dm2 = Math.hypot(tx - mp.x, tz - mp.z);
+          const vMate = CONFIG.player.speed * CONFIG.player.sprintFactor * AI.speedFactor;
+          const tMate = PM.spaceReact + dm2 / vMate;
+          if (tMate > flight + PM.spaceWait) continue;
+        }
 
         // --- P_complete: перехват по времени ---
         const p = this.passComplete(fp.x, fp.z, tx, tz, power, opponents,
@@ -1083,8 +1179,13 @@ export class Team {
         }
         q *= 1 - PM.qPressDrop * Math.max(0, Math.min(1, 1 - dOpp / PM.qPressRange));
         q *= PM.qHeightLow;
-        q *= c.kind === 'through' ? PM.qRunBonus
-          : (runSpeed > 3 ? PM.qFeetToRunner : 1);
+        // Мяч, положенный ПЕРЕД бегущим, он принимает не теряя скорости — это
+        // бонус. А мяч, выкаченный в ПУСТОЕ МЕСТО, адресат догоняет на ходу,
+        // часто спиной к воротам и с подтягивающимся защитником — это худший
+        // приём, а не лучший (ablation: с бонусом механика стоила +0.75 гола)
+        q *= c.kind === 'feet'
+          ? (runSpeed > 3 ? PM.qFeetToRunner : 1)
+          : (c.kind === 'space' ? PM.qSpace : PM.qRunBonus);
 
         // --- V: прирост ценности позиции ---
         const dxt = xThreat(tx, tz, this.side) - xtFrom;
@@ -1108,7 +1209,7 @@ export class Team {
         const isCutback = fromDeepWide && inFinish &&
           this.side * (fp.x - tx) > 0 && Math.abs(tz) < Math.abs(fp.z) - 4;
         if (isCutback) f = PM.fCutback;
-        else if (behindLine && c.kind === 'through') f = PM.fThrough;
+        else if (behindLine && c.kind !== 'feet') f = PM.fThrough;
         else if (inFinish && this.side * (tx - fp.x) > 0) f = PM.fIntoBox;
         else if (this.side * (tx - fp.x) > 6) f = PM.fProgress;
         if (mate.isKeeper) f *= PM.fKeeper;
@@ -1124,6 +1225,7 @@ export class Team {
           power,
           lift: dist > AI.longPassDist ? AI.longPassLift : 0.4,
           kind: c.kind,
+          space: !!c.space, // адресат побежит в ТОЧКУ, а не за мячом
         });
       }
     }
@@ -1211,6 +1313,7 @@ export class Team {
   // from — пасующий: короткий пас под прессингом предлагает ему стеночку
   commitPass(pass, from = null) {
     this.receiver = pass.mate;
+    this.receiveSpace = !!pass.space;
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
     this.bump('pass');

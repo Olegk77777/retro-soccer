@@ -12,6 +12,10 @@
 import { CONFIG } from './config.js';
 import { screenRect, toScreen, onScreen } from './tvset.js';
 
+// Боевые кнопки: нажатие любой из них при зажатом Q/LB означает, что модификатор
+// использован как КОМБО, и смены игрока на отпускании быть не должно
+const COMBO_KEYS = new Set(['KeyS', 'KeyW', 'KeyA', 'KeyD']);
+
 // Игра идёт ВНУТРИ рамки телевизора, а не во весь экран (см. src/tvset.js).
 // Поэтому всё, что раньше считалось от window.innerWidth/innerHeight —
 // зоны стика и свайпа, позиция стика, сила и скорость жеста — считается от
@@ -29,12 +33,18 @@ class ChargeAction {
     this._edge = null;
   }
 
-  feed(dt, heldNow) {
+  // МОДИФИКАТОР ЗАЩЁЛКИВАЕТСЯ В МОМЕНТ НАЖАТИЯ, а не читается при отпускании.
+  // Замер на живом матче: Q+W давал заброс НОЛЬ раз из 25 попыток, потому что
+  // событие кнопки выходит только на отпускании, а к этому кадру Q успевала
+  // подняться. Приказ отдаётся нажатием — его и запоминаем.
+  feed(dt, heldNow, mod = false) {
     if (heldNow) {
+      if (!this.held) this.mod = mod;   // фронт нажатия — фиксируем модификатор
       this.held = true;
       this.t = Math.min(this.t + dt, this.chargeTime * this.overCap);
     } else if (this.held) {
       this._edge = Math.max(0.15, this.t / this.chargeTime); // короткий тап = слабое, но не нулевое
+      this._edgeMod = this.mod;
       this.held = false;
       this.t = 0;
     }
@@ -43,6 +53,8 @@ class ChargeAction {
   consume() {
     const v = this._edge;
     this._edge = null;
+    this.modWas = !!this._edgeMod; // модификатор, зажатый в момент НАЖАТИЯ
+    this._edgeMod = false;
     return v; // null, если не было; иначе сила 0..1
   }
 
@@ -92,13 +104,24 @@ export class Input {
     this._padSwitchPrev = false;
     this._padSwitchHeld = false;
 
+    // СМЕНА ИГРОКА СРАБАТЫВАЕТ НА ОТПУСКАНИИ, а не на нажатии — и это не
+    // придирка. Q одновременно и кнопка смены, и модификатор комбо (Q+S —
+    // стеночка, Q+W — заброс на ход): пока смена висела на keydown, каждое
+    // комбо СНАЧАЛА переключало управляемого игрока, а уже потом исполняло
+    // комбо — то есть заказ уходил не тому футболисту. С мячом от этого
+    // спасал гейт в updateSwitching («с мячом Q курсор не трогает»), но
+    // адресат летящего паса мяча ещё не держит, и там всё разваливалось.
+    // Теперь Q, использованная как модификатор, смену не даёт вовсе, а
+    // задержка на длительность нажатия (60–120 мс) не ощущается.
     window.addEventListener('keydown', (e) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);
-      if (e.code === 'KeyQ') this._switchQueued = true;
+      if (e.code === 'KeyQ') this._comboUsed = false;
+      else if (this.comboHeld && COMBO_KEYS.has(e.code)) this._comboUsed = true;
     });
     window.addEventListener('keyup', (e) => {
+      if (e.code === 'KeyQ' && !this._comboUsed) this._switchQueued = true;
       this.keys.delete(e.code);
     });
 
@@ -348,10 +371,14 @@ export class Input {
     this._pad.cross = btn(2);   // X / квадрат — навес (поменян местами с ударом)
     this._pad.through = btn(3); // Y / треугольник — пас на ход
     this._pad.sprint = trig(7); // RT / R2 (дальний правый курок) — спринт, перенесён с бампера RB
-    // LB / L1 — смена управляемого игрока (по фронту нажатия, как Q);
-    // удержание LB — модификатор стеночки (LB+пас)
+    // LB / L1 — смена управляемого игрока (на ОТПУСКАНИИ, как Q на клавиатуре);
+    // удержание LB — модификатор комбо: LB+A стеночка, LB+Y заброс на ход
     const sw = btn(4);
-    if (sw && !this._padSwitchPrev) this._switchQueued = true;
+    if (sw && !this._padSwitchPrev) this._comboUsed = false;
+    if (sw && (this._pad.pass || this._pad.shot || this._pad.cross || this._pad.through)) {
+      this._comboUsed = true;
+    }
+    if (!sw && this._padSwitchPrev && !this._comboUsed) this._switchQueued = true;
     this._padSwitchPrev = sw;
     this._padSwitchHeld = sw;
   }
@@ -386,10 +413,13 @@ export class Input {
     this.move.x = x;
     this.move.z = z;
 
-    // Замахи паса, паса на ход и удара
-    this.pass.feed(dt, this.keys.has('KeyS') || this._pad.pass || this._touch.pass);
-    this.through.feed(dt, this.keys.has('KeyW') || this._pad.through || this._touch.through);
-    this.shot.feed(dt, this.keys.has('KeyD') || this._pad.shot || this._touch.shot);
+    // Замахи паса, паса на ход и удара. Третий аргумент — состояние
+    // модификатора Q/LB В МОМЕНТ НАЖАТИЯ: у паса это заявка на стеночку,
+    // у паса на ход — на ЗАБРОС
+    const mod = this.comboHeld;
+    this.pass.feed(dt, this.keys.has('KeyS') || this._pad.pass || this._touch.pass, mod);
+    this.through.feed(dt, this.keys.has('KeyW') || this._pad.through || this._touch.through, mod);
+    this.shot.feed(dt, this.keys.has('KeyD') || this._pad.shot || this._touch.shot, mod);
 
     // Навес: полоска → окно тапов → событие {charge, taps}
     this._feedCross(dt, this.keys.has('KeyA') || this._pad.cross || this._touch.cross);

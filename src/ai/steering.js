@@ -11,7 +11,7 @@ import { CONFIG } from '../config.js';
 export function passStrikeKind(pass) {
   if (!pass) return 'pass';
   if (pass.lift > 1) return 'cross';
-  return pass.kind === 'through' ? 'through' : 'pass';
+  return pass.kind === 'feet' ? 'pass' : 'through';
 }
 
 export function seek(px, pz, tx, tz) {
@@ -268,6 +268,44 @@ export function passTime(dist, v0) {
   const k = (ROLL_LAMBDA * dist) / Math.max(0.1, v0);
   if (k >= 0.995) return Infinity; // мяч не докатится
   return -Math.log(1 - k) / ROLL_LAMBDA;
+}
+
+// Сила ВЕРХОВОГО мяча под заданную дальность — двоичный поиск по ЧЕСТНОЙ
+// симуляции полёта (гравитация + квадратичный drag), а не по формуле идеальной
+// параболы с поправочным коэффициентом: та мазала мимо адресата на 0.8–2.0 м.
+// Жила методом Player.solveLoftPower; вынесена сюда, когда её понадобилось
+// звать и решателю паса в зону (src/ai/passing.js) — двух копий такой
+// калибровки в проекте быть не должно.
+export function loftPower(dist, theta, targetH, lo, hi) {
+  const B = CONFIG.ball;
+  const fly = (power) => {
+    let x = 0;
+    let y = B.radius;
+    let vx = power;
+    let vy = power * Math.tan(theta);
+    const dt = 1 / 120;
+    for (let t = 0; t < 6; t += dt) {
+      vy += B.gravity * dt;
+      const sp = Math.hypot(vx, vy);
+      if (sp > 0.01) {
+        const k = Math.min(B.dragK * sp * dt, 0.5);
+        vx *= 1 - k;
+        vy *= 1 - k;
+      }
+      x += vx * dt;
+      y += vy * dt;
+      if (vy < 0 && y <= targetH) return x;
+      if (y < 0) return x;
+    }
+    return x;
+  };
+  let a = lo;
+  let b = hi;
+  for (let i = 0; i < 26; i++) {
+    const mid = (a + b) / 2;
+    if (fly(mid) < dist) a = mid; else b = mid;
+  }
+  return (a + b) / 2;
 }
 
 // Ценность позиции для атаки — упрощённый xT (expected threat, сетка Карун

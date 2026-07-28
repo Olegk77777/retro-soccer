@@ -13,7 +13,7 @@ import { attachGloves } from './gloves.js';
 import { kitTextureWithNumber } from './kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
 import { addRim } from './rimlight.js';
-import { predictLanding, pursuitBall } from './ai/steering.js';
+import { predictLanding, pursuitBall, loftPower } from './ai/steering.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
 // Исходные материалы НЕ трогаем — каждый клон собирает свои (цвет команды).
@@ -284,6 +284,10 @@ export class Player {
     const L = this.look;
     const tall = L && L.height ? L.height / P.baseHeightCm : 1;
     const wide = L && L.build ? L.build : 1;
+    // Рост нужен ещё и приёму: по нему масштабируются пороги «стопа / бедро /
+    // грудь / голова», иначе у высокого игрока грудь оказывалась бы там, где
+    // у низкого голова (см. bodyContactPoint)
+    this.tall = tall;
     this.model.scale.set(
       P.modelScale * tall * wide,
       P.modelScale * tall,      // ноги в origin — растём вверх, не в землю
@@ -1892,7 +1896,10 @@ export class Player {
       this.trapCushion -= dt;
       const T = P.trap;
       const k = Math.max(0, this.trapCushion) / T.cushionTime;
-      tilt = -Math.sin(Math.PI * (1 - k)) * T.cushionTilt;
+      // Амплитуда подседа — СВОЙСТВО ЧАСТИ ТЕЛА, а не общая константа: приём
+      // грудью виден заметным отклоном, приём стопой — почти нет
+      const amp = this.trapTilt != null ? this.trapTilt : T.cushionTilt;
+      tilt = -Math.sin(Math.PI * (1 - k)) * amp;
     }
     if (this.tackleT > 0 || this.slideRecover) {
       // Подкат: наклон не трогаем — весь силуэт (скольжение + вставание)
@@ -2266,6 +2273,17 @@ export class Player {
       if (bpEarly.y > P.kickMaxBallY) {
         // Верховой мяч: к точке прилёта (не за тенью мяча)
         tgt = predictLanding(ball, P.aerial.contactY) || rcvTeam.receiveTarget;
+      } else if (rcvTeam.receiveSpace && rcvTeam.receiveTarget) {
+        // ПАС В ЗОНУ НИЗОМ. До 28.07.2026 цель ставилась ТОЛЬКО верховому мячу,
+        // и управляемый человеком адресат наземного паса гнался за самим мячом
+        // по кратчайшей (pursuitBall целится с упреждением ВПЕРЁД мяча). То есть
+        // весь смысл паса на перспективу — «беги в точку, мяч придёт туда» —
+        // для человека не работал: его игрок срезал угол к мячу и приходил
+        // не в зону, а в бок траектории.
+        const rt = rcvTeam.receiveTarget;
+        const dLeft = Math.hypot(rt.x - bpEarly.x, rt.z - bpEarly.z);
+        // …но у самой точки мяч уже там, и гнаться надо за мячом
+        if (dLeft > APP.strikeHoldRadius) tgt = rt;
       }
       if (tgt) {
         const dcx = tgt.x - pos.x;
@@ -2613,7 +2631,9 @@ export class Player {
     // Нажал чуть раньше, чем добежал до мяча — удар исполнится в момент,
     // когда мяч войдёт в зону ноги (kickRadius). Так бьют с хода и с паса на ход.
     let pass = input.pass.consume();
+    const passMod = input.pass.modWas;
     const through = input.through.consume();
+    const throughMod = input.through.modWas;
     let cross = input.consumeCross();
     let shot = input.shot.consume();
     // Замыкание волея стартовало ещё на удержании D — гасим событие отпускания,
@@ -2637,8 +2657,8 @@ export class Player {
     if (pass !== null && !downed && this.tryChallenge(ball)) pass = null;
 
     let strike = null;
-    if (pass !== null) strike = { type: 'pass', v: pass };
-    else if (through !== null) strike = { type: 'through', v: through };
+    if (pass !== null) strike = { type: 'pass', v: pass, mod: passMod };
+    else if (through !== null) strike = { type: 'through', v: through, mod: throughMod };
     else if (cross !== null) strike = { type: 'cross', v: cross };
     else if (shot !== null) strike = { type: 'shot', v: shot };
     else if (swipe !== null) strike = { type: 'swipe', v: swipe };
@@ -2651,21 +2671,37 @@ export class Player {
       const airborne = bp.y > P.kickMaxBallY &&
         (strike.type === 'shot' ||
           (strike.type === 'swipe' && strike.v && strike.v.kind === 'shot'));
+      // ЗАКАЗ ПАСА В КАСАНИЕ ЖИВЁТ ВСЁ ВРЕМЯ ПОЛЁТА МЯЧА. Раньше продление в
+      // воздухе было выдано ТОЛЬКО удару, и заявка на пас сгорала за 0.45 с —
+      // то есть отдать в касание было физически нечем. Окно щедрое сознательно:
+      // EA переписала конвейер ввода ради ОДНОГО кадра, потому что игроки
+      // замечают именно его. Дешевле быть слишком отзывчивым, чем формально
+      // правым — «игра меня не послушала» читается поломкой
+      const airPass = bp.y > P.kickMaxBallY &&
+        (strike.type === 'pass' || strike.type === 'through');
       this.pendingStrike = {
         ...strike,
-        ttl: airborne ? P.aerial.buffer : P.strikeBufferTime,
+        ttl: airborne ? P.aerial.buffer
+          : (airPass ? P.firstTime.buffer : P.strikeBufferTime),
         aim: null,
-        combo: input.comboHeld, // Q/LB в момент нажатия — заявка на стеночку
+        // Модификатор берётся из ЗАЩЁЛКИ КНОПКИ (состояние Q/LB в момент
+        // НАЖАТИЯ), а не спрашивается заново: к кадру отпускания Q успевает
+        // подняться, и заброс молча превращался в обычный пас на ход
+        combo: strike.mod || input.comboHeld,
       };
     } else if (this.pendingStrike) {
       const ps = this.pendingStrike;
       const psAirShot = bp.y > P.kickMaxBallY &&
         (ps.type === 'shot' || (ps.type === 'swipe' && ps.v && ps.v.kind === 'shot'));
+      const psAirPass = bp.y > P.kickMaxBallY &&
+        (ps.type === 'pass' || ps.type === 'through');
       if (psAirShot) {
         // Подача ещё в полёте — заказ замыкания НЕ сгорает: жми D в любой
         // момент полёта, удар исполнится на прилёте (фидбек Олега 22.07:
         // завершение после навеса должно ощущаться ударом, а не отскоком)
         ps.ttl = Math.max(ps.ttl, P.aerial.buffer);
+      } else if (psAirPass) {
+        ps.ttl = Math.max(ps.ttl, P.firstTime.grace); // прощаем и опоздавший ввод
       } else {
         // ЗАВЕРШЕНИЕ В ПАДЕНИИ. Удар заказан, мяч низко и уже за пределами
         // зоны ноги — вместо того чтобы дать заказу сгореть, пробуем достать
@@ -2679,6 +2715,19 @@ export class Player {
           if (ps.ttl <= 0) this.pendingStrike = null; // не добежал — сгорело
         }
       }
+    }
+
+    // ОТКРЫВАНИЕ ПОД ПАС ВО ВРЕМЯ ЗАМАХА. Держишь W дольше тапа — тренер уже
+    // отправляет партнёра в сектор прицела, и к отпусканию кнопки тот разогнан.
+    // Отдельной кнопки вызова (Trigger Run на L1/LB в FC) заводить не пришлось:
+    // замах и есть сигнал намерения, а тайминг получается тот самый, что в
+    // методике — бегущий стартует ВО ВРЕМЯ передачи, а не после неё
+    if (input.through.held && this.team && this.team.armSpaceRun &&
+        (this.isToucher || this.hasBall)) {
+      const al = Math.hypot(input.move.x, input.move.z);
+      this.team.armSpaceRun(this,
+        al > 0.3 ? { x: input.move.x / al, z: input.move.z / al } : null,
+        input.through.charge01);
     }
 
     // Пока пас ждёт мяча, стик пишет НАПРАВЛЕНИЕ будущей передачи:
@@ -2700,11 +2749,12 @@ export class Player {
       this.ownEpisodeT = 0;      // передача закрывает эпизод владения
       const lerp = (a, b, t) => a + (b - a) * t;
       if (s.type === 'pass' || s.type === 'through') {
-        // S — пас низом; W — пас на ход (настильный). Сила — от замаха.
-        // Направление: намерение стика на подходе к мячу (s.aim) или взгляд.
-        // Пас-ассист: Match доворачивает на партнёра в конусе и подтягивает
-        // силу к дистанции (слайдер «Помощь в пасах»); партнёр бросается
-        // встречать. Без адресата пас летит строго как нарисован.
+        // S — пас В НОГИ; W — пас В ЗОНУ (на ход); Q/LB + W — ЗАБРОС в зону.
+        // Раскладка заброса взята у FIFA один в один (L1+△ = lobbed through
+        // pass). Модификатор Q/LB один, а смысл у него разный на разных
+        // кнопках: с пасом это по-прежнему СТЕНОЧКА, с пасом на ход — заброс.
+        const lob = s.type === 'through' && (s.combo || input.comboHeld);
+        const kind = lob ? 'lob' : s.type;
         const cfg = s.type === 'pass' ? P.pass : P.through;
         const power = lerp(cfg.powerMin, cfg.powerMax, s.v);
         let aimDir = null;
@@ -2712,22 +2762,66 @@ export class Player {
           aimDir = new THREE.Vector3(s.aim.x, 0, s.aim.z);
           this.faceStrike(Math.atan2(s.aim.x, s.aim.z)); // корпус ДОЕЗЖАЕТ по пасу
         }
-        const assist = this.passAssist ? this.passAssist(this, s.type, power, aimDir) : null;
-        const pdir = assist ? assist.dir : (aimDir || this.facing);
-        const ppow = assist ? assist.power : power;
+        const assist = this.passAssist
+          ? this.passAssist(this, kind, power, aimDir, { charge: s.v })
+          : null;
+        let pdir = assist ? assist.dir : (aimDir || this.facing);
+        let ppow = assist ? assist.power : power;
+        let plift = assist && assist.lift != null ? assist.lift : cfg.lift;
+        // ПАС В КАСАНИЕ ПО КАТЯЩЕМУСЯ МЯЧУ. Мяч ещё не был под контролем и
+        // подкатился на скорости — значит игрок бьёт по нему сходу, и цена та
+        // же, что у паса с лёта: помощь урезана, разброс добавлен, сила цела
+        const ftGround = !this.controlling &&
+          Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z) >= P.firstTime.groundRel;
+        if (ftGround) {
+          const raw = aimDir || new THREE.Vector3(this.facing.x, 0, this.facing.z);
+          const cost = this.firstTimeCost(ball, raw.x, raw.z);
+          if (assist) {
+            pdir = raw.clone().lerp(assist.dir, cost.assistK).normalize();
+            ppow = power + (assist.power - power) * cost.assistK;
+            if (assist.lift != null) plift = cfg.lift + (assist.lift - cfg.lift) * cost.assistK;
+          }
+          pdir = this._scatter(pdir, cost.noise);
+        }
+        if (!assist && lob) {
+          // Под стик никого — ручной заброс по нарисованному направлению.
+          // Свобода дороже помощи: мяч летит туда, куда показали
+          const th = (P.lob.angleNear * Math.PI) / 180;
+          ppow = Math.max(P.lob.powerFloor, Math.min(P.lob.powerMax, power * 0.75));
+          plift = ppow * Math.tan(th);
+        }
+        // ПЕРЕДЕРЖКА ЖИВА И ПРИ ПОМОЩИ. Баллистика решателя кладёт мяч ровно в
+        // точку, и без этой добавки шкала выше единицы перестала бы что-либо
+        // значить — а наказание за плохой тайминг в PES обязательно
+        if (s.v > 1) {
+          const over = 1 + (s.v - 1) * CONFIG.cross.overPower;
+          ppow *= over;
+          if (plift > 1) plift *= over;
+        }
         // Пас себе за спину человек отдаёт ПЯТКОЙ — на тех же условиях, что AI
         const ptrick = this.trickTouch(pdir.x, pdir.z, ball);
         if (ptrick) {
-          this.playTrick(ptrick, ball, pdir, ppow, cfg.lift);
+          this.playTrick(ptrick, ball, pdir, ppow, plift);
         } else {
-          ball.strike(pdir, ppow, cfg.lift);
+          ball.strike(pdir, ppow, plift);
           this.kickCooldown = P.kickCooldown;
-          this.playStrike('toe'); // короткий тычок, почти без замаха
+          // СЕМЕЙСТВО КЛИПОВ ПО ВИДУ ПАСА. Раньше человек на любой передаче
+          // играл `toe` — короткий тычок, — и пас на ход визуально ничем не
+          // отличался от паса в ноги, хотя семейство `through` с настоящей
+          // проводкой лежит в таблице ударов с 26.07 и не использовалось
+          // человеком НИ РАЗУ
+          this.playStrike(lob ? 'cross' : (s.type === 'through' ? 'through' : 'toe'));
+          this.setStrikeLean({
+            clip: this.currentName,
+            lift: plift,
+            power: Math.min(1, s.v),
+            foot: (this.lastKick && this.lastKick.foot) || P.dominantFoot,
+          });
         }
         // СТЕНОЧКА (Q/LB + пас, 22.07.2026): пас ушёл партнёру — пасующий сам
         // рвёт вперёд за спину опекуну, курсор переходит на адресата (как
         // L1+пас в PES 5/6). Возврат мяча на ход — W
-        if (assist && (s.combo || input.comboHeld) &&
+        if (!lob && assist && (s.combo || input.comboHeld) &&
             this.team && this.team.startManualOneTwo) {
           this.team.startManualOneTwo(this);
         }
@@ -2775,6 +2869,9 @@ export class Player {
     const wantShot = this.pendingStrike &&
       (this.pendingStrike.type === 'shot' ||
         (this.pendingStrike.type === 'swipe' && this.pendingStrike.v.kind === 'shot'));
+    // Заявка на ПАС по мячу, который ещё в воздухе, — это игра в касание
+    const wantPass = this.pendingStrike &&
+      (this.pendingStrike.type === 'pass' || this.pendingStrike.type === 'through');
     if (canAerialDive && wantShot) {
       const s = this.pendingStrike;
       this.pendingStrike = null;
@@ -2798,6 +2895,12 @@ export class Player {
           input, ball);
         this._ignoreShotEdge = true; // событие отпускания D не должно дать второй удар
       }
+    } else if (canAerialPrep && wantPass) {
+      // ПАС С ЛЁТА. Тот же замах в одно касание, только в кадре контакта мяч
+      // уходит не в ворота, а партнёру. Ветка одного касания раньше принимала
+      // ТОЛЬКО удар — заявка на пас по мячу в воздухе не исполнялась в принципе
+      this.beginAerialStrike(this.pendingStrike, input, ball);
+      this.pendingStrike = null;
     } else if (wantShot && !diving && !downed && this.kickCooldown <= 0 &&
         dist >= A.reach && dist < DV.reach &&
         bp.y >= DV.minY && bp.y <= DV.maxY) {
@@ -2828,8 +2931,14 @@ export class Player {
     const TR = P.trap;
     // Приём — по РЕАЛЬНОМУ касанию корпуса, а не по влёту в радиус 1.5 м
     const trapC = this.bodyContactPoint(bp);
+    // ЗАКАЗАННЫЙ ПАС ТОЖЕ ЗАПРЕЩАЕТ ПРИЁМ. Раньше приём молчал только пока
+    // кнопка ЗАЖАТА (strikeCommitted): стоило её отпустить, событие уходило в
+    // pendingStrike — и в том же кадре trapBall съедал мяч грудью, ставя
+    // kickCooldown 0.28. То есть намерение «отдать в касание» гарантированно
+    // проигрывало гонку приёму (главная жалоба обеих серий: «нападающий берёт
+    // лишнее касание вместо удара»)
     if (!downed && !diving && this.tackleT <= 0 && this.kickCooldown <= 0 &&
-        !wantShot && !input.strikeCommitted && !this.aerialStrike &&
+        !wantShot && !wantPass && !input.strikeCommitted && !this.aerialStrike &&
         bp.y > P.kickMaxBallY && bp.y <= A.maxY &&
         trapC.reachable && ball.vel.y < 1 &&
         ball.vel.length() >= TR.minSpeed) { // полная скорость: крутая перекидка
@@ -2841,7 +2950,9 @@ export class Player {
         const dg = Math.hypot(this.team.attackGoalX - pos.x, pos.z);
         inFinish = dg < CONFIG.ai.aerial.headerRange;
       }
-      if (oursIncoming && !inFinish) this.trapBall(ball, trapC);
+      // Стик В МОМЕНТ КАСАНИЯ — это и есть направление первого касания.
+      // Резко потянул в сторону под навесом — мяч уйдёт грудью туда
+      if (oursIncoming && !inFinish) this.trapBall(ball, trapC, input.move);
     }
 
     // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
@@ -3101,6 +3212,7 @@ export class Player {
     // — раньше кламп силы смещал реальную точку, и адресат ждал не там
     const land = predictLanding(ball, CONFIG.player.aerial.contactY);
     team.receiver = best.mate;
+    team.receiveSpace = false;
     team.receiveTarget = land ? { x: land.x, z: land.z } : { x: tx, z: tz };
     team.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, (land ? land.t : flight) + 0.8);
     // Курсор СРАЗУ переходит на адресата перекидки (как после навеса в
@@ -3150,7 +3262,25 @@ export class Player {
     }
 
     if (charge < 0.45) {
-      // Короткий росчерк — острый пас на ход низом
+      // Короткий росчерк — ПАС В ЗОНУ (на ход). Планшет получает ту же
+      // механику, что клавиатура: длина росчерка = дальность выноса, а
+      // СКОРОСТЬ жеста выбирает форму — резкий даёт настильный пас низом,
+      // медленный ЗАБРОС за спину (та же грамматика, что у навеса, где
+      // скорость жеста выбирает тип дуги)
+      const c01 = Math.max(0.15, Math.min(1.3, charge / 0.45));
+      const kind = sw.speed < CONFIG.cross.swipeLobSpeed ? 'lob' : 'through';
+      const assist = this.passAssist
+        ? this.passAssist(this, kind, P.through.powerMin +
+          (P.through.powerMax - P.through.powerMin) * c01, dir, { charge: c01 })
+        : null;
+      if (assist) {
+        ball.strike(assist.dir, assist.power,
+          assist.lift != null ? assist.lift : P.through.lift);
+        this.faceStrike(Math.atan2(assist.dir.x, assist.dir.z));
+        this.kickCooldown = P.kickCooldown;
+        this.playStrike(kind === 'lob' ? 'cross' : 'through');
+        return;
+      }
       const fw = this.applyFootwork(curl, ball);
       const power = P.through.powerMin + (P.through.powerMax - P.through.powerMin) * (charge / 0.45);
       ball.strike(dir, power * fw.powerF, P.through.lift, curl * 0.5 * fw.curlF);
@@ -3450,6 +3580,93 @@ export class Player {
     });
   }
 
+  // ===== ИГРА В КАСАНИЕ (правило с 28.07.2026) =====
+  //
+  // Просьба Олега: «надо добавить возможность делать пас с лёта — чтобы, не
+  // принимая мяч, отдавать его в касание».
+  //
+  // ЦЕНА КАСАНИЯ — ТОЧНОСТЬ, А НЕ СИЛА, и это не вкус, а прямая формулировка
+  // EA для FC 26: «точность паса в касание снижена, несмотря на возросшую
+  // отзывчивость», при том что анимации там наоборот ускорены. Если резать
+  // силу, механика теряет смысл — быстрота и есть её награда. Если не резать
+  // НИЧЕГО, игра скатывается в ping-pong (главная претензия к FC 25).
+  //
+  // Главный рычаг — ПОМОЩЬ ПРИЦЕЛА (assistK): в касание игра доворачивает мяч
+  // на партнёра вдвое слабее. Второй — шум, и он растёт с ситуацией: чем
+  // быстрее мяч относительно игрока, чем круче разворот и чем ближе опекун,
+  // тем кривее выходит передача.
+  firstTimeCost(ball, dirX, dirZ) {
+    const FT = CONFIG.player.firstTime;
+    const rel = Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z);
+    let deg = FT.noiseDeg + FT.relSpeedAdd * Math.min(1, rel / FT.relSpeedRef);
+    // Разворот: пас на 180° от взгляда исполняется вслепую
+    const cosT = Math.max(-1, Math.min(1, dirX * this.facing.x + dirZ * this.facing.z));
+    deg += FT.angleAdd * (1 - cosT) / 2;
+    // Опекун вплотную
+    if (this.team && this.team.opponents) {
+      const pos = this.group.position;
+      let dOpp = Infinity;
+      for (const o of this.team.opponents) {
+        if (o.isKeeper) continue;
+        const op = o.group.position;
+        dOpp = Math.min(dOpp, Math.hypot(op.x - pos.x, op.z - pos.z));
+      }
+      deg += FT.pressAdd * Math.max(0, 1 - dOpp / FT.pressRange);
+    }
+    // Навык игрока: «один и тот же инпут в ногах плеймейкера и в ногах
+    // центрального защитника даёт разный результат» — это и есть характер
+    // состава, и стоит он одну строчку в JSON
+    const skill = this.look && this.look.touch != null ? this.look.touch : 0.5;
+    deg *= Math.max(0.4, 1 - 0.7 * (skill - 0.5) * 2);
+    return { assistK: FT.assistK, noise: (deg * Math.PI) / 180, powerK: FT.powerK };
+  }
+
+  // Повернуть направление на случайный угол в пределах noise (радианы)
+  _scatter(dir, noise) {
+    if (!(noise > 0)) return dir;
+    const a = (Math.random() - 0.5) * 2 * noise;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    return new THREE.Vector3(dir.x * ca - dir.z * sa, 0, dir.x * sa + dir.z * ca);
+  }
+
+  // Куда уйдёт мяч, отданный В КАСАНИЕ с лёта. Тот же ассист, что у обычного
+  // паса, но с урезанной помощью и добавленным шумом.
+  solveFirstTimePass(as, ball) {
+    const P = CONFIG.player;
+    const lob = as.passKind === 'through' && as.passCombo;
+    const kind = lob ? 'lob' : as.passKind;
+    const cfg = as.passKind === 'pass' ? P.pass : P.through;
+    const charge = as.charge != null ? as.charge : 0.6;
+    const power = cfg.powerMin + (cfg.powerMax - cfg.powerMin) * Math.min(1.3, charge);
+    let aimDir = null;
+    if (as.passAim) aimDir = new THREE.Vector3(as.passAim.x, 0, as.passAim.z);
+    const raw = aimDir || new THREE.Vector3(this.facing.x, 0, this.facing.z);
+    const assist = this.passAssist
+      ? this.passAssist(this, kind, power, aimDir, { charge })
+      : null;
+    const cost = this.firstTimeCost(ball, raw.x, raw.z);
+    let dir = raw.clone();
+    let pow = power;
+    let lift = cfg.lift;
+    if (assist) {
+      // ПОМОЩЬ УРЕЗАНА: направление лишь ЧАСТИЧНО доворачивается на адресата,
+      // остальное остаётся тем, что нарисовал человек. Это главный
+      // предохранитель от ping-pong: касание перестаёт быть бесплатно точным
+      dir = raw.clone().lerp(assist.dir, cost.assistK).normalize();
+      pow = power + (assist.power - power) * cost.assistK;
+      if (assist.lift != null) lift = cfg.lift + (assist.lift - cfg.lift) * cost.assistK;
+    }
+    dir = this._scatter(dir, cost.noise);
+    pow *= cost.powerK;
+    // Импульс приходящего мяча складывается с ударом — в касание мяч всегда
+    // уходит живее, чем с места. Это и есть награда за темп
+    const inc = Math.hypot(ball.vel.x, ball.vel.z);
+    pow += inc * CONFIG.player.aerial.oneTouchMomentum;
+    this.lastStrikeStyle = as.styleName;
+    return { vel: new THREE.Vector3(dir.x * pow, lift, dir.z * pow) };
+  }
+
   // ===== Замыкание в ОДНО КАСАНИЕ (PES 6, фидбек Олега 23–24.07.2026) =====
   // Мяч НЕ замирает у игрока (это и создавало «зависание»): замах начинается,
   // пока мяч подлетает, а перенаправление в ворота — в момент реального
@@ -3465,6 +3682,10 @@ export class Player {
     const A = CONFIG.player.aerial;
     const SY = A.sync;
     const charge = s.type === 'swipe' ? Math.min(s.v.power, 1.3) : s.v;
+    // ПАС С ЛЁТА — тот же механизм замыкания, только в кадре контакта мяч
+    // уходит не в ворота, а партнёру. Один и тот же синхрон (кадр контакта
+    // клипа = миг встречи с мячом) обслуживает и удар, и передачу
+    const passKind = (s.type === 'pass' || s.type === 'through') ? s.type : null;
 
     // Где и когда мяч реально встретится с игроком
     const hit = this.predictAerialContact(ball, A.readHorizon);
@@ -3476,7 +3697,10 @@ export class Player {
     // не на земле, игрок стоит СПИНОЙ к воротам (развернуться уже некогда) и до
     // встречи есть время на замах. Клип несёт и полёт тела, и падение на спину,
     // и подъём — поэтому искусственный выпрыг ему не нужен вовсе.
-    const styleName = this.aerialStyle(hit);
+    // ПАС В КАСАНИЕ АКРОБАТИКОЙ НЕ ИГРАЕТСЯ. Удар через себя и ножницы — это
+    // завершение, а не передача: через себя партнёру не отдают
+    const styleName = passKind ? (hit.y >= A.headerY ? 'header' : 'volley')
+      : this.aerialStyle(hit);
 
     let gesture = null;
     if (s.type === 'swipe') {
@@ -3485,7 +3709,9 @@ export class Player {
     }
     // Куда бьём — туда за время замаха и разворачивается корпус
     let aimRot = null;
-    if (gesture) {
+    if (passKind && s.aim) {
+      aimRot = Math.atan2(s.aim.x, s.aim.z);
+    } else if (gesture) {
       aimRot = Math.atan2(gesture.dir.x, gesture.dir.z);
     } else if (this.team) {
       aimRot = Math.atan2(this.team.attackGoalX - hit.x, -hit.z);
@@ -3494,6 +3720,9 @@ export class Player {
     this.aerialStrike = {
       styleName,
       charge,
+      passKind,
+      passAim: s.aim || null,
+      passCombo: !!s.combo,
       gesture,
       input,      // сохраняем ввод: прицел стрелками читается в момент контакта
       aimRot,
@@ -3781,7 +4010,15 @@ export class Player {
     // Перенаправляем мяч в ворота из ТОЧКИ КОНТАКТА (одно касание). Скорость
     // приходящего мяча уже вложена в силу (oneTouchMomentum). AI использует
     // заранее посчитанный вектор, человек пересчитывает удар из текущей позиции.
-    if (as.aiVel) {
+    if (as.passKind) {
+      // ПАС В КАСАНИЕ. Прицел берётся тем же решателем, что у обычного паса,
+      // а цена платится ТОЧНОСТЬЮ, не силой: «точность паса в касание снижена,
+      // несмотря на возросшую отзывчивость» (EA FC 26). Скорость мяча не режем
+      // вовсе — быстрота и есть награда, ради которой в касание и играют
+      const r = this.solveFirstTimePass(as, ball);
+      ball.vel.copy(r.vel);
+      ball.spin = 0;
+    } else if (as.aiVel) {
       ball.vel.copy(as.aiVel);
       ball.spin = as.aiSpin || 0;
     } else {
@@ -4085,35 +4322,9 @@ export class Player {
   // промахивались мимо адресата на 0.8–2.0 м (замер 24.07): на своей половине
   // мягкий заброс «улетал не туда», и партнёр бежал не к тому месту.
   solveLoftPower(dist, theta, targetH, lo, hi) {
-    const B = CONFIG.ball;
-    const fly = (power) => {
-      let x = 0;
-      let y = CONFIG.ball.radius;
-      let vx = power;
-      let vy = power * Math.tan(theta);
-      const dt = 1 / 120;
-      for (let t = 0; t < 6; t += dt) {
-        vy += B.gravity * dt;
-        const sp = Math.hypot(vx, vy);
-        if (sp > 0.01) {
-          const k = Math.min(B.dragK * sp * dt, 0.5);
-          vx *= 1 - k;
-          vy *= 1 - k;
-        }
-        x += vx * dt;
-        y += vy * dt;
-        if (vy < 0 && y <= targetH) return x;
-        if (y < 0) return x;
-      }
-      return x;
-    };
-    let a = lo;
-    let b = hi;
-    for (let i = 0; i < 26; i++) {
-      const mid = (a + b) / 2;
-      if (fly(mid) < dist) a = mid; else b = mid;
-    }
-    return (a + b) / 2;
+    // Считает общий loftPower из steering.js: ту же калибровку зовёт решатель
+    // паса в зону, и двух копий двоичного поиска в проекте быть не должно
+    return loftPower(dist, theta, targetH, lo, hi);
   }
 
   // Достанет ли слайд мяч вообще: путь корпуса до точки прицела (минус вынос
@@ -4421,11 +4632,21 @@ export class Player {
     const cz = pos.z + f.z * T.bodyAhead;
     const cy = Math.max(T.bodyLowY, Math.min(T.bodyTopY, bp.y));
     const horiz = Math.hypot(bp.x - cx, bp.z - cz);
+    // ЧАСТЬ ТЕЛА — по высоте контакта. До 28.07.2026 её здесь не было вовсе:
+    // точка возвращалась безымянной, и потребитель физически не мог отличить
+    // приём грудью от приёма стопой. Пороги масштабируются ростом фигуры
+    // (у нас 1.07…1.24 от базовых 1.80), иначе у высокого игрока грудь
+    // оказывалась бы там, где у низкого голова
+    const k = this.model ? Math.max(0.8, Math.min(1.3, this.tall || 1)) : 1;
+    const parts = T.parts;
+    const part = cy <= parts.foot.maxY * k ? 'foot'
+      : cy <= parts.thigh.maxY * k ? 'thigh'
+        : cy <= parts.chest.maxY * k ? 'chest' : 'head';
     // Касание = мяч над корпусом по горизонтали И в пределах роста. Мерить
     // одним 3D-радиусом нельзя: мяч в 40 см НАД ГОЛОВОЙ попадал в сферу и
     // «принимался» (замер 24.07) — рост считаем отдельной проверкой
     return {
-      x: cx, y: cy, z: cz, horiz,
+      x: cx, y: cy, z: cz, horiz, part,
       dist: Math.hypot(bp.x - cx, bp.y - cy, bp.z - cz),
       reachable: horiz < T.contactRadius &&
         bp.y <= T.bodyTopY && bp.y >= T.bodyLowY - T.underFoot,
@@ -4437,10 +4658,26 @@ export class Player {
   // 23.07) — вместо них короткий подсед корпуса: видно, что мяч приняли.
   // Раньше мяч менял направление в метре от груди и мог улететь назад в
   // пасующего на 3.4 м/с — это и читалось как «отскок от дерева».
-  trapBall(ball, contact = null) {
+  // НАПРАВЛЕННОЕ ПЕРВОЕ КАСАНИЕ (правило с 28.07.2026).
+  // Просьба Олега: «прокачать приём мяча — на грудь, на ногу; если при навесе
+  // резко менять сторону, игрок пробрасывает в эту сторону грудью мяч, когда
+  // принимает». До этой правки приём был ОДИН на любую высоту: от стопы (0.25)
+  // до лба (1.85) отличался ровно один множитель — скорость «вниз», — а
+  // намерение игрока в приём не попадало вовсе (сигнатура была (ball, contact)).
+  //
+  // Считаем ровно ту модель, которую EA описала для FC 26: трудность касания
+  // решают ОТНОСИТЕЛЬНАЯ скорость мяча, высота, ЗАПРОШЕННЫЙ УГОЛ ВЫХОДА,
+  // давление соперника, ЧАСТЬ ТЕЛА и навык игрока. Без ошибки приёма сильный
+  // заброс бесплатен, и матч превращается в спам передачами за спину — это
+  // главная и самая устойчивая претензия к самой FC 26.
+  //
+  // aim — куда игрок хочет увести мяч (стик человека / цель AI). Мягкий доворот
+  // кладёт мяч под ногу, разворот на 90°+ ПРОБРАСЫВАЕТ его в сторону.
+  trapBall(ball, contact = null, aim = null) {
     const T = CONFIG.player.trap;
     const bp = ball.mesh.position;
     const c = contact || this.bodyContactPoint(bp);
+    const part = T.parts[c.part] || T.parts.chest;
 
     // Мяч встаёт на точку касания (сдвиг ограничен — телепорта не видно)
     const dx = c.x - bp.x;
@@ -4459,23 +4696,100 @@ export class Player {
     const insp = Math.hypot(ball.vel.x, ball.vel.z);
     const ux = insp > 0.1 ? ball.vel.x / insp : this.facing.x;
     const uz = insp > 0.1 ? ball.vel.z / insp : this.facing.z;
-    let vx = ux * T.keepIn + this.vel.x * T.keepRun;
-    let vz = uz * T.keepIn + this.vel.z * T.keepRun;
+
+    // РЕЗКОСТЬ СМЕНЫ КУРСА. Не «есть стик / нет стика», а плавная шкала от угла:
+    // доворот на 20° — это подработка под ногу, разворот на 90° — уже проброс
+    const A = T.aim;
+    let k = 0;
+    let ax = 0;
+    let az = 0;
+    const al = aim ? Math.hypot(aim.x, aim.z) : 0;
+    if (al > A.dead) {
+      ax = aim.x / al;
+      az = aim.z / al;
+      const cosT = Math.max(-1, Math.min(1, ax * ux + az * uz));
+      const deg = (Math.acos(cosT) * 180) / Math.PI;
+      k = Math.max(0, Math.min(1, (deg - A.turnFrom) / (A.turnFull - A.turnFrom)));
+      k = k * k * (3 - 2 * k); // smoothstep: без ступеньки на пороге
+    }
+    const keep = 1 - k * (1 - A.keepK);
+    let vx = (ux * part.keepIn + this.vel.x * T.keepRun) * keep + ax * part.push * k;
+    let vz = (uz * part.keepIn + this.vel.z * T.keepRun) * keep + az * part.push * k;
+
+    // ОШИБКА ПЕРВОГО КАСАНИЯ — из ситуации, а не из кубика поверх всего.
+    // Скорость меряется ОТНОСИТЕЛЬНАЯ: бегущему навстречу мяч приходит жёстче
+    const E = T.err;
+    const rel = Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z);
+    let press = 0;
+    if (this.team && this.team.opponents) {
+      let dOpp = Infinity;
+      const pos = this.group.position;
+      for (const o of this.team.opponents) {
+        if (o.isKeeper) continue;
+        const op = o.group.position;
+        dOpp = Math.min(dOpp, Math.hypot(op.x - pos.x, op.z - pos.z));
+      }
+      press = Math.max(0, 1 - dOpp / E.pressRange);
+    }
+    const skill = this.look && this.look.touch != null ? this.look.touch : 0.5;
+    let err = (E.base +
+      E.relAdd * Math.min(1, rel / E.relRef) +
+      E.turnAdd * k +
+      E.pressAdd * press) * part.err;
+    err *= Math.max(0.35, 1 - E.skillK * (skill - 0.5) * 2);
+    err = Math.min(E.maxOut, err);
+    // ОШИБКА — ЭТО УВОД ВБОК, А НЕ РАЗВОРОТ НАЗАД. Первая редакция бросала её
+    // равномерно по кругу, и замер сразу это поймал: мяч сходит с корпуса на
+    // 0.7–1.1 м/с (keepIn), а разброс доходил до 1.6–2.3 м/с — то есть ошибка
+    // была БОЛЬШЕ самого схода и разворачивала мяч НА 180°, обратно в
+    // пасующего. Ровно этот дефект проект уже чинил 24.07.2026 («мяч
+    // буквально отлетал назад в пасующего из пустоты»), и вернуть его через
+    // чёрный ход было бы обидно. Поперечная составляющая полная, продольная —
+    // половинная, и итог не имеет права пойти назад: плохой приём отпускает
+    // мяч в сторону и вперёд, а не отбивает его обратно
+    const bl = Math.hypot(vx, vz);
+    const bx = bl > 0.01 ? vx / bl : ux;
+    const bz = bl > 0.01 ? vz / bl : uz;
+    const lat = (Math.random() * 2 - 1) * err;
+    const lon = (Math.random() * 2 - 1) * err * 0.5;
+    vx += -bz * lat + bx * lon;
+    vz += bx * lat + bz * lon;
+    const along = vx * bx + vz * bz;
+    if (along < 0) { vx -= bx * along; vz -= bz * along; } // назад — не приём, а отскок
+
     const sp = Math.hypot(vx, vz);
-    if (sp > T.maxOut) {
-      vx = (vx / sp) * T.maxOut;
-      vz = (vz / sp) * T.maxOut;
+    if (sp > part.out) {
+      vx = (vx / sp) * part.out;
+      vz = (vz / sp) * part.out;
     }
     // Вниз — тем сильнее, чем выше приняли: мяч у самой земли не вколачиваем
-    const drop = T.dropSpeed *
+    const drop = T.dropSpeed * part.drop *
       Math.max(0.2, Math.min(1, (c.y - T.bodyLowY) / (T.dropRefY - T.bodyLowY)));
     ball.vel.set(vx, -drop, vz);
     ball.spin = 0;
     ball.afterTouch = 0;
     this.kickCooldown = T.settle; // мяч опускается — нога ждёт
     this.trapCushion = T.cushionTime; // корпус «мягкий»: видно, что приняли
+    this.trapTilt = part.tilt;        // …и «мягкость» своя у каждой части тела
+    this.lastTrapPart = c.part;
     this.ownEpisodeT = CONFIG.player.approach.episodeGrace;
     this.cancelBallApproach();
+    // ПРОБРОС ЧИТАЕТСЯ КОРПУСОМ. Мяч уходит в сторону — туда же доезжает и
+    // фигура: без этого проброс выглядел бы отскоком мяча от неподвижной
+    // спины, а не решением игрока
+    if (k > 0.25) this.faceStrike(Math.atan2(ax, az));
+    // Приём НОГОЙ играет свой клип. Он лежал в модели с самой пересборки и не
+    // проигрывался НИ РАЗУ (grep 'receive' по src/ давал одну строку — список
+    // ONE_SHOT). Нам нужна не вся сцена из Mixamo, а её ОКНО: замер по риггу
+    // 28.07.2026 — с 0.90 стопа поднимается на 0.35 м и выносится на 0.65 м
+    // вперёд, к 1.55 опускается обратно. Груди и голове клипа нет — там всю
+    // работу делает подсед корпуса, и это осознанно: приём должен оставаться
+    // «привязанным к месту» (просьба Олега 23.07), без прыжков и подскоков
+    const CL = T.clip;
+    if (c.part === 'foot' && c.y <= CL.maxY && this.actions && this.actions.receive &&
+        !this.oneShot) {
+      this.playOneShot('receive', CL.rate, CL.from, CL.end);
+    }
   }
 
   // Верховой мяч у AI: сыграть в ОДНО КАСАНИЕ — вынос, скидка или кивок в
