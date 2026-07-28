@@ -119,34 +119,8 @@ const _poseQuat = new THREE.Quaternion();
 const _leanEuler = new THREE.Euler();
 const _leanQuat = new THREE.Quaternion();
 const _leanAxis = new THREE.Vector3();
-const _leanProbe = new THREE.Quaternion();
-const _leanVec = new THREE.Vector3();
+const _leanParent = new THREE.Quaternion();
 
-// Ось «поднять руку» у плеча. Не угадываем: у костей Mixamo оси повёрнуты.
-// Крутим плечо по каждой оси и смотрим, какая поднимает кисть в мире.
-// Тот же приём, что в src/celebration.js и в probeSpread из src/anim.js.
-function probeArmRaise(model, side) {
-  const arm = model.getObjectByName(`mixamorig${side}Arm`);
-  const hand = model.getObjectByName(`mixamorig${side}Hand`);
-  if (!arm || !hand) return null;
-  model.updateMatrixWorld(true);
-  const base = _leanVec.setFromMatrixPosition(hand.matrixWorld).y;
-  const pose = arm.quaternion.clone();
-  let best = null;
-  for (let a = 0; a < 3; a++) {
-    for (let sg = 0; sg < 2; sg++) {
-      _leanAxis.set(a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0);
-      _leanProbe.setFromAxisAngle(_leanAxis, (sg ? -1 : 1) * 0.4);
-      arm.quaternion.copy(pose).multiply(_leanProbe);
-      model.updateMatrixWorld(true);
-      const gain = _leanVec.setFromMatrixPosition(hand.matrixWorld).y - base;
-      if (!best || gain > best.gain) best = { axis: a, sign: sg ? -1 : 1, gain };
-    }
-  }
-  arm.quaternion.copy(pose);
-  model.updateMatrixWorld(true);
-  return best && best.gain > 0.02 ? best : null;
-}
 
 // Куда игроки смотрят головой. Мяч — один на всех, и его вектор позиции живой
 // (мутируется на месте), поэтому достаточно отдать его СЮДА один раз при сборке
@@ -360,6 +334,15 @@ export class Player {
     this.attachGloves();
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
+
+    // Поза покоя рук: снимаем ДО создания микшера, пока кости стоят в bind pose.
+    // Из неё слой «корпус в ударе» считает размах маха (см. _ampArms).
+    this._armRest = {};
+    for (const n of ['mixamorigLeftArm', 'mixamorigRightArm',
+      'mixamorigLeftForeArm', 'mixamorigRightForeArm']) {
+      const b = this.model.getObjectByName(n);
+      if (b) this._armRest[n] = b.quaternion.clone();
+    }
 
     this.mixer = new THREE.AnimationMixer(this.model);
     for (const clip of gltf.animations) {
@@ -961,24 +944,58 @@ export class Player {
       _leanQuat.setFromEuler(_leanEuler);
       b.quaternion.multiply(_leanQuat);
     }
-    // Мах ПРОТИВОПОЛОЖНОЙ рукой — противовес, без которого удар читается
-    // «руки по швам». Ось подъёма ищем пробой: у костей Mixamo она повёрнута.
+    // МАХ РУКАМИ — ВПЕРЁД И НАЗАД, А НЕ ВВЕРХ.
+    //
+    // Первая редакция поднимала кисть ВВЕРХ тем же приёмом, что празднование
+    // гола (`raiseArms` ищет ось, которая поднимает кисть). Для радости это
+    // верно, для удара — нет: в ударе рука выносится ВПЕРЁД как противовес.
+    // Ось замерена дважды, в Blender на кадрах бега и на живом риге:
+    // premultiply по ЛОКАЛЬНОЙ Y кости Arm, знак −1 у левой и +1 у правой —
+    // на 31.5° кисть уходит на +0.193 м вперёд при отдаче вбок 0.005 м.
+    //
+    // И рук ДВЕ. Одна работающая рука при прямом локте — это ровно тот силуэт
+    // «культи», который в правилах проекта уже описан для бега. Противоположная
+    // бьющей ноге идёт вперёд, одноимённая — назад, как при ходьбе.
     if (Math.abs(this._leanA) > 1e-3) {
       const foot = (this._leanWant && this._leanWant.foot) || 'R';
-      const side = foot === 'R' ? 'Left' : 'Right';
-      if (!this._armAxis) this._armAxis = {};
-      if (this._armAxis[side] === undefined) {
-        this._armAxis[side] = probeArmRaise(this.model, side);
-      }
-      const ax = this._armAxis[side];
-      const bone = this.model.getObjectByName(`mixamorig${side}Arm`);
-      if (ax && bone) {
-        _leanAxis.set(ax.axis === 0 ? 1 : 0, ax.axis === 1 ? 1 : 0, ax.axis === 2 ? 1 : 0);
-        _leanQuat.setFromAxisAngle(_leanAxis, ax.sign * this._leanA);
-        bone.quaternion.multiply(_leanQuat);
-      }
+      const lead = foot === 'R' ? 'Left' : 'Right';   // противоположная бьющей
+      const trail = foot === 'R' ? 'Right' : 'Left';
+      const A = CONFIG.player.anim.strikeLean;
+      // _leanA гуляет 0…armSwing; переводим в множитель размаха 1…armAmp
+      this._ampArms(1 + (this._leanA / Math.max(1e-3, A.armSwing)) * (A.armAmp - 1));
     }
   }
+
+  // УСИЛЕНИЕ МАХА РУК, а не поворот их «куда надо».
+  //
+  // Два захода в лоб провалились, и оба замером. (1) Подъём кисти вверх — это
+  // поза радости, а не удара. (2) Поворот вокруг боковой оси игрока: ось
+  // вычислена честно, но рука в разных клипах стоит по-разному, и один и тот же
+  // поворот уводил кисть то вперёд на 0.47 м, то ВБОК на 0.61 м, то назад.
+  // Общей «оси маха вперёд» у плеча просто нет — есть поза, из которой считать.
+  //
+  // Поэтому усиливаем то, что В КЛИПЕ УЖЕ ЕСТЬ: берём отклонение кости от позы
+  // покоя и множим его. Направление маха при этом остаётся авторским, меняется
+  // только размах — ровно тот приём, которым собрана лестница бега (см. `amp` в
+  // src/anim.js). И он бьёт точно в цель: замер размаха плеча по клипам дал
+  // kick 10.7°, kick_r 16.6° против kick_run 115.1° и penalty 80.0° — то есть
+  // слабы ровно те клипы, которыми играются пас и удар с места.
+  _ampArms(k) {
+    if (!this._armRest) return;
+    for (const name in this._armRest) {
+      const bone = this.model.getObjectByName(name);
+      if (!bone) continue;
+      _leanQuat.copy(this._armRest[name]).invert().multiply(bone.quaternion);
+      // Угол отклонения от покоя; за потолок не выходим — вывернутая рука
+      // читается поломкой, а не силой
+      const ang = 2 * Math.acos(Math.min(1, Math.abs(_leanQuat.w)));
+      const A = CONFIG.player.anim.strikeLean;
+      const lim = ang > 1e-4 ? Math.min(k, 1 + (A.armMaxAdd / ang)) : 1;
+      _leanParent.set(0, 0, 0, 1).slerp(_leanQuat, lim);
+      bone.quaternion.copy(this._armRest[name]).multiply(_leanParent);
+    }
+  }
+
 
   _applyBone(bone, yaw, pitch, roll = 0) {
     if (!bone) return;
@@ -1740,6 +1757,16 @@ export class Player {
     if (typeof anim === 'string') this.playStrike(anim);
     else if (anim) this.playOneShot(anim.name, anim.ts, anim.at, anim.end);
     else this.playStrike('pass');
+    // КОРПУС В УДАРЕ — И У AI ТОЖЕ. Первая редакция слоя вешалась только на
+    // человеческие ветки (shoot и doCross), а через aiKick идут ВСЕ касания
+    // двадцати одного компьютерного игрока — то есть почти всё, что зритель
+    // видит в матче. Один вызов здесь закрывает их пасы, навесы и удары разом.
+    this.setStrikeLean({
+      clip: this.currentName,
+      lift,
+      power: Math.min(1, power / CONFIG.shot.powerMax),
+      foot,
+    });
   }
 
   update(dt, input, ball) {
