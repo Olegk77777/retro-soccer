@@ -50,6 +50,9 @@ function gkState(p) {
       rushing: false,  // выход 1в1
       shotLive: false, // удар в створ прямо сейчас (для позиции «в стойке»)
       retreating: false, // пятимся к линии: мяч перелетает
+      collecting: false, // идём НАВСТРЕЧУ медленному мячу — забрать в руки
+      collectSeq: -1,    // ball.seq, на который уже решено «иду забирать»
+      collectOn: false,  // …и само решение (мигать им нельзя, см. tryCollect)
       orderT: 0,       // остаток приказа человека «на выход» (W / Y)
     };
   }
@@ -327,7 +330,10 @@ function catchBall(p, ball, match) {
   p.ai.holdAge = 0;
   p.ai.act = null;
   p.ai.dropkickStarted = false;
-  p.rot = Math.atan2(p.team.side, 0);
+  // Развернуться лицом в поле — ДОЕХАТЬ, а не щёлкнуть. Замер по матчу: голое
+  // присваивание давало до 141° за кадр при потолке игры 10.5°/кадр — та же
+  // «телепортация», из-за которой удары перевели на faceStrike.
+  p.faceStrike(Math.atan2(p.team.side, 0));
   p.holdBallInHands(ball, K.holdY);
   match.lastTouch = p;
 }
@@ -390,6 +396,7 @@ export function updateKeeper(p, dt, ball) {
   // раньше его считали в четырёх местах и в двух ветках (лежим, бросок)
   // не считали вовсе, и кипер там доворачивался по вектору скорости
   const faceBall = Math.atan2(bp.x - pos.x, bp.z - pos.z);
+  gk.collecting = false;
 
   // Лежим после броска — только встаём (кадр отдан анимации подъёма)
   if (p.downT > 0) {
@@ -445,6 +452,14 @@ export function updateKeeper(p, dt, ball) {
   gk.shotLive = !!shot;
 
   if (shot && gk.reactLeft <= 0) {
+    // ---- Медленный мяч НЕ ОТБИВАЮТ, ЕГО ЗАБИРАЮТ (правило с 28.07.2026) ----
+    // Просьба Олега прямым текстом: «еле катящиеся мячи издалека — тут его надо
+    // просто брать в руки». Живой вратарь на такой мяч ВЫХОДИТ и накрывает его
+    // в нескольких метрах перед линией, а не ждёт на ленточке, пока мяч
+    // допрыгает. Условия узкие: мяч тихий, низкий, точка встречи в своей
+    // штрафной (руками играть можно только там) и никто из соперников к ней
+    // не поспевает — иначе это не выход, а подарок на пустые ворота.
+    if (tryCollect(p, dt, ball, match, gk, K, shot, faceBall)) return;
     const act = decideSave(p, ball, gk, shot, K, G);
     if (act === 'dive') return;               // бросок пошёл, кадр закрыт
     if (act && act.retreat) {
@@ -472,10 +487,13 @@ export function updateKeeper(p, dt, ball) {
       // кипер полторы лишние секунды полз к своей точке на 2.6 м/с вместо 4.6.
       // Пока до точки далеко, идём полным ходом; мельчить шаги начинаем, уже
       // стоя на месте (то же правило recoverGap, что в ветке «дом»).
+      // …и на МЕДЛЕННЫЙ мяч стойка тоже не нужна: пока он ползёт, кипер
+      // спокойно переходит на его линию нормальным приставным ходом. Стойка
+      // готовности нужна против ПУШКИ, где решают сантиметры и рефлекс.
       const far = Math.hypot(home.x - pos.x, act.step - pos.z) > K.recoverGap;
       p.aiUpdate(dt, mv, {
         face: faceBall, faceLock: true,
-        speedCap: far ? K.stepSpeed : K.setSpeed,
+        speedCap: far || shot.speed < K.collectSpeed ? K.stepSpeed : K.setSpeed,
       });
       return;
     }
@@ -556,7 +574,6 @@ function readShot(p, ball, gk, dt, match, K, G) {
     const sigma = (K.readNoise + K.readNoiseSpeed * cross.speed) * closeK;
     gk.readErrZ = gauss() * sigma;
     gk.readErrY = gauss() * sigma * 0.45;
-    gk.setZ = p.group.position.z; // откуда кипер стартует под ЭТОТ удар
   }
   if (gk.reactLeft > 0) gk.reactLeft -= dt;
 
@@ -592,16 +609,26 @@ function decideSave(p, ball, gk, shot, K, G) {
   const pos = p.group.position;
   const dz = shot.z - pos.z;
   const need = Math.abs(dz);
-  // Переступать можно лишь чуть-чуть от точки, где кипер стоял в момент
-  // удара: бросок идёт ИЗ СТОЙКИ, а не после полутора метров разбега.
-  // Но «чуть-чуть» — это БЮДЖЕТ ПО ВРЕМЕНИ, а не фиксированные полметра:
-  // ограничение писалось под удар в упор, а применялось и к мячу, летящему
-  // полторы секунды. С 30 м вратарь честно успевает пройти 2.5 м, и без этого
-  // почти треть дальних мячей уходила в ветку «безнадёжно, не бросаюсь»
-  const base = gk.setZ != null ? gk.setZ : pos.z;
+  // Переступать можно лишь столько, сколько успеваешь ЗА ОСТАВШЕЕСЯ ВРЕМЯ:
+  // бросок идёт ИЗ СТОЙКИ, а не после полутора метров разбега. Но «чуть-чуть» —
+  // это БЮДЖЕТ ПО ВРЕМЕНИ, а не фиксированные полметра: ограничение писалось
+  // под удар в упор, а применялось и к мячу, летящему полторы секунды.
+  //
+  // ЯКОРЬ БЮДЖЕТА — ТЕКУЩАЯ ПОЗИЦИЯ, А НЕ ПОЗИЦИЯ В МОМЕНТ УДАРА (правило с
+  // 28.07.2026). Прежняя редакция откладывала бюджет от `gk.setZ`, то есть от
+  // точки, где кипер стоял, когда по мячу ударили. Радиус при этом СЖИМАЕТСЯ
+  // (`shot.t` тает с каждым кадром), и кипер, честно прошедший часть пути,
+  // получал цель ПОЗАДИ СЕБЯ и разворачивался ОТ мяча. Замер (мяч с 38 м,
+  // приход 3 м/с, точка на 1.8 по створу): кипер дошёл до z = 0.79, бюджет
+  // ужался до setStepMax = 0.55 — и он поехал обратно 0.79 → 0.75 → 0.68 →
+  // 0.62, после чего объявил оставшиеся 1.1 м «броском» и упал за 0.09 с до
+  // мяча. Ровно жалоба «пытается прыгать и проигрывает тайминг». От текущей
+  // позиции цель всегда ЛЕЖИТ МЕЖДУ вратарём и мячом и назад не уводит,
+  // а физика «дальше, чем успею» соблюдается сама: за t секунд не пройти
+  // больше, чем v·t, сколько кадров ни считай.
   const budget = Math.max(K.setStepMax, K.setSpeed * Math.max(0, shot.t - K.react));
   const step = {
-    step: Math.max(base - budget, Math.min(base + budget, shot.z)),
+    step: Math.max(pos.z - budget, Math.min(pos.z + budget, shot.z)),
   };
 
   // Верховой мяч съедает боковую дальность: тянуться вверх и вбок
@@ -657,6 +684,14 @@ function decideSave(p, ball, gk, shot, K, G) {
   const stepSpan = Math.min(stepRoom, K.setSpeed * Math.max(0, shot.t - 0.05));
   if (need <= stepSpan + K.standReach * 0.5) return step;
 
+  // ЗА МЕДЛЕННЫМ МЯЧОМ НЕ ПРЫГАЮТ (правило с 28.07.2026). Отдельный
+  // предохранитель поверх расчёта шага: пока мяч ползёт, у вратаря есть время
+  // ДОЙТИ, а бросок его только тратит — 0.55 с полёта плюс 0.8 с подъёма, и
+  // всё это лёжа мимо мяча. Считаем по полному приставному ходу (stepSpeed):
+  // на тихий мяч кипер и правда идёт нормально, а не «в стойке».
+  if (shot.speed < K.collectSpeed &&
+      need <= K.handReach + K.stepSpeed * Math.max(0, shot.t - K.react)) return step;
+
   const spanFull = K.diveSpeed * K.diveTime * highK;
   const travel = Math.max(0, need - K.handReach);
   const tTravel = travel / Math.max(0.5, K.diveSpeed * highK);
@@ -692,6 +727,75 @@ function decideSave(p, ball, gk, shot, K, G) {
   });
   gk.diving = true;
   return 'dive';
+}
+
+// ВЫХОД ЗА МЕДЛЕННЫМ МЯЧОМ (правило с 28.07.2026, фидбек Олега «еле катящиеся
+// мячи издалека… тут его надо просто брать в руки»).
+//
+// Что было. Тихий мяч, идущий в створ, проходил у вратаря по общей ветке удара:
+// он ждал его «в стойке» на дуге, а в последний миг объявлял оставшийся метр
+// броском и падал мимо. Замер на стенде (мячи 3–8 м/с с 22–38 м): 11 голов из
+// 27, и во ВСЕХ бросок стартовал за 0.5–1.7 с до прихода мяча — то есть кипер
+// ложился на газон задолго до него.
+//
+// Что стало. Медленный низкий мяч — это не удар, а МЯЧ, КОТОРЫЙ ЗАБИРАЮТ.
+// Кипер идёт НАВСТРЕЧУ и накрывает его в нескольких метрах перед линией: чем
+// раньше мяч в руках, тем меньше поводов для рикошета и добивания. Условия
+// узкие нарочно (тот же принцип, что у выхода на подачу): точка встречи — в
+// СВОЕЙ штрафной, иначе руками играть нельзя, и ни один соперник к ней не
+// поспевает. Решение пересматривается каждый кадр само: изменилась траектория
+// (рикошет, подрезка) — `readShot` перестаёт отдавать удар, и ветка гаснет.
+function tryCollect(p, dt, ball, match, gk, K, shot, faceBall) {
+  const team = p.team;
+  const pos = p.group.position;
+  const bp = ball.mesh.position;
+  const goalX = team.ownGoalX;
+  const seq = ball.seq || 0;
+  // РЕШЕНИЕ ДЕРЖИТСЯ, ТОЧКА ПЕРЕСЧИТЫВАЕТСЯ — та же развилка, что у выхода на
+  // подачу, и здесь она стоила голов. Мяч тормозится о газон, поэтому его
+  // скорость ползёт мимо порога туда-обратно: замер дал «своя sp» 8.9 / 9.1 /
+  // 8.9 при пороге 9.0, ветка мигала, и кипер вместо выхода топтался на месте,
+  // а мяч забирал уже на ленточке (2 гола из 27 ровно на этом). Сказал «иду» —
+  // идёт до конца; отменяет выход только смена траектории (рикошет тикает
+  // ball.seq) или сам факт, что мяч больше не идёт в створ.
+  const committed = gk.collectSeq === seq && gk.collectOn;
+  if (!committed && (shot.speed > K.collectSpeed || bp.y > K.collectMaxY)) return false;
+
+  // Самая ранняя точка траектории, до которой кипер успевает с запасом
+  let best = null;
+  flightPath(ball, (x, y, z, t) => {
+    if (y > K.collectMaxY) return false;
+    if (!inOwnBox(team, x, z)) return false;          // руками — только в штрафной
+    if (Math.abs(x - goalX) > K.collectRange) return false;
+    const d = Math.hypot(x - pos.x, z - pos.z);
+    if (d / K.lungeSpeed + K.collectOwnLead > t) return false;
+    best = { x, z, t, d };
+    return true;
+  }, K.readHorizon);
+  if (!best) { if (!committed) gk.collectOn = false; return false; }
+
+  if (!committed) {
+    const oppSpeed = CONFIG.player.speed * CONFIG.player.sprintFactor;
+    const mine = best.d / K.lungeSpeed;
+    for (const o of match.otherTeam(team).players) {
+      const op = o.group.position;
+      if (Math.hypot(op.x - best.x, op.z - best.z) / oppSpeed < mine + K.collectLead) {
+        gk.collectOn = false;
+        return false;
+      }
+    }
+    gk.collectSeq = seq;
+    gk.collectOn = true;
+  }
+
+  const mv = seek(pos.x, pos.z, best.x, best.z);
+  p.aiUpdate(dt, mv, {
+    face: faceBall,
+    faceLock: true,
+    speedCap: K.lungeSpeed,
+  });
+  gk.collecting = true;
+  return true;
 }
 
 // ВЫХОД НА ПОДАЧУ — ПОЛНАЯ ПЕРЕРАБОТКА 28.07.2026 («он вообще не играет на

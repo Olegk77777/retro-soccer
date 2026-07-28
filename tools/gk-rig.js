@@ -349,6 +349,139 @@ function updateOne(match, keeper, ball, dt) {
   if (window.DBG.goals) window.DBG.goals.update(dt);
 }
 
+// ===== 2б. МЕДЛЕННЫЙ МЯЧ ИЗДАЛЕКА: берёт ли в руки =====
+// Жалоба Олега 28.07.2026: «пропускает еле катящиеся мячи, если они летят
+// издалека или рикошетятся издалека — пытается прыгать за ними и проигрывает
+// тайминг, хотя тут его надо просто брать в руки».
+//
+// Стенд бьёт с разных дистанций так, чтобы мяч ПРИШЁЛ НА ЛИНИЮ с заданной
+// (маленькой) скоростью — прицел по РЕЗУЛЬТАТУ, как в lobTest: «удар с 22 м» и
+// «удар с 38 м» одинаковой начальной силы дают на линии совершенно разные мячи,
+// и без подбора таблица ничего не значит.
+//
+// ЭТАЛОН (28.07.2026): до правки — 11 голов из 27, бросок ВСЕГДА за 0.5…1.7 с
+// до прихода мяча. После — 0 из 27, действие «шаг» или «выход».
+export function rollTest(opts = {}) {
+  const { match, ball, CONFIG, goals } = window.DBG;
+  const B = CONFIG.ball;
+  const team = match.teams[1];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const dists = opts.dists || [22, 30, 38];
+  const speeds = opts.speeds || [3, 5, 8];   // м/с НА ЛИНИИ
+  const zs = opts.zs || [0.8, 1.8, 2.8];     // куда по створу
+  const rows = [];
+
+  // Мини-прогноз выхода на линию (нужен ДО того, как в кадре появится вратарь)
+  const plane = (d, v0, tz) => {
+    const dl = Math.hypot(d, tz) || 1;
+    let x = goalX - sign * d; let y = 0.16; let z = 0;
+    let vx = (sign * v0 * d) / dl; let vy = 0; let vz = (v0 * tz) / dl;
+    for (let t = 0; t < 8; t += FRAME) {
+      const air = y > B.radius + 0.001 || vy > 0;
+      if (air) {
+        vy += B.gravity * FRAME;
+        const s = Math.hypot(vx, vy, vz);
+        if (s > 0.01) { const c = Math.min(B.dragK * s * FRAME, 0.5); vx *= 1 - c; vy *= 1 - c; vz *= 1 - c; }
+      } else { const r = Math.pow(B.rollFriction, FRAME * 60); vx *= r; vz *= r; }
+      x += vx * FRAME; y += vy * FRAME; z += vz * FRAME;
+      if (y < B.radius) { y = B.radius; vy = Math.abs(vy) > 1.2 ? -vy * B.bounce : 0; }
+      if ((x - goalX) * sign >= 0) return { t, sp: Math.hypot(vx, vy, vz), y, z };
+      if (vx * sign <= 0.05) return null;
+    }
+    return null;
+  };
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const savedIntro = match.startIntro;
+  const savedReplay = match.startReplay;
+  const savedGoal = match.onGoal;
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+
+  try {
+    for (const d of dists) {
+      for (const want of speeds) {
+        for (const tz of zs) {
+          // Подбор начальной силы под нужную скорость ПРИХОДА
+          let lo = 5; let hi = 70;
+          for (let i = 0; i < 30; i += 1) {
+            const mid = (lo + hi) / 2;
+            const r = plane(d, mid, tz);
+            if (!r || r.sp < want) lo = mid; else hi = mid;
+          }
+          const v0 = (lo + hi) / 2;
+          const pre = plane(d, v0, tz);
+          if (!pre || Math.abs(pre.z) > CONFIG.goal.width / 2 - CONFIG.ball.radius) continue;
+
+          let goal = false;
+          match.onGoal = function () { goal = true; };
+          match.state = 'play';
+          k.reset();
+          k.group.position.set(goalX - sign * 1.2, 0, 0);
+          k.vel.set(0, 0, 0);
+          k.gk = null;
+          ball.reset();
+          ball.goalScored = false;
+          ball.mesh.position.set(goalX - sign * d, 0.16, 0);
+          // Вратарь сначала занимает свою точку на дуге; мяч на разбеге держит
+          // соперник, иначе кипер убежит его «подчищать» и замер поедет
+          const shooter = match.teams[0].fieldPlayers[0];
+          shooter.group.position.set(goalX - sign * d, 0, 0);
+          const savedToucher = match.toucher;
+          match.toucher = shooter;
+          ball.vel.set(0, 0, 0);
+          for (let w = 0; w < 120; w += 1) updateOne(match, k, ball, FRAME);
+          match.toucher = savedToucher;
+          ball.mesh.position.set(goalX - sign * d, 0.16, 0);
+          const standoff = Math.abs(k.group.position.x - goalX);
+          const dl = Math.hypot(d, tz) || 1;
+          ball.strike({ x: (sign * d) / dl, z: tz / dl }, v0, 0, 0);
+
+          let acted = 'стоял'; let diveLead = null; let res = null; let t = 0;
+          for (let i = 0; i < 700 && !goal; i += 1) {
+            updateOne(match, k, ball, FRAME);
+            t += FRAME;
+            if (k.diveT > 0 && diveLead == null) { acted = 'БРОСОК'; diveLead = +(pre.t - t).toFixed(2); }
+            else if (acted === 'стоял' && k.gk && k.gk.collecting) acted = 'выход';
+            else if (acted === 'стоял' && k.gk && k.gk.retreating) acted = 'пятился';
+            if (k.ai && k.ai.holding) { res = 'в руках'; break; }
+            if (!res && k.gk && k.gk.last) res = k.gk.last.outcome;
+            if (ball.goalScored) goal = true;
+            if (Math.abs(ball.mesh.position.x) > CONFIG.field.length / 2 + 3) break;
+          }
+          rows.push({
+            'дистанция, м': d,
+            'приход, м/с': +pre.sp.toFixed(1),
+            'по створу z': +pre.z.toFixed(1),
+            'стоял в, м': +standoff.toFixed(1),
+            итог: goal ? 'ГОЛ' : (res || 'жив'),
+            кипер: acted === 'стоял' && res ? 'шаг' : acted,
+            'бросок за, с': diveLead,
+          });
+        }
+      }
+    }
+  } finally {
+    match.startIntro = savedIntro;
+    match.startReplay = savedReplay;
+    match.onGoal = savedGoal;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  const g = rows.filter((r) => r.итог === 'ГОЛ').length;
+  const dives = rows.filter((r) => r['бросок за, с'] != null).length;
+  console.log(`ПРОПУЩЕНО ${g} из ${rows.length}; бросков ${dives}`);
+  window.GKROLL = rows;
+  return { rows, goals: g, dives };
+}
+
 // ===== 3. ОТБОЙ: куда уходит мяч и как падает вратарь =====
 // Отвечает на два вопроса Олега сразу: «честные ли отскоки» и «правильные ли
 // падения». Бьём в кипера с разных точек и по разной высоте и смотрим, КУДА

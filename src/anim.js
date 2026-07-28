@@ -350,6 +350,39 @@ function probeHipsAxis(mixer, rig, clip, toes, samples) {
   return best;
 }
 
+// ОБРАТНЫЙ КЛИП — ЭТО УДАР ПЯТКОЙ (правило с 28.07.2026).
+//
+// В паке Mixamo удара пяткой нет: перебраны все 56 файлов. А нужен он часто —
+// замер по двум матчам показал, что 42 % касаний AI идут под углом больше 100°
+// к взгляду (медиана угла «взгляд → направление удара» — 89°, p90 — 165°), то
+// есть игрок сплошь и рядом отправляет мяч ЗА СПИНУ. Играл он при этом обычный
+// тычок вперёд и потом доворачивался — «выворачивается», как это назвал Олег.
+//
+// Пересобирать glb ради одного движения нельзя (headless-Blender с пятью
+// известными граблями и обязательной сверкой всех клипов), а вот развернуть по
+// времени УЖЕ ЗАГРУЖЕННЫЙ клип удара — операция на треках, без рига и без
+// микшера. Прямой `kick_r`: замах назад → нога проходит сквозь мяч вперёд →
+// проводка. Тот же клип наоборот: нога идёт от выноса НАЗАД сквозь положение
+// под тазом — ровно движение пятки, и стопа при этом остаётся у газона.
+// Кадр контакта у обратного клипа ищется тем же способом, что у всех
+// остальных, только пик скорости носка берётся со знаком МИНУС (tools/anim-rig).
+function reverseClip(src, name) {
+  const tracks = [];
+  for (const t of src.tracks) {
+    const n = t.times.length;
+    const vs = t.getValueSize();
+    const times = new Array(n);
+    const values = new Array(n * vs);
+    for (let i = 0; i < n; i++) {
+      times[i] = src.duration - t.times[n - 1 - i];
+      for (let k = 0; k < vs; k++) values[i * vs + k] = t.values[(n - 1 - i) * vs + k];
+    }
+    const Track = t.constructor;
+    tracks.push(new Track(t.name, times, values));
+  }
+  return new THREE.AnimationClip(name, src.duration, tracks, src.blendMode);
+}
+
 // Сборка производных клипов + калибровка. Вызывается ОДИН раз на общий gltf,
 // до того как из него наклонируют игроков, — все клоны получают готовый набор.
 export function buildDerivedClips(gltf) {
@@ -409,6 +442,36 @@ export function buildDerivedClips(gltf) {
     } finally {
       if (mx) mx.uncacheRoot(rig);
       if (rig) rig.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+    }
+  }
+
+  // КЛИП ПОД ВТОРЫМ ИМЕНЕМ. Дорожки те же самые (AnimationAction строит свои
+  // интерполянты из трека, состояние в самом треке не живёт), поэтому копия
+  // не стоит ни памяти, ни времени. Нужна затем, что кадр контакта, конец
+  // проводки и точка удара ключуются ИМЕНЕМ КЛИПА, а у одного движения бывает
+  // два разных удара: ножницы бьют на подъёме ноги, удар через себя — в
+  // верхней точке.
+  if (A.alias && A.alias.length) {
+    for (const spec of A.alias) {
+      const src = byName[spec.from];
+      if (!src) { console.warn(`Ф-98: нет клипа ${spec.from} для алиаса ${spec.name}`); continue; }
+      if (byName[spec.name]) continue;
+      const clip = new THREE.AnimationClip(spec.name, src.duration, src.tracks, src.blendMode);
+      gltf.animations.push(clip);
+      byName[spec.name] = clip;
+    }
+  }
+
+  // ОБРАТНЫЕ КЛИПЫ (удар пяткой). Считаются последними: их источником может
+  // быть и зеркальный клип, который к этому моменту уже собран.
+  if (A.reverse && A.reverse.length) {
+    for (const spec of A.reverse) {
+      const src = byName[spec.from];
+      if (!src) { console.warn(`Ф-98: нет клипа ${spec.from} для обратного ${spec.name}`); continue; }
+      if (byName[spec.name]) continue;
+      const clip = reverseClip(src, spec.name);
+      gltf.animations.push(clip);
+      byName[spec.name] = clip;
     }
   }
 
