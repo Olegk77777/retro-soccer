@@ -157,6 +157,7 @@ const ONE_SHOT = new Set([
 const ROOT_LOCKED = new Set([
   'gk_dive', 'gk_dive_r', 'gk_block', 'gk_catch', 'gk_miss', 'gk_catch_hi',
   'trip', 'fallen', 'getup', 'tackle', 'tackle2', 'penalty', 'bicycle',
+  'gk_dropkick', 'volley_drive',
 ]);
 
 export class Player {
@@ -353,6 +354,18 @@ export class Player {
       }
       this.actions[clip.name] = action;
     }
+    // СИЛОВОЙ ВОЛЕЙ — ЭТО ОКНО УЖЕ ЗАГРУЖЕННОГО КЛИПА, а не новый ассет.
+    // Настоящего удара с лёта в паке Mixamo нет (knee_* — чеканка коленом:
+    // нога проходит 35 см со скоростью 4.5 м/с против 230 см и 18 м/с у
+    // kick_run). Единственный настоящий кандидат из 56 файлов нашёлся внутри
+    // ВРАТАРСКОГО `gk_dropkick`: с 1.88 по 2.45 с там полноценный удар с лёта
+    // — замах на 0.912 м за таз, пик носка 17.89 м/с. Пересобирать модель ради
+    // этого не нужно: играем то же действие под своим именем, а окно задают
+    // anim.contact.volley_drive и anim.clipEnd.volley_drive.
+    if (this.actions.gk_dropkick) {
+      this.actions.volley_drive = this.actions.gk_dropkick;
+    }
+
     this.mixer.addEventListener('finished', (e) => {
       if (e.action === this.oneShot) {
         this.endOneShot();
@@ -1185,15 +1198,51 @@ export class Player {
       this._headBone = this.model.getObjectByName('mixamorigHead') || null;
       this._slideBone = this.model.getObjectByName('mixamorigRightToeBase') || null;
     }
-    let bone = this._bootBone;
-    if (styleName === 'header') bone = this._headBone;
-    // Подкат метёт ПРАВОЙ, удар через себя тоже бьёт правой (замер по риггу) —
-    // а `_bootBone` это ЛЕВЫЙ носок, потому что клип `kick` левоногий
-    else if (styleName === 'tackle' || styleName === 'bicycle') bone = this._slideBone;
+    // ТОЧКА УДАРА ОПРЕДЕЛЯЕТСЯ КЛИПОМ, А НЕ СТИЛЕМ (правка 28.07.2026).
+    //
+    // Раньше здесь стоял `_bootBone`, то есть ЛЕВЫЙ носок, потому что клип
+    // `kick` левоногий, — и он же выдавался за точку удара ЛЮБОГО волея. А
+    // высокий волей играет коленом (`knee_r`/`knee_l`), и левый носок в этом
+    // клипе всё время лежит на газоне: замер дал его максимальную высоту
+    // 0.003 м за весь клип. Дальше срабатывала проверка промаха (missRadius),
+    // и удар молча отменялся.
+    //
+    // Цена этой одной строки, замерена на изолированном стенде (21 фигура
+    // заморожена, 35 одинаковых подач): ДО — 11 промахов из 35, и ВСЕ 11
+    // коленом, то есть 38 % высоких волеев отменялись; ПОСЛЕ — 0 из 35.
+    // Расстояние от БЬЮЩЕГО колена до мяча в тех «промахах» было 0.42…0.83 м:
+    // колено стояло на мяче.
+    const clip = this.currentName;
+    const bone = (clip && this._pointBone(clip)) ||
+      (styleName === 'header' ? this._headBone
+        : (styleName === 'tackle' || styleName === 'bicycle') ? this._slideBone
+          : this._bootBone);
     if (!bone) return null;
     bone.getWorldPosition(out);
-    if (styleName !== 'header') out.y = Math.max(out.y, CONFIG.ball.radius);
+    const head = bone === this._headBone;
+    if (!head) out.y = Math.max(out.y, CONFIG.ball.radius);
     return out;
+  }
+
+  // Какая кость бьёт в этом клипе. Таблица, а не догадка: имя клипа про ногу
+  // говорит честно, а имя стиля («volley») не говорит ничего.
+  _pointBone(clip) {
+    if (!this._pointBones) {
+      const g = (n) => this.model.getObjectByName(n) || null;
+      const lToe = g('mixamorigLeftToeBase');
+      const rToe = g('mixamorigRightToeBase');
+      const head = g('mixamorigHead');
+      this._pointBones = {
+        kick: lToe,                                  // левоногий тычок
+        kick_r: rToe, kick_run: rToe, penalty: rToe,
+        volley_drive: rToe,                          // силовой волей
+        knee_r: g('mixamorigRightLeg'),               // высокий волей — КОЛЕНО
+        knee_l: g('mixamorigLeftLeg'),
+        header: head, header2: head,
+        tackle: rToe, tackle2: rToe, bicycle: rToe,
+      };
+    }
+    return this._pointBones[clip] || null;
   }
 
   // Текущий потолок скорости бега (спринт учтён) — для честного прогноза
@@ -1369,7 +1418,8 @@ export class Player {
   // так, как его бьют в жизни, и без всякого подскока.
   volleyHitY(contactY) {
     const SY = CONFIG.player.aerial.sync;
-    return contactY >= SY.kneeFrom ? SY.kneeHitY : SY.bootHitY;
+    if (contactY >= SY.kneeFrom) return SY.kneeHitY;
+    return this.actions.volley_drive ? SY.driveHitY : SY.bootHitY;
   }
 
   // Стоит ли игрок спиной к своей цели — условие удара через себя.
@@ -1402,6 +1452,9 @@ export class Player {
       const n = foot === 'L' ? 'knee_l' : 'knee_r';
       if (this.actions[n]) return n;
     }
+    // Ниже колена — СИЛОВОЙ волей. Раньше здесь стоял клип паса: удар с лёта
+    // анимировался тем же движением, которым отдают передачу на пять метров.
+    if (this.actions.volley_drive) return 'volley_drive';
     return foot === 'L' || !this.actions.kick_r ? 'kick' : 'kick_r';
   }
 
@@ -3168,18 +3221,22 @@ export class Player {
     const left = Math.max(1 / 120, tLeft);
 
     if (fresh) {
-      let rate = hitFrame / left;
-      let startAt = 0;
+      // У клипа может быть СВОЁ начало: силовой волей — это окно 1.88…2.45
+      // внутри вратарского `gk_dropkick`, и стартовать его с нуля значит
+      // показать вратарский разбег вместо замаха.
+      const from = (CONFIG.player.anim.clipFrom || {})[clip] || 0;
+      let rate = (hitFrame - from) / left;
+      let startAt = from;
       if (rate > SY.rateMax) {
         // Мяч почти здесь: замах целиком не влезает — срезаем его начало,
         // но кадр удара всё равно приходит вовремя (резкий «выстрел» PES)
         rate = SY.rateMax;
-        startAt = Math.max(0, hitFrame - left * rate);
+        startAt = Math.max(from, hitFrame - left * rate);
       } else if (rate < SY.rateMin) {
         // Мячу лететь ещё долго: клип не растягиваем до «вязкости», а ждём —
         // игрок продолжает бежать и стартует замах позже
         rate = SY.rateMin;
-        as.clipDelay = Math.max(0, left - hitFrame / rate);
+        as.clipDelay = Math.max(0, left - (hitFrame - from) / rate);
       }
       as.clipRate = rate;
       as.clipStart = startAt;
