@@ -72,6 +72,14 @@ export class Celebration {
       const phase = this._jumpT % C.jumpEvery;
       const jump = phase < 0.42 ? Math.sin((phase / 0.42) * Math.PI) : 0;
       p.y = jump * C.jumpHeight;
+      // РУКИ ВВЕРХ. Клипа празднования в паке Mixamo нет вообще (проверены все
+      // 56 файлов), а поза радости — это в первую очередь РУКИ: с рабочей
+      // ТВ-камеры фигура занимает 30–60 пикселей, и на таком плане поднятые
+      // руки читаются, а мимика и мелкая пластика — нет. Поэтому поднимаем их
+      // кодом поверх бега: тот же приём, что слой «живой корпус» в player.js.
+      // Раскидываются они не разом, а за raiseTime — иначе это щелчок.
+      this._raise = Math.min(1, (this._raise || 0) + dt / C.raiseTime);
+      raiseArms(scorer, this._raise, this._jumpT);
     }
 
     // Партнёры окружают автора кольцом — не наступая ему на пятки
@@ -143,7 +151,65 @@ export class Celebration {
   stop() {
     this.active = false;
     this.cam = null;
+    this._raise = 0;
     if (this.scorer) this.scorer.group.position.y = 0;
+  }
+}
+
+// Поднять руки поверх позы клипа. Вызывать ПОСЛЕ aiUpdate — там внутри уже
+// отработал микшер, и мы дописываем поворот сверху, как слой «живой корпус».
+//
+// Ось подъёма НЕ УГАДЫВАЕТСЯ: у костей Mixamo оси повёрнуты (проект наступал на
+// это и в cloth.js, и в hair.js, и в lockRootXZ). Ищем её один раз пробой —
+// крутим плечо по каждой оси и смотрим, какая поднимает кисть в мире.
+const _armProbe = new THREE.Quaternion();
+const _armVec = new THREE.Vector3();
+const ARM_AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+
+function armAxis(model, side) {
+  const arm = model.getObjectByName(`mixamorig${side}Arm`);
+  const hand = model.getObjectByName(`mixamorig${side}Hand`);
+  if (!arm || !hand) return null;
+  model.updateMatrixWorld(true);
+  const base = _armVec.setFromMatrixPosition(hand.matrixWorld).y;
+  const pose = arm.quaternion.clone();
+  let best = null;
+  for (let a = 0; a < 3; a++) {
+    for (let s = 0; s < 2; s++) {
+      _armProbe.setFromAxisAngle(ARM_AXES[a], (s ? -1 : 1) * 0.5);
+      arm.quaternion.copy(pose).multiply(_armProbe);
+      model.updateMatrixWorld(true);
+      const gain = _armVec.setFromMatrixPosition(hand.matrixWorld).y - base;
+      if (!best || gain > best.gain) best = { axis: a, sign: s ? -1 : 1, gain };
+    }
+  }
+  arm.quaternion.copy(pose);
+  model.updateMatrixWorld(true);
+  return best && best.gain > 0.02 ? best : null;
+}
+
+const _qArm = new THREE.Quaternion();
+function raiseArms(p, k, t) {
+  if (!p.model || k <= 0) return;
+  const C = CONFIG.celebration;
+  if (p._celebArms === undefined) {
+    p._celebArms = {
+      L: armAxis(p.model, 'Left'),
+      R: armAxis(p.model, 'Right'),
+      lArm: p.model.getObjectByName('mixamorigLeftArm'),
+      rArm: p.model.getObjectByName('mixamorigRightArm'),
+    };
+  }
+  const A = p._celebArms;
+  // Лёгкий разнобой между руками — иначе поза читается строем, а не радостью
+  const wave = 1 + Math.sin(t * C.armWave) * C.armWaveAmp;
+  if (A.L && A.lArm) {
+    _qArm.setFromAxisAngle(ARM_AXES[A.L.axis], A.L.sign * C.armRaise * k * wave);
+    A.lArm.quaternion.multiply(_qArm);
+  }
+  if (A.R && A.rArm) {
+    _qArm.setFromAxisAngle(ARM_AXES[A.R.axis], A.R.sign * C.armRaise * k * (2 - wave));
+    A.rArm.quaternion.multiply(_qArm);
   }
 }
 

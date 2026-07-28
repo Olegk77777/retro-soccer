@@ -127,7 +127,7 @@ export function updateFieldPlayer(p, dt, ball) {
           // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
           // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
           // пролетающий мимо мяч и молотил воздух (замер симуляцией матча)
-          const pre = p.predictAerialContact(ball, AP.maxWait);
+          const pre = p.predictAerialContact(ball, AP.readHorizon);
           return pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
             pre.dist <= AP.sync.hitRadius * 1.5;
         })());
