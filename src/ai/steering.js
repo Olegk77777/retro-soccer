@@ -125,6 +125,58 @@ export function predictLanding(ball, h = CONFIG.ball.radius, maxT = 4) {
   return null;
 }
 
+// Проход по всей траектории мяча с шагом step: колбэк получает (x, y, z, t) и,
+// вернув true, останавливает обход. Та же физика, что в predictLanding и
+// predictGoalPlane, — но вопрос другой: не «где мяч приземлится», а «где я
+// могу его встретить». Вратарю на выходе нужно именно это: он ловит подачу не
+// на фиксированной высоте, а в САМОЙ РАННЕЙ точке, до которой успевает
+// добежать, — и чем раньше, тем выше над головами (правило с 28.07.2026).
+export function flightPath(ball, cb, maxT = 3, step = 1 / 30) {
+  const B = CONFIG.ball;
+  const p = ball.mesh.position;
+  let x = p.x;
+  let y = p.y;
+  let z = p.z;
+  let vx = ball.vel.x;
+  let vy = ball.vel.y;
+  let vz = ball.vel.z;
+  let spin = ball.spin;
+  for (let t = 0; t < maxT; t += step) {
+    const airborne = y > B.radius + 0.001 || vy > 0;
+    if (airborne) {
+      vy += B.gravity * step;
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 0.01) {
+        const d = Math.min(B.dragK * sp * step, 0.5);
+        vx *= 1 - d;
+        vy *= 1 - d;
+        vz *= 1 - d;
+      }
+      if (Math.abs(spin) > 0.01) {
+        const ax = -vz * spin * B.magnus * step;
+        const az = vx * spin * B.magnus * step;
+        vx += ax;
+        vz += az;
+        spin *= Math.pow(B.spinDecay, step * 60);
+      }
+    } else {
+      const roll = Math.pow(B.rollFriction, step * 60);
+      vx *= roll;
+      vz *= roll;
+    }
+    x += vx * step;
+    y += vy * step;
+    z += vz * step;
+    if (y < B.radius) {
+      y = B.radius;
+      if (Math.abs(vy) > 1.2) vy = -vy * B.bounce;
+      else vy = 0;
+    }
+    if (cb(x, y, z, t + step)) return true;
+  }
+  return false;
+}
+
 // Прогноз пересечения ПЛОСКОСТИ ВОРОТ (x = goalX): та же мини-симуляция
 // физики, что predictLanding, но условие остановки — не высота, а координата X.
 // Нужна вратарю: он обязан знать, КУДА и КОГДА мяч придёт на линию, иначе

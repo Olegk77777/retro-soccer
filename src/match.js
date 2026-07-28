@@ -199,6 +199,7 @@ export class Match {
     this.goalCardTimer = 0;
     this._hintHTML = this.hud.hint ? this.hud.hint.innerHTML : '';
     this._keeperHintShown = false;
+    this._gkOrderHintShown = false;  // подсказка про выход вратаря — один раз за матч
     this._tempHint = false;
 
     // ТВ-заставка: параметрическая камера интро ({pos, look, mix, fading})
@@ -648,6 +649,9 @@ export class Match {
     for (const team of this.teams) team.update(dt, aiBall);
 
     this.updateSwitching();
+    // Приказ вратарю читаем ДО обхода игроков: goalkeeper.js увидит его в
+    // этом же кадре, а не в следующем
+    if (!paused && this.state !== 'restart') this.updateKeeperOrder();
 
     for (const team of this.teams) {
       for (const p of team.players) {
@@ -956,17 +960,29 @@ export class Match {
       // Мяч фактически В СЕТКЕ (за линией, между штангами, ниже перекладины) —
       // это ГОЛ, даже если непрерывная проверка пересечения его проглядела
       // (рикошет от штанги/сутолока с вратарём на последней итерации кадра).
-      // Страховка от «мяч в воротах, а свистят угловой» (фидбек Олега 22.07)
+      // Страховка от «мяч в воротах, а свистят угловой» (фидбек Олега 22.07).
+      //
+      // НО ТОЛЬКО ЕСЛИ МЯЧ ВОШЁЛ ЧЕРЕЗ ПРОЁМ (правило с 28.07.2026). Раньше
+      // проверялось лишь «мяч сейчас в коробке ворот», и этого мало: коробка
+      // шире створа (боковая сетка на 3.90, чистый проём — до 3.50 по центру
+      // мяча) и на полметра длиннее задней сетки. Замер: 0.6 % случайных ударов
+      // засчитывались голом, пройдя СНАРУЖИ штанги, а мяч, положенный за заднюю
+      // сетку, объявлялся голом на месте. Метку ставит goal.js в момент
+      // пересечения плоскости линии — она и есть ответ «через створ или мимо».
       const G = CONFIG.goal;
-      if (Math.abs(bp.z) <= G.width / 2 + G.postRadius &&
+      const sx = Math.sign(bp.x);
+      // Предел по глубине — задняя сетка ПЛЮС её ход: мяч честно продавливает
+      // полотно (замер: пушка 38 м/с уносит его на 0.59 м за плоскость сетки),
+      // и жёсткая граница по backX отняла бы у такого мяча гол.
+      if (this.ball.inGoalNet === sx &&
+          Math.abs(bp.z) <= G.width / 2 + G.postRadius &&
           bp.y <= G.height + G.postRadius &&
-          Math.abs(bp.x) <= halfL + G.depth + 0.5) {
+          Math.abs(bp.x) <= halfL + G.depth + G.net.physicalMaxStretch) {
         this.ball.goalScored = true;
         this.onGoal();
         return;
       }
       // Лицевая линия: от обороняющихся — угловой, от атакующих — от ворот
-      const sx = Math.sign(bp.x);
       const sz = Math.sign(bp.z || 1);
       const defTeam = this.teams.find((t) => Math.sign(t.ownGoalX) === sx);
       if (lastTeam === defTeam) {
@@ -1386,6 +1402,30 @@ export class Match {
     this._finishRestart();
   }
 
+  // ===== Приказ своему вратарю «НА ВЫХОД» (W / Y, 28.07.2026) =====
+  // У кнопки два смысла — ровно как у остальных в этой раскладке (см. шапку
+  // src/input.js): мяч у нас — это ПАС НА ХОД, мяч у соперника — приказ
+  // вратарю выйти из ворот. Так же устроена кнопка вратаря в FIFA/FC: она
+  // не «умный помощник», а прямое управление риском — вышел не вовремя,
+  // и это ошибка человека, а не движка.
+  //
+  // Приказ ДЕРЖИТСЯ, а не нажимается: пока кнопка зажата, кипер идёт на мяч.
+  // Копившийся замах гасим — иначе на отпускании из вратарской вылетел бы
+  // невольный пас на ход (та же грабля, что у подката и навеса).
+  updateKeeperOrder() {
+    const team = this.humanTeam;
+    if (!team || !team.keeper) return;
+    const ours = this.toucher && this.toucher.team === team;
+    const held = this.input.through.held;
+    if (!held || ours) return;
+    team.keeper.gkOrder = true;
+    this.input.through.cancel();
+    if (!this._gkOrderHintShown) {
+      this._setTempHint('ВРАТАРЬ ПОШЁЛ НА ВЫХОД');
+      this._gkOrderHintShown = true;
+    }
+  }
+
   // ===== Вратарь с мячом в руках (Фаза 2, 22.07.2026) =====
   // AI держит мяч holdTime и выносит с ноги. Вратарь ЧЕЛОВЕКА получает
   // управление и сам решает: УДАР — выбить ногой (сильно, на фланг/по стику),
@@ -1562,6 +1602,7 @@ export class Match {
     if (this._tempHint && this.hud.hint) this.hud.hint.innerHTML = this._hintHTML;
     this._tempHint = false;
     this._keeperHintShown = false;
+    this._gkOrderHintShown = false;  // подсказка про выход вратаря — один раз за матч
     this.hintTimer = 0; // базовая шпаргалка повисит и погаснет заново
   }
 

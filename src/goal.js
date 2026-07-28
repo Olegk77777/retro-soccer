@@ -289,6 +289,16 @@ export class GoalSystem {
         a1: new THREE.Vector3(lineX, barAxisY, postAxisZ),
       });
 
+      // ШОВ ПАНЕЛЕЙ ПЕРЕКРЫВАЕТСЯ (правило с 28.07.2026, тот же приём, что у
+      // хорд трибун). Замер: мяч, летящий из-за ворот наискось, проходил через
+      // УГОЛ сетки насквозь и дальше свободно летел внутри ворот поперёк створа
+      // (след: 55.8/4.43 → 54.4/2.82 → 54.6/0.07 → 54.7/−2.60). Причина — обе
+      // панели честно отказывались его ловить: заднюю он пересекал ещё сбоку от
+      // её полотна (|z| 4.2 > 3.90), а боковую — ещё позади её полотна
+      // (x 55.0 > backX 54.4). Ни одна проверка `inside` не срабатывала, и мяч
+      // въезжал в ворота через щель в углу. Каждая панель теперь считает себя
+      // чуть больше своих видимых границ, и щели в шве не остаётся.
+      const seam = CONFIG.ball.radius * 2 + 0.05;
       const back = new NetPanel(
         scene,
         Math.ceil((outerHalf * 2) / G.net.cellSize) + 1,
@@ -299,7 +309,8 @@ export class GoalSystem {
       this.panels.push(back);
       this.netPlanes.push({
         axis: 0, value: backX, outward: new THREE.Vector3(dir, 0, 0), panel: back,
-        inside: (p) => p.y >= 0 && p.y <= barAxisY && Math.abs(p.z) <= outerHalf,
+        inside: (p) => p.y >= -seam && p.y <= barAxisY + seam &&
+          Math.abs(p.z) <= outerHalf + seam,
       });
 
       const roof = new NetPanel(
@@ -312,7 +323,8 @@ export class GoalSystem {
       this.panels.push(roof);
       this.netPlanes.push({
         axis: 1, value: barAxisY, outward: new THREE.Vector3(0, 1, 0), panel: roof,
-        inside: (p) => dir * (p.x - lineX) >= 0 && dir * (p.x - lineX) <= G.depth && Math.abs(p.z) <= outerHalf,
+        inside: (p) => dir * (p.x - lineX) >= -seam && dir * (p.x - lineX) <= G.depth + seam &&
+          Math.abs(p.z) <= outerHalf + seam,
       });
 
       for (const side of [-1, 1]) {
@@ -327,7 +339,8 @@ export class GoalSystem {
         this.panels.push(panel);
         this.netPlanes.push({
           axis: 2, value: sideZ, outward: new THREE.Vector3(0, 0, side), panel,
-          inside: (p) => dir * (p.x - lineX) >= 0 && dir * (p.x - lineX) <= G.depth && p.y >= 0 && p.y <= barAxisY,
+          inside: (p) => dir * (p.x - lineX) >= -seam && dir * (p.x - lineX) <= G.depth + seam &&
+            p.y >= -seam && p.y <= barAxisY + seam,
         });
       }
     }
@@ -425,7 +438,37 @@ export class GoalSystem {
     return null;
   }
 
+  // ВОШЁЛ ЛИ МЯЧ В ВОРОТА ЧЕРЕЗ ПРОЁМ (правило с 28.07.2026).
+  // Страховке в match.js мало знать, что мяч оказался в коробке ворот: он мог
+  // попасть туда мимо створа (через угловой шов, из-за ворот, сверху) — и тогда
+  // «гол» засчитывался мячу, который прошёл СНАРУЖИ, вдоль боковой сетки
+  // (жалоба Олега 28.07.2026). Поэтому вход отмечается ровно один раз, в момент
+  // пересечения плоскости линии, и только если центр мяча прошёл между
+  // штангами и под перекладиной. Мерка — ТОТ ЖЕ чистый проём, что у честной
+  // проверки goalCrossing: полоса |z| от 3.50 до 3.78 — это ОБЪЁМ ШТАНГИ, мяч
+  // там физически быть не может, и «гол», засчитанный в ней, читается как мяч,
+  // прошедший сквозь стойку и боковую сетку.
+  trackNetEntry(ball, from, to) {
+    const G = CONFIG.goal;
+    const R = CONFIG.ball.radius;
+    const line = CONFIG.field.length / 2;
+    for (const dir of [-1, 1]) {
+      const a = dir * (from.x - dir * line);
+      const b = dir * (to.x - dir * line);
+      if (a <= 0 && b > 0) {
+        const t = b - a > 1e-9 ? -a / (b - a) : 0;
+        const z = THREE.MathUtils.lerp(from.z, to.z, t);
+        const y = THREE.MathUtils.lerp(from.y, to.y, t);
+        ball.inGoalNet = (Math.abs(z) + R <= G.width / 2 + 1e-6 &&
+          y - R >= -1e-6 && y + R <= G.height + 1e-6) ? dir : 0;
+      } else if (a > 0 && b <= 0) {
+        ball.inGoalNet = 0; // вышел обратно в поле — метка снимается
+      }
+    }
+  }
+
   recordGoalCrossing(ball, from, to) {
+    this.trackNetEntry(ball, from, to);
     if (ball.goalScored) return null;
     const crossing = this.goalCrossing(from, to, CONFIG.ball.radius);
     if (!crossing) return null;

@@ -8,6 +8,7 @@ import { CONFIG } from './config.js';
 import { buildDerivedClips } from './anim.js';
 import { faceTexture } from './face.js';
 import { HairRig } from './hair.js';
+import { attachGloves } from './gloves.js';
 import { kitTextureWithNumber } from './kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
 import { addRim } from './rimlight.js';
@@ -305,9 +306,10 @@ export class Player {
     });
 
     this.group.add(this.model);
-    // Причёску сажаем ПОСЛЕ подключения модели: если тут что-то сломается,
-    // игрок останется с моделью и анимациями, а не свалится на капсулу
+    // Причёску и перчатки сажаем ПОСЛЕ подключения модели: если тут что-то
+    // сломается, игрок останется с моделью и анимациями, а не свалится на капсулу
     this.attachHair();
+    this.attachGloves();
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
 
@@ -391,6 +393,20 @@ export class Player {
     } catch (e) {
       console.error('Причёска не собралась:', e);
       this.hair = null;
+    }
+  }
+
+  // Перчатки — только вратарю (src/gloves.js). Роль к этому моменту уже
+  // проставлена: Team назначает isKeeper синхронно в конструкторе Match, а
+  // модель приезжает промисом, то есть заведомо позже. На всякий случай метод
+  // публичный — если когда-нибудь роль начнут менять на ходу, хватит вызова.
+  attachGloves() {
+    if (!this.isKeeper || !this.model || this.gloves) return;
+    try {
+      this.gloves = attachGloves(this.model, this.look);
+    } catch (e) {
+      console.error('Перчатки не собрались:', e);
+      this.gloves = null;
     }
   }
 
@@ -1263,8 +1279,16 @@ export class Player {
       this._turnIntoStrike(dt); // замах замыкания: корпус приходит в удар к контакту
     } else {
       let want = null;
-      if (speed > 0.5) want = Math.atan2(this.vel.x, this.vel.z);
-      else if (opts.face != null) want = opts.face;
+      // ВРАТАРЬ СМОТРИТ В ПОЛЕ, А НЕ ПО ХОДУ ДВИЖЕНИЯ (правило с 28.07.2026).
+      // Прежняя строка «бежим — смотрим по ходу» верна для полевого и НЕВЕРНА
+      // для кипера: он ходит по дуге приставным шагом и пятится к линии, не
+      // отрывая глаз от мяча. Без замка вратарь, возвращающийся на ленточку,
+      // разворачивался К СВОИМ ВОРОТАМ — то есть стоял спиной к мячу и к полю
+      // (фидбек Олега 28.07.2026). Замок заодно ВКЛЮЧАЕТ нужную лестницу:
+      // движение поперёк взгляда само выбирает приставной шаг (gk_side_*),
+      // а движение назад — run_back. Клипы были, но выбирать их было нечему.
+      if (opts.face != null && (opts.faceLock || speed <= 0.5)) want = opts.face;
+      else if (speed > 0.5) want = Math.atan2(this.vel.x, this.vel.z);
       if (want != null) {
         let d = want - this.rot;
         while (d > Math.PI) d -= Math.PI * 2;

@@ -103,6 +103,7 @@ export class Ball {
     this.spin = 0;
     this.afterTouch = 0;
     this.goalScored = false;
+    this.inGoalNet = 0;  // 0 / ±1: вошёл ли мяч в ворота через ПРОЁМ (см. goal.js)
     this.netContact = null;
     if (this.mark) this.mark.visible = false;
   }
