@@ -115,6 +115,39 @@ const _handB = new THREE.Vector3();
 const _poseEuler = new THREE.Euler();
 const _poseQuat = new THREE.Quaternion();
 
+// Временные для слоя «корпус в ударе» (setStrikeLean / _updateStrikeLean)
+const _leanEuler = new THREE.Euler();
+const _leanQuat = new THREE.Quaternion();
+const _leanAxis = new THREE.Vector3();
+const _leanProbe = new THREE.Quaternion();
+const _leanVec = new THREE.Vector3();
+
+// Ось «поднять руку» у плеча. Не угадываем: у костей Mixamo оси повёрнуты.
+// Крутим плечо по каждой оси и смотрим, какая поднимает кисть в мире.
+// Тот же приём, что в src/celebration.js и в probeSpread из src/anim.js.
+function probeArmRaise(model, side) {
+  const arm = model.getObjectByName(`mixamorig${side}Arm`);
+  const hand = model.getObjectByName(`mixamorig${side}Hand`);
+  if (!arm || !hand) return null;
+  model.updateMatrixWorld(true);
+  const base = _leanVec.setFromMatrixPosition(hand.matrixWorld).y;
+  const pose = arm.quaternion.clone();
+  let best = null;
+  for (let a = 0; a < 3; a++) {
+    for (let sg = 0; sg < 2; sg++) {
+      _leanAxis.set(a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0);
+      _leanProbe.setFromAxisAngle(_leanAxis, (sg ? -1 : 1) * 0.4);
+      arm.quaternion.copy(pose).multiply(_leanProbe);
+      model.updateMatrixWorld(true);
+      const gain = _leanVec.setFromMatrixPosition(hand.matrixWorld).y - base;
+      if (!best || gain > best.gain) best = { axis: a, sign: sg ? -1 : 1, gain };
+    }
+  }
+  arm.quaternion.copy(pose);
+  model.updateMatrixWorld(true);
+  return best && best.gain > 0.02 ? best : null;
+}
+
 // Куда игроки смотрят головой. Мяч — один на всех, и его вектор позиции живой
 // (мутируется на месте), поэтому достаточно отдать его СЮДА один раз при сборке
 // матча — дальше слой взгляда читает его сам, без прокидывания через сигнатуры.
@@ -843,6 +876,89 @@ export class Player {
 
   // Доворот одной кости поверх позы клипа (порядок YXZ: сначала в сторону,
   // потом вверх-вниз, потом завал). Кость ищем лениво и кэшируем.
+  // ====== КОРПУС В УДАРЕ ======
+  //
+  // Фидбек Олега 28.07.2026: «хотелось бы больше красоты, чтобы корпус футболист
+  // ложил в зависимости от положения и ситуации, рукой замах делал».
+  //
+  // ПОЧЕМУ ЭТО ВООБЩЕ МОЖНО ДЕЛАТЬ. Кадры контакта у нас вымерены по риггу, и
+  // трогать позу в ударе казалось запретом — сдвинешь фигуру, и бутса уедет с
+  // мяча. Замер снял вопрос: доворот Spine, Spine1 и Spine2 на 20° двигает
+  // носок бьющей ноги РОВНО НА НОЛЬ (0.0000 м), а голову — на 0.08…0.20 м.
+  // Причина простая: нога висит на цепочке Hips → UpLeg → Leg → Foot, и
+  // позвоночник в неё не входит. А вот ТАЗ трогать нельзя — он двигает носок на
+  // 0.17…0.34 м, то есть сбивает весь синхрон замыкания.
+  //
+  // ОСИ ЗАМЕРЕНЫ, А НЕ УГАДАНЫ (у костей Mixamo они повёрнуты): локальная X
+  // кладёт корпус ВПЕРЁД (голова уходит на +0.167 м у Spine, +0.127 у Spine1,
+  // +0.080 у Spine2 на 0.3 рад), локальная Z — ВБОК. Отношения смещений и
+  // задают, как угол делится по цепочке.
+  setStrikeLean(opts) {
+    const L = CONFIG.player.anim.strikeLean;
+    if (!L || !L.enabled || !this.model) return;
+    const power = Math.max(0, Math.min(1.3, opts.power != null ? opts.power : 0.6));
+    // Подъём мяча кладёт корпус НАЗАД, настильный удар — ВПЕРЁД. Это не вкус:
+    // чтобы поднять мяч, бьющий откидывает плечи за опорную ногу, а чтобы
+    // прошить низом — наваливается над мячом.
+    const lift = opts.lift != null ? opts.lift : 0;
+    let pitch = lift > L.liftFrom
+      ? -Math.min(L.backMax, (lift - L.liftFrom) * L.backPerLift)
+      : L.driveFwd * (1 - Math.min(1, Math.max(0, lift) / Math.max(0.01, L.liftFrom)));
+    pitch *= 0.6 + 0.4 * power;
+    // Боковой завал — В СТОРОНУ ОПОРНОЙ ноги (бьёт правая — валимся влево).
+    // «Вправо при взгляде в +Z» у нас −X, и положительный поворот по локальной
+    // Z кладёт корпус именно туда, поэтому знак берётся от бьющей ноги.
+    const foot = opts.foot || CONFIG.player.dominantFoot;
+    const side = (foot === 'R' ? 1 : -1) * L.sideMax * (0.5 + 0.5 * power);
+    this._leanWant = { pitch, roll: side, arm: L.armSwing * power, foot };
+    this._leanT = L.hold;
+  }
+
+  // Наложить наклон корпуса. Вызывать ПОСЛЕ mixer.update и поправки позы.
+  _updateStrikeLean(dt) {
+    const L = CONFIG.player.anim.strikeLean;
+    if (!L || !L.enabled) return;
+    const want = (this._leanT > 0 && this._leanWant) ? this._leanWant : null;
+    if (want) this._leanT -= dt;
+    // Цель гаснет плавно: резкое возвращение корпуса читалось бы вторым ударом
+    const k = Math.min(1, L.rate * dt);
+    this._leanP = (this._leanP || 0) + ((want ? want.pitch : 0) - (this._leanP || 0)) * k;
+    this._leanR = (this._leanR || 0) + ((want ? want.roll : 0) - (this._leanR || 0)) * k;
+    this._leanA = (this._leanA || 0) + ((want ? want.arm : 0) - (this._leanA || 0)) * k;
+    if (Math.abs(this._leanP) < 1e-3 && Math.abs(this._leanR) < 1e-3 &&
+        Math.abs(this._leanA) < 1e-3) return;
+
+    if (!this._spineChain) {
+      this._spineChain = ['mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2']
+        .map((n) => this.model.getObjectByName(n));
+    }
+    for (let i = 0; i < 3; i++) {
+      const b = this._spineChain[i];
+      if (!b) continue;
+      const s = L.share[i];
+      _leanEuler.set(this._leanP * s, 0, this._leanR * s, 'XYZ');
+      _leanQuat.setFromEuler(_leanEuler);
+      b.quaternion.multiply(_leanQuat);
+    }
+    // Мах ПРОТИВОПОЛОЖНОЙ рукой — противовес, без которого удар читается
+    // «руки по швам». Ось подъёма ищем пробой: у костей Mixamo она повёрнута.
+    if (Math.abs(this._leanA) > 1e-3) {
+      const foot = (this._leanWant && this._leanWant.foot) || 'R';
+      const side = foot === 'R' ? 'Left' : 'Right';
+      if (!this._armAxis) this._armAxis = {};
+      if (this._armAxis[side] === undefined) {
+        this._armAxis[side] = probeArmRaise(this.model, side);
+      }
+      const ax = this._armAxis[side];
+      const bone = this.model.getObjectByName(`mixamorig${side}Arm`);
+      if (ax && bone) {
+        _leanAxis.set(ax.axis === 0 ? 1 : 0, ax.axis === 1 ? 1 : 0, ax.axis === 2 ? 1 : 0);
+        _leanQuat.setFromAxisAngle(_leanAxis, ax.sign * this._leanA);
+        bone.quaternion.multiply(_leanQuat);
+      }
+    }
+  }
+
   _applyBone(bone, yaw, pitch, roll = 0) {
     if (!bone) return;
     if (Math.abs(yaw) < 1e-4 && Math.abs(pitch) < 1e-4 && Math.abs(roll) < 1e-4) return;
@@ -1454,6 +1570,9 @@ export class Player {
       if (this.poseBlend) this.poseBlend.apply();
       this.lockRootXZ();
       this.updatePose(dt, speed);
+      // Корпус в ударе — ПОСЛЕ «живого корпуса»: тот на время одноразовых клипов
+      // молчит, и эти два слоя никогда не спорят за одни и те же кости
+      this._updateStrikeLean(dt);
       // Волосы и ткань — ПОСЛЕДНИМИ. Раньше нельзя: и микшер, и слой «живой
       // корпус» переписывают поворот головы, и причёска поехала бы за ним
       // с опозданием на кадр.
@@ -2636,6 +2755,12 @@ export class Player {
     this.faceStrike(Math.atan2(dir.x, dir.z));
     this.kickCooldown = P.kickCooldown;
     this.playStrike('through');
+    // Навес всегда идёт вверх — корпус откидывается назад заметнее всего
+    this.setStrikeLean({
+      lift: 8,
+      power: 0.9,
+      foot: (this.lastKick && this.lastKick.foot) || CONFIG.player.dominantFoot,
+    });
   }
 
   // Какой ногой бьём: мяч слева от корпуса — левой, справа — правой,
@@ -2875,6 +3000,13 @@ export class Player {
     else this.playStrike(styleName === 'toe' || opts.dive ? styleName : 'shot');
     // Удар по воротам «держит кадр»: чем сильнее бьём, тем дольше
     if (!opts.dive) this.hitStop(effCharge);
+    // Корпус ложится ПО СИТУАЦИИ: подъём мяча откидывает плечи назад, настильный
+    // удар наваливает над мячом, а боковой завал идёт в сторону опорной ноги
+    this.setStrikeLean({
+      lift: launch.y,
+      power: effCharge,
+      foot: (this.lastKick && this.lastKick.foot) || CONFIG.player.dominantFoot,
+    });
   }
 
   // ===== Замыкание в ОДНО КАСАНИЕ (PES 6, фидбек Олега 23–24.07.2026) =====

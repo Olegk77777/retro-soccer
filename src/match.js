@@ -16,6 +16,9 @@ import { Replay } from './replay.js';
 import { Officials } from './officials.js';
 import { Celebration } from './celebration.js';
 
+// Куда встаёт мяч, пока он в руках вбрасывающего — без аллокаций в кадре
+const _ballHands = new THREE.Vector3();
+
 // Плавная кривая 0..1 (smoothstep): кино-движение камеры интро без рывков
 function smooth01(t) {
   const k = Math.max(0, Math.min(1, t));
@@ -673,12 +676,26 @@ export class Match {
         this.restart.phase !== 'dead' && this.restart.phase !== 'follow') {
       const r = this.restart;
       if (r.phase === 'throw' && r.pending) {
-        const tp = r.taker.group.position;
-        this.ball.mesh.position.set(
-          tp.x + r.pending.dir.x * 0.25,
-          CONFIG.restart.throwIn.releaseY,
-          tp.z + r.pending.dir.z * 0.25,
-        );
+        // МЯЧ ЖИВЁТ В КИСТЯХ, А НЕ В ТОЧКЕ НАД ГОЛОВОЙ (правка 28.07.2026).
+        // Раньше он на всё время замаха прикалывался к постоянной высоте
+        // releaseY = 1.85 в 0.25 м перед корпусом. А кисти в клипе ходят: замер
+        // по риггу дал 0.90 м внизу за спиной (0.5 с), 2.07 м над головой
+        // (1.22 с) и вынос на 1.57 м вперёд к 1.66 с. То есть мяч ВИСЕЛ, а руки
+        // летали вокруг него — ровно «мяч не синхронно улетает с броском руки».
+        // Теперь он едет с кистями, и выпуск получается сам собой.
+        const T = CONFIG.restart.throwIn;
+        const h = r.taker.handsWorldPoint(_ballHands);
+        if (h) {
+          this.ball.mesh.position.set(
+            h.x + r.pending.dir.x * T.handAhead,
+            h.y + T.handLift,
+            h.z + r.pending.dir.z * T.handAhead,
+          );
+        } else {
+          const tp = r.taker.group.position;
+          this.ball.mesh.position.set(
+            tp.x + r.pending.dir.x * 0.25, T.releaseY, tp.z + r.pending.dir.z * 0.25);
+        }
       } else {
         this.ball.mesh.position.set(r.x, CONFIG.ball.radius, r.z);
       }
@@ -1255,9 +1272,17 @@ export class Match {
   _releaseThrow(r) {
     const R = CONFIG.restart.throwIn;
     const taker = r.taker;
-    const tp = taker.group.position;
     const nd = r.pending.dir;
-    this.ball.mesh.position.set(tp.x + nd.x * 0.35, R.releaseY, tp.z + nd.z * 0.35);
+    // Выпуск из РЕАЛЬНОЙ точки кистей, а не из постоянной высоты: мяч всё
+    // время замаха ехал с руками, и обрывать эту связь телепортом нельзя
+    const h = taker.handsWorldPoint(_ballHands);
+    if (h) {
+      this.ball.mesh.position.set(
+        h.x + nd.x * R.handAhead, h.y + R.handLift, h.z + nd.z * R.handAhead);
+    } else {
+      const tp = taker.group.position;
+      this.ball.mesh.position.set(tp.x + nd.x * 0.35, R.releaseY, tp.z + nd.z * 0.35);
+    }
     this.ball.strike(nd, r.pending.power, R.lift);
     this.ball.spin = 0;
     this.ball.afterTouch = 0; // руками мяч в полёте не докручивают

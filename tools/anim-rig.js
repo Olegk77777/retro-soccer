@@ -308,6 +308,151 @@ export async function clipProbe(names, opts = {}) {
   }, opts);
 }
 
+// === 1d. Корпус в ударе: куда уходит голова и стоит ли на месте носок ===
+//
+// Два числа на каждую ситуацию. ГОЛОВА показывает, читается ли наклон вообще
+// (с игрового плана фигура 30–60 пикселей, и сдвиг головы на 0.2 м — это как
+// раз то, что видно). НОСОК обязан остаться на месте: кадры контакта вымерены
+// по риггу, и если наклон корпуса сдвинет бутсу, развалится весь синхрон.
+//
+// Мерить ОБЯЗАТЕЛЬНО внутри harness: главный цикл игры каждый кадр заново
+// раскладывает позу, и без остановки цикла замер показывает чужую работу.
+export async function leanProbe(opts = {}) {
+  const clip = opts.clip || 'kick_run';
+  return harness(async ({ match, CONFIG }) => {
+    const p = match.teams[0].players.find((x) => !x.isKeeper && x.model);
+    if (!p) throw new Error('модель не загрузилась');
+    const head = p.model.getObjectByName('mixamorigHead');
+    const toe = p.model.getObjectByName('mixamorigRightToeBase');
+    const inv = new THREE.Matrix4();
+    const grab = () => {
+      p.group.updateMatrixWorld(true);
+      inv.copy(p.group.matrixWorld).invert();
+      return {
+        h: head.getWorldPosition(new THREE.Vector3()).applyMatrix4(inv),
+        t: toe.getWorldPosition(new THREE.Vector3()).applyMatrix4(inv),
+      };
+    };
+    const a = p.actions[clip];
+    const setPose = () => {
+      for (const n in p.actions) p.actions[n].setEffectiveWeight(0);
+      if (p.loco) for (const n in p.loco) p.loco[n].w = 0;
+      a.reset(); a.enabled = true; a.setEffectiveWeight(1); a.timeScale = 0; a.play();
+      a.time = CONFIG.player.anim.contact[clip] || 0.3;
+      p.mixer.update(0);
+    };
+    // ПРОГРЕВ ОБЯЗАТЕЛЕН. Первый mixer.update после reset() не даёт устоявшейся
+    // позы, и снятая на нём база уезжает: контрольный замер «без наклона»
+    // показывал сдвиг головы на 0.753 м, которого нет. Гоняем вхолостую и
+    // берём за базу именно КОНТРОЛЬ — позу без наклона, снятую тем же путём.
+    for (let i = 0; i < 4; i++) setPose();
+    p._leanP = 0; p._leanR = 0; p._leanA = 0; p._leanT = 0; p._leanWant = null;
+    setPose();
+    const base = grab();
+
+    const cases = opts.cases || [
+      ['настильный низом', { lift: 1, power: 1.0, foot: 'R' }],
+      ['средний', { lift: 5, power: 0.8, foot: 'R' }],
+      ['навес', { lift: 9, power: 0.9, foot: 'R' }],
+      ['то же левой', { lift: 5, power: 0.8, foot: 'L' }],
+      ['слабый пас', { lift: 1, power: 0.25, foot: 'R' }],
+    ];
+    const hold = CONFIG.player.anim.strikeLean.hold;
+    const n = Math.round(hold * 60);
+    const out = {};
+    // Сравнение делаем ПАРАМИ в одном прогоне: сперва тот же путь без наклона,
+    // сразу за ним с наклоном. Мерить относительно далёкой базы нельзя — микшер
+    // после reset() устаканивается не мгновенно, и первый замер уезжает
+    // (контроль «без наклона» показывал сдвиг головы на 0.75 м, которого нет).
+    const runCase = (o) => {
+      p._leanP = 0; p._leanR = 0; p._leanA = 0; p._leanT = 0; p._leanWant = null;
+      if (o) p.setStrikeLean(o);
+      for (let i = 0; i < n; i++) { setPose(); p._updateStrikeLean(1 / 60); }
+      return { g: grab(), pitch: p._leanP, roll: p._leanR, arm: p._leanA };
+    };
+    for (const [tag, o] of cases) {
+      const off = runCase(null);
+      const on = runCase(o);
+      out[tag] = {
+        наклонВперёдГрад: +(on.pitch * 180 / Math.PI).toFixed(1),
+        завалВбокГрад: +(on.roll * 180 / Math.PI).toFixed(1),
+        махРукойГрад: +(on.arm * 180 / Math.PI).toFixed(1),
+        // Смещение ГОЛОВЫ сюда не выводится нарочно. Пара прогонов подряд даёт
+        // по нему разброс ±0.2 м — того же порядка, что сам эффект: микшер
+        // после reset() устаканивается не одинаково, и число врёт. Оценка
+        // считается аналитически: голова стоит примерно в 0.55 м над основанием
+        // позвоночника, значит наклон 14.5° уводит её на 0.55·sin(14.5°) = 0.14 м.
+        // Углы ниже — это РОВНО то, что применено к костям, им верить можно.
+        // ГЛАВНОЕ ЧИСЛО: точка удара обязана остаться на месте
+        носокСместился: +on.g.t.distanceTo(off.g.t).toFixed(4),
+      };
+    }
+    a.setEffectiveWeight(0); a.stop();
+    window.LEAN = out;
+    console.table(out);
+    return out;
+  }, opts);
+}
+
+// === 1c. Вбрасывание: едет ли мяч вместе с кистями ===
+//
+// Жалоба заказчика — «мяч не синхронно улетает с броском руки». Мерить надо не
+// момент вылета сам по себе, а РАССТОЯНИЕ ОТ МЯЧА ДО КИСТЕЙ на всём замахе:
+// пока мяч в руках, оно обязано быть постоянным и маленьким. Раньше мяч
+// прикалывался к неподвижной точке на высоте 1.85, а кисти в клипе ходят от
+// 0.90 до 2.07 — то есть мяч висел, а руки летали вокруг него.
+export async function throwTrace(opts = {}) {
+  const frames = opts.frames != null ? opts.frames : 200;
+  return harness(async ({ match, ball, goals, CONFIG }) => {
+    const F = CONFIG.field;
+    // Ставим аут: мяч за боковой, розыгрыш достаётся AI-команде
+    match.state = 'play';
+    match.stateTimer = 0;
+    ball.mesh.position.set(6, 0.2, F.width / 2 + 1.2);
+    ball.vel.set(0, 0, 6);
+    const rows = [];
+    let seen = false;
+    for (let f = 0; f < frames; f++) {
+      step(match, ball, goals);
+      const r = match.restart;
+      if (!r || !r.taker || !r.taker.model) continue;
+      const hands = r.taker.handsWorldPoint(_tmp);
+      const bp = ball.mesh.position;
+      const os = r.taker.oneShot;
+      if (r.phase === 'throw' || r.phase === 'follow') seen = true;
+      if (!seen) continue;
+      rows.push({
+        f,
+        phase: r.phase,
+        clipT: os ? +os.time.toFixed(3) : null,
+        handsY: hands ? +hands.y.toFixed(2) : null,
+        ballY: +bp.y.toFixed(2),
+        // главное число: насколько мяч отстал от рук
+        gap: hands ? +Math.hypot(bp.x - hands.x, bp.y - hands.y, bp.z - hands.z).toFixed(3) : null,
+        ballSp: +Math.hypot(ball.vel.x, ball.vel.y, ball.vel.z).toFixed(2),
+      });
+      if (r.phase === 'follow' && rows.length > 4 &&
+          rows[rows.length - 2].phase === 'follow') break;
+    }
+    const held = rows.filter((r) => r.phase === 'throw' && r.gap != null);
+    const gaps = held.map((r) => r.gap);
+    const out = {
+      кадров: rows.length,
+      вЗамахе: held.length,
+      разрывМин: gaps.length ? +Math.min(...gaps).toFixed(3) : null,
+      разрывМакс: gaps.length ? +Math.max(...gaps).toFixed(3) : null,
+      разбросРазрыва: gaps.length ? +(Math.max(...gaps) - Math.min(...gaps)).toFixed(3) : null,
+      выпускНаКадре: (rows.find((r) => r.phase === 'follow') || {}).clipT,
+      rows,
+    };
+    window.THROW = out;
+    console.log('вбрасывание: разрыв мяч↔кисти %s…%s м (разброс %s)',
+      out.разрывМин, out.разрывМакс, out.разбросРазрыва);
+    console.table(rows.filter((r, i) => i % 3 === 0));
+    return out;
+  }, opts);
+}
+
 // === 2. Покадровая распечатка подката ===
 //
 // Ставит защитника и владельца лицом друг к другу, запускает подкат и пишет,
