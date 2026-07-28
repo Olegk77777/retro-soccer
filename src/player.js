@@ -920,13 +920,17 @@ export class Player {
     const targetDeg = L.targetLow + (L.targetHigh - L.targetLow) * k;
     const baseDeg = (L.clipBase && L.clipBase[clip] != null) ? L.clipBase[clip] : 0;
     let adjDeg = Math.max(-L.maxAdjust, Math.min(L.maxAdjust, targetDeg - baseDeg));
-    let pitch = (adjDeg * Math.PI) / 180;
+    // Пересчёт «градус корпуса → градус кости»: поворот цепочки позвоночника
+    // даёт корпусу лишь 0.59 от заданного угла (замер: 18° по кости = 10.6…11.5°
+    // по корпусу). Без деления слой недодавал 41 % от написанного в конфиге.
+    let pitch = (adjDeg / (L.boneK || 1) * Math.PI) / 180;
     pitch *= 0.6 + 0.4 * power;
     // Боковой завал — В СТОРОНУ ОПОРНОЙ ноги (бьёт правая — валимся влево).
     // «Вправо при взгляде в +Z» у нас −X, и положительный поворот по локальной
     // Z кладёт корпус именно туда, поэтому знак берётся от бьющей ноги.
     const foot = opts.foot || CONFIG.player.dominantFoot;
-    const side = (foot === 'R' ? 1 : -1) * L.sideMax * (0.5 + 0.5 * power);
+    const side = (foot === 'R' ? 1 : -1) * (L.sideMax / (L.boneK || 1)) *
+      (0.5 + 0.5 * power);
     this._leanWant = { pitch, roll: side, arm: L.armSwing * power, foot };
     this._leanT = L.hold;
   }
