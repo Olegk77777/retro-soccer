@@ -45,8 +45,11 @@ export function updateFieldPlayer(p, dt, ball) {
   // здесь стояло жёсткое обнуление внутри strikeHoldRadius, и AI в замахе
   // вкапывался столбом — то есть ровно те 22 фигуры, на которые смотрит зритель
   if (p.aerialStrike) {
-    const ap = p.aerialStrike.point;
-    p.aiUpdate(dt, ap ? p.strikeApproach(ap.x, ap.z) : { x: 0, z: 0 }, {});
+    const as = p.aerialStrike;
+    const ap = as.point;
+    // Темп подхода — от оставшегося до встречи времени: успеваю с запасом,
+    // значит иду шагом и прихожу ровно к мячу, а не проскакиваю точку
+    p.aiUpdate(dt, ap ? p.strikeApproach(ap.x, ap.z, as.hitAt - as.t) : { x: 0, z: 0 }, {});
     return;
   }
 
@@ -140,8 +143,9 @@ export function updateFieldPlayer(p, dt, ball) {
     // Замах создан — ноги в тот же кадр идут к его точке, а не встают. Стоячее
     // замыкание в PES слабее и шумнее по построению (aerial.standNoise), и
     // терять разбег на ровном месте нельзя
-    const ap0 = p.aerialStrike && p.aerialStrike.point;
-    p.aiUpdate(dt, ap0 ? p.strikeApproach(ap0.x, ap0.z) : { x: 0, z: 0 }, {});
+    const as0 = p.aerialStrike;
+    const ap0 = as0 && as0.point;
+    p.aiUpdate(dt, ap0 ? p.strikeApproach(ap0.x, ap0.z, as0.hitAt - as0.t) : { x: 0, z: 0 }, {});
     return;
   }
   // Бросок в падении (как у человека): назначенный замыкающий у чужих

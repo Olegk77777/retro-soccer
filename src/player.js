@@ -270,7 +270,10 @@ export class Player {
     this.oneShot = null;     // играющий сейчас одноразовый клип
     this.aerialStrike = null; // замыкание в одно касание: замах играет, мяч
                               // подлетает, перенаправляется в момент контакта
-    this._ignoreShotEdge = false; // проглотить отпускание D после волея на удержании
+    // Проглотить событие ОТПУСКАНИЯ кнопки после того, как замах уже начался
+    // по её УДЕРЖАНИЮ: иначе за замыканием вылетал бы второй удар/пас.
+    // Набор по видам: заявку на замыкание подаёт любая боевая кнопка.
+    this._eatEdge = { shot: false, pass: false, through: false };
 
     loadPlayerModel()
       .then((gltf) => this.attachModel(gltf))
@@ -1272,7 +1275,7 @@ export class Player {
     this.ballApproach = null;
     this.ownEpisodeT = 0;
     this.aerialStrike = null;
-    this._ignoreShotEdge = false;
+    this._eatEdge = { shot: false, pass: false, through: false };
     this.sprintBoost = 0;
     this.jumpT = 0;
     this.jumpAge = 0;
@@ -1624,12 +1627,17 @@ export class Player {
               ? Math.min(y, SY.headHitY + A.jumpHeight)
               : Math.min(y, this.volleyHitY(y) + SY.volleyHopMax);
         const d3 = Math.hypot(x - sxp, y - syp, z - szp);
-        if (d3 <= SY.hitRadius) return { t, x, y, z, dist: d3, tx: px, tz: pz };
-        if (!best || d3 < best.dist) best = { t, x, y, z, dist: d3, tx: px, tz: pz };
+        // mx/mz — направление, В КОТОРОМ вынесена точка удара. Его обязан
+        // повторить и корпус игрока, иначе модель и реальность разъедутся
+        // (см. beginAerialStrike): колено вынесено по ВЗГЛЯДУ, а прогноз
+        // считал его вынесенным навстречу мячу — расхождение до 0.9 м.
+        if (d3 <= SY.hitRadius) return { t, x, y, z, dist: d3, tx: px, tz: pz, mx: meetX, mz: meetZ };
+        if (!best || d3 < best.dist) best = { t, x, y, z, dist: d3, tx: px, tz: pz, mx: meetX, mz: meetZ };
         else if (d3 > best.dist + 0.5) break; // ближайшую точку прошли
         if (y < B.radius) break;              // мяч уже на газоне
       }
-      return best || { t: 0, x: bp.x, y: bp.y, z: bp.z, dist: Infinity, tx: pos.x, tz: pos.z };
+      return best || { t: 0, x: bp.x, y: bp.y, z: bp.z, dist: Infinity,
+        tx: pos.x, tz: pos.z, mx: meetX, mz: meetZ };
     };
 
     // Два прохода: первый узнаёт высоту контакта (значит, чем бьём), второй
@@ -2207,10 +2215,25 @@ export class Player {
     // Если мяч ЛЕТИТ на игрока, удержание D означает заказ ЗАМЫКАНИЯ: ноги
     // обязаны бежать под мяч, а не вкапываться в газон. Раньше игрок замирал
     // и навес проходил в метре от него (замер в живой игре 24.07)
+    // ЗАЯВКА НА ЗАМЫКАНИЕ (правило с 29.07.2026). Заявку подаёт ЛЮБАЯ боевая
+    // кнопка — удар, пас и пас на ход: «пока зажата кнопка удара (или паса),
+    // пока мяч летит к игроку, это считается заявкой» (просьба Олега).
+    //
+    // Окно считается по ДОСТИЖИМОСТИ, а не по прежним 14 м: навес с фланга
+    // летит около двух секунд с двадцати с лишним метров, и на прежнем радиусе
+    // заявку нельзя было подать в принципе — ноги трогались с места лишь в
+    // последнюю секунду. Условие «мяч уже снижается» тоже снято: на восходящей
+    // ветке подачи бежать под неё как раз и надо.
+    const claiming = aiming || input.pass.held || input.through.held;
+    const CL = P.aerial.claim;
+    const claimReach = CL.lead * (this._runSpeedCap() || P.speed) + APP.strikePursuitRange;
+    const dClaim = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z);
+    // Мяч должен ИДТИ КО МНЕ: иначе зажатая кнопка тянула бы игрока за любым
+    // мячом в поле, в том числе за улетающим прочь
+    const closingClaim = (bpEarly.x - pos.x) * ball.vel.x + (bpEarly.z - pos.z) * ball.vel.z < 2;
     const aerialIntent = !!this.aerialStrike ||
-      (aiming && !downed && this.diveT <= 0 && this.kickCooldown <= 0 &&
-        bpEarly.y > P.kickMaxBallY && ball.vel.y < 2 &&
-        Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) < APP.strikePursuitRange * 2);
+      (claiming && !downed && this.diveT <= 0 && this.kickCooldown <= 0 &&
+        bpEarly.y > P.kickMaxBallY && closingClaim && dClaim < claimReach);
     const brake = aiming && !this.chargeRun && !aerialIntent;
 
     // --- Бег: плавный разгон к желаемой скорости (спринт — быстрее) ---
@@ -2357,9 +2380,13 @@ export class Player {
       if (this.aerialStrike && this.aerialStrike.point) {
         aerialTarget = this.aerialStrike.point;
       } else {
-        const pre = this.predictAerialContact(ball, P.aerial.interceptT);
+        // Горизонт прогноза — окно ЗАЯВКИ, а не прежние interceptT: пока кнопка
+        // зажата, мяч ведётся с самого начала полёта (навес с фланга летит
+        // ~1.8 с, и заявку надо принимать сразу). Время встречи отдаём дальше:
+        // по нему считается темп подхода.
+        const pre = this.predictAerialContact(ball, P.aerial.claim.lead);
         aerialTarget = pre.dist < Infinity
-          ? { x: pre.tx, z: pre.tz }
+          ? { x: pre.tx, z: pre.tz, t: pre.t }
           : predictLanding(ball, P.aerial.contactY);
       }
       if (aerialTarget) {
@@ -2464,7 +2491,12 @@ export class Player {
     // уходит в удар (aerial.runPower). Мяч ждать себя не заставляет.
     let aerialMove = null;
     if (aerialTarget) {
-      aerialMove = this.strikeApproach(aerialTarget.x, aerialTarget.z);
+      // Время до встречи: в замахе его ведёт сам замах, до замаха — прогноз.
+      // По нему считается ТЕМП подхода, иначе игрок проскакивает точку.
+      const tMeet = this.aerialStrike
+        ? this.aerialStrike.hitAt - this.aerialStrike.t
+        : (aerialTarget.t != null ? aerialTarget.t : null);
+      aerialMove = this.strikeApproach(aerialTarget.x, aerialTarget.z, tMeet);
       mvx = aerialMove.x;
       mvz = aerialMove.z;
     }
@@ -2641,13 +2673,15 @@ export class Player {
     // когда мяч войдёт в зону ноги (kickRadius). Так бьют с хода и с паса на ход.
     let pass = input.pass.consume();
     const passMod = input.pass.modWas;
-    const through = input.through.consume();
+    let through = input.through.consume();
     const throughMod = input.through.modWas;
     let cross = input.consumeCross();
     let shot = input.shot.consume();
     // Замыкание волея стартовало ещё на удержании D — гасим событие отпускания,
     // чтобы после волея не вылетел лишний удар (фидбек Олега 24.07)
-    if (this._ignoreShotEdge && shot !== null) { shot = null; this._ignoreShotEdge = false; }
+    if (this._eatEdge.shot && shot !== null) { shot = null; this._eatEdge.shot = false; }
+    if (this._eatEdge.pass && pass !== null) { pass = null; this._eatEdge.pass = false; }
+    if (this._eatEdge.through && through !== null) { through = null; this._eatEdge.through = false; }
     const swipe = input.consumeSwipe();
 
     // Подкат (○ из PES, ресёрч 13): фронт нажатия НАВЕСА, когда мяч не у
@@ -2862,16 +2896,32 @@ export class Player {
     // принимается заранее — а раз заранее, то и проверять надо ПРОГНОЗНУЮ высоту
     // контакта, а не сегодняшнюю высоту мяча. Иначе игрок затевал бы кивок под
     // мяч, который к нему прикатится по газону.
+    // ЗАЯВКА СТАРТУЕТ ЗАМАХ ПО ВРЕМЕНИ, А НЕ ПО ДИСТАНЦИИ (правило с
+    // 29.07.2026). Прежний триггер `dist < prepareRadius` (3 м) для подачи
+    // сверху срабатывал за 0.24 с до мяча: игрок физически не успевал ни
+    // добежать, ни толком замахнуться, а держать кнопку заранее было
+    // бессмысленно. Замер до правки (volley-rig → pressGrid): удар выходил
+    // только при нажатии за 0.15 с, 3 попытки из 18.
+    // Заявке НЕ требуется, чтобы мяч уже снижался: подачу надо заказывать,
+    // пока она ещё набирает высоту. Условие `ball.vel.y < 2` внутри
+    // closingAerial держало заявку мёртвой всю восходящую ветку навеса —
+    // замер: при нажатии за 1.6 с до мяча замах не начинался вовсе.
+    // Горизонтальное сближение (closingClaim) при этом обязательно: за
+    // улетающим прочь мячом зажатая кнопка тянуть не должна.
+    const claimPrep = claiming && bp.y > P.kickMaxBallY && closingClaim;
     let canAerialPrep = this.kickCooldown <= 0 && !downed && !diving &&
-      !this.aerialStrike && dist < A.prepareRadius && closingAerial;
+      !this.aerialStrike && ((dist < A.prepareRadius && closingAerial) || claimPrep);
     if (canAerialPrep) {
       // Решает ПРОГНОЗНАЯ высота контакта, а не сегодняшняя высота мяча.
       // Проверка «мяч уже ниже maxY» откладывала замах до последнего мига:
       // навес падает почти отвесно, и к моменту, когда он опускался в зону,
       // бить было уже нечем — замах не успевал (замер в игре 24.07)
       // …и замах начинается ТОЛЬКО если прогноз нашёл настоящий контакт: мяч
-      // реально придёт на бутсу/лоб. Иначе игрок молотит воздух и теряет темп
-      const pre = this.predictAerialContact(ball, A.readHorizon);
+      // реально придёт на бутсу/лоб. Иначе игрок молотит воздух и теряет темп.
+      // Это же условие и отвечает за «не 100 % мячей замыкаются»: заявка не
+      // принимается, если игрок к точке встречи физически не поспевает —
+      // прогноз симулирует его бег и честно возвращает промах.
+      const pre = this.predictAerialContact(ball, claimPrep ? A.claim.lead : A.readHorizon);
       canAerialPrep = pre.y >= P.kickMaxBallY && pre.y <= A.maxY &&
         pre.dist <= A.sync.hitRadius * 1.5;
     }
@@ -2897,19 +2947,31 @@ export class Player {
       // Триггер и по УДЕРЖАНИЮ D (замах волея копится, пока мяч летит) — иначе
       // держащий D для мощного волея не бил вовсе (фидбек Олега 24.07).
       if (wantShot) {
-        this.beginAerialStrike(this.pendingStrike, input, ball);
+        this.beginAerialStrike(this.pendingStrike, input, ball, { claim: claimPrep });
         this.pendingStrike = null;
       } else {
         this.beginAerialStrike({ type: 'shot', v: Math.max(0.15, input.shot.charge01) },
-          input, ball);
-        this._ignoreShotEdge = true; // событие отпускания D не должно дать второй удар
+          input, ball, { claim: true });
+        this._eatEdge.shot = true; // событие отпускания D не должно дать второй удар
       }
-    } else if (canAerialPrep && wantPass) {
+    } else if (canAerialPrep && (wantPass || input.pass.held || input.through.held)) {
       // ПАС С ЛЁТА. Тот же замах в одно касание, только в кадре контакта мяч
       // уходит не в ворота, а партнёру. Ветка одного касания раньше принимала
-      // ТОЛЬКО удар — заявка на пас по мячу в воздухе не исполнялась в принципе
-      this.beginAerialStrike(this.pendingStrike, input, ball);
-      this.pendingStrike = null;
+      // ТОЛЬКО удар — заявка на пас по мячу в воздухе не исполнялась в принципе.
+      // Триггер и по УДЕРЖАНИЮ (правило с 29.07.2026): «пока зажата кнопка
+      // удара ИЛИ ПАСА, пока мяч летит к игроку, это считается заявкой».
+      // Раньше пас с лёта заказывался только отпусканием, то есть держать
+      // кнопку под навес было бессмысленно — заявка не подавалась вовсе.
+      if (wantPass) {
+        this.beginAerialStrike(this.pendingStrike, input, ball, { claim: claimPrep });
+        this.pendingStrike = null;
+      } else {
+        const kind = input.pass.held ? 'pass' : 'through';
+        const act = kind === 'pass' ? input.pass : input.through;
+        this.beginAerialStrike({ type: kind, v: Math.max(0.15, act.charge01) },
+          input, ball, { claim: true });
+        this._eatEdge[kind] = true;
+      }
     } else if (wantShot && !diving && !downed && this.kickCooldown <= 0 &&
         dist >= A.reach && dist < DV.reach &&
         bp.y >= DV.minY && bp.y <= DV.maxY) {
@@ -3452,6 +3514,17 @@ export class Player {
       const mul = spd < A.standSpeed ? A.standNoise : A.runNoise;
       nz *= mul;
       ny *= mul;
+      // ЧЕМ ДОЛЬШЕ ДЕРЖАЛ, ТЕМ МЕНЕЕ ТОЧНО (правило с 29.07.2026, просьба
+      // Олега). Сила и так растёт с зарядом; без расплаты точностью держать
+      // кнопку до упора было бы бесплатно, и выбор «сильно или точно» исчез бы.
+      const CLM = A.claim;
+      if (CLM && charge > CLM.noiseFrom) {
+        const cap = CONFIG.player.chargeOverCap || 1.3;
+        const over = Math.min(1, (charge - CLM.noiseFrom) / Math.max(0.01, cap - CLM.noiseFrom));
+        const kNoise = 1 + (CLM.noiseK - 1) * over;
+        nz *= kNoise;
+        ny *= kNoise;
+      }
       if (opts.dive) {
         // В падении: бьёшь без опоры — слабее и шумнее; прыжка нет (ласточка)
         power *= A.dive.powerFactor;
@@ -3687,7 +3760,7 @@ export class Player {
   // выходит в верхнюю точку тем же мигом, корпус доворачивается в удар к тому
   // же мигу. Раньше клип играл «своим» темпом, а мяч улетал когда придётся —
   // голова кивала уже вслед улетевшему мячу (замер: расхождение до 0.26 с).
-  beginAerialStrike(s, input, ball) {
+  beginAerialStrike(s, input, ball, opts = {}) {
     const A = CONFIG.player.aerial;
     const SY = A.sync;
     const charge = s.type === 'swipe' ? Math.min(s.v.power, 1.3) : s.v;
@@ -3696,9 +3769,18 @@ export class Player {
     // клипа = миг встречи с мячом) обслуживает и удар, и передачу
     const passKind = (s.type === 'pass' || s.type === 'through') ? s.type : null;
 
-    // Где и когда мяч реально встретится с игроком
-    const hit = this.predictAerialContact(ball, A.readHorizon);
-    const tHit = Math.max(SY.leadMin, Math.min(A.maxWait, hit.t));
+    // Где и когда мяч реально встретится с игроком.
+    // ЗАЯВКА ЖДЁТ ДОЛЬШЕ (правило с 29.07.2026). `maxWait` = 0.35 с — это
+    // страховка от «замер в замахе на полсекунды» для АВТОМАТИЧЕСКОГО
+    // замыкания. У заявки человека смысл обратный: он сам держит кнопку и
+    // сам решил ждать мяч, поэтому потолок — окно заявки. Без этого замах
+    // мог стартовать только за треть секунды до мяча, то есть уже на бегу,
+    // и точка встречи уточнялась в последний момент (замер: зазор 1.14 м).
+    const claimed = !!opts.claim;
+    const horizon = claimed ? A.claim.lead : A.readHorizon;
+    const hit = this.predictAerialContact(ball, horizon);
+    const tHit = Math.max(SY.leadMin,
+      Math.min(claimed ? A.claim.lead : A.maxWait, hit.t));
     // Стиль решает ПРОГНОЗНАЯ высота контакта, а не высота мяча сейчас:
     // опускающийся мяч, что сегодня на груди, к удару придёт под колено —
     // и это волей ногой, а не кивок головой в пустоту
@@ -3722,6 +3804,24 @@ export class Player {
       aimRot = Math.atan2(s.aim.x, s.aim.z);
     } else if (gesture) {
       aimRot = Math.atan2(gesture.dir.x, gesture.dir.z);
+    } else if (claimed && hit.mx != null && (hit.mx || hit.mz)) {
+      // КОРПУС РАЗВОРАЧИВАЕТСЯ ТУДА, КУДА ВЫНЕСЕНА ТОЧКА УДАРА (правило с
+      // 29.07.2026). Раньше он вставал на ЧУЖИЕ ВОРОТА, а прогноз встречи
+      // выносил колено/бутсу навстречу мячу — две разные оси. Замер
+      // (volley-rig → traceOne): игрок доходил до точки замаха идеально
+      // (0.02 м) и всё равно мазал, потому что колено смотрело на ворота,
+      // а мяч проходил в 0.93 м сбоку — ровно двойной вынос бутсы.
+      //
+      // На полёт мяча это не влияет: направление удара считается отдельно и
+      // от угла корпуса не зависит (правило 28.07 про доводку корпуса), а
+      // замыкание всё так же наводится на ворота внутри shoot().
+      //
+      // ТОЛЬКО ДЛЯ ЗАЯВКИ ЧЕЛОВЕКА. Навязывать разворот компьютеру нельзя:
+      // замер (aerial-rig → contactStats, 2 матча) показал падение касаний
+      // с эталонных ~10 за матч до 4 — у AI замах живёт короче, и разворот
+      // корпуса он доиграть не успевает. Его геометрия отлажена прошлой
+      // сессией и трогать её этой правкой незачем.
+      aimRot = Math.atan2(hit.mx, hit.mz);
     } else if (this.team) {
       aimRot = Math.atan2(this.team.attackGoalX - hit.x, -hit.z);
     }
@@ -3729,6 +3829,7 @@ export class Player {
     this.aerialStrike = {
       styleName,
       charge,
+      claimed,    // замах по заявке человека: ждёт мяч дольше и копит заряд
       passKind,
       passAim: s.aim || null,
       passCombo: !!s.combo,
@@ -3916,6 +4017,20 @@ export class Player {
       return;
     }
 
+    // ЗАРЯД КОПИТСЯ ДО ОТПУСКАНИЯ КНОПКИ, а не замирает на старте замаха
+    // (правило с 29.07.2026). Просьба Олега: «чем дольше жмёшь — тем более
+    // сильный и менее точный удар; тайминг сместится с момента нажатия на
+    // время удержания». Раньше сила бралась в кадре создания замаха, а замах
+    // создавался, когда мяч подходил на три метра, — то есть держащий кнопку
+    // получал не выбранную силу, а ту, что накопилась к этому мигу (замер:
+    // 1.09 из 1.3, гарантированная передержка).
+    if (as.input && !as.chargeLocked) {
+      const act = as.passKind === 'pass' ? as.input.pass
+        : (as.passKind === 'through' ? as.input.through : as.input.shot);
+      if (act && act.held) as.charge = Math.max(0.15, act.charge01);
+      else as.chargeLocked = true;   // отпустил — сила выбрана, дальше не растёт
+    }
+
     const dist = Math.hypot(bp.x - pos.x, bp.z - pos.z);
     const wasClosing = dist <= as.minDist + 1e-4;
     as.minDist = Math.min(as.minDist, dist);
@@ -3955,7 +4070,9 @@ export class Player {
     // Мяч прошёл ближайшую точку (начал удаляться) — бьём по нему сейчас;
     // ждать дальше нечего, иначе мяч уйдёт «сквозь» игрока
     const passed = !wasClosing && as.minDist <= A.prepareRadius && as.t > 0.05;
-    const timeout = as.t >= A.maxWait + SY.lateWait;
+    // У заявки человека потолок ожидания — её собственное окно: он держит
+    // кнопку и ждёт мяч сознательно (см. beginAerialStrike)
+    const timeout = as.t >= (as.claimed ? as.hitAt : A.maxWait) + SY.lateWait;
     // Кадр удара: либо доехал прогноз, либо клип дошёл до измеренного кадра
     // контакта — по определению это один и тот же миг, вторая проверка страхует.
     // Округляем к БЛИЖАЙШЕМУ кадру (полшага вперёд): иначе на быстром клипе
@@ -3987,8 +4104,40 @@ export class Player {
     // порог и был таким щедрым. Считаем как вратарь (`sweptContact` в
     // goalkeeper.js): точку НАИБОЛЬШЕГО СБЛИЖЕНИЯ бутсы и мяча за кадр. Тогда
     // радиус становится настоящим размером тела, а не поправкой на дискретность.
+    // ЦЕНА СИЛЫ (правило с 29.07.2026): полный замах труднее исполнить чисто,
+    // и зона попадания по мячу сужается. Просьба Олега — «чтобы не 100 %
+    // мячей замыкались». Кубика тут нет и не нужно: промахи рождаются из
+    // физики подхода и из этой зоны, то есть из того, КАК игрок пришёл на мяч.
+    const CL = A.claim;
+    let hitZone = SY.contactRadius;
+    if (CL && as.charge > CL.missFrom) {
+      const cap = CONFIG.player.chargeOverCap || 1.3;
+      const over = Math.min(1, (as.charge - CL.missFrom) / Math.max(0.01, cap - CL.missFrom));
+      hitZone *= 1 - CL.missK * over;
+    }
     const spMiss = this.strikePointWorld(as.styleName, _handA);
-    if (as.willMiss || (spMiss && this._strikeGap(spMiss, ball, dt) > SY.contactRadius)) {
+    const gapNow = spMiss ? this._strikeGap(spMiss, ball, dt) : Infinity;
+
+    // ЗАЯВКА ЖДЁТ МЯЧ, А НЕ БЬЁТ ПО ПРОГНОЗУ (правило с 29.07.2026).
+    // Прогноз встречи ошибается на десятую долю секунды — он симулирует бег
+    // игрока на полной скорости, а тот, уже стоя на точке, никуда не бежит.
+    // Замер (volley-rig → traceOne): игрок доходил до точки замаха ИДЕАЛЬНО
+    // (0.72 → 0.02 м), но кадр удара назначался, когда мяч был ещё в 1.04 м, —
+    // и честная проверка зазора отменяла удар. Человек при этом всё сделал
+    // правильно, и отказ читается «игра меня не послушала».
+    //
+    // Поэтому замах по заявке, дойдя до кадра контакта и не достав мяч,
+    // не умирает, а ЖДЁТ: мяч ещё сближается, ждать осталось кадры. Клип
+    // при этом сам замедляется — его темп ведёт сервопривод по as.hitAt.
+    // Ждать можно только пока мяч ИДЁТ К НАМ и недалеко: улетающий или
+    // далёкий мяч — это промах, и он обязан остаться промахом.
+    if (as.claimed && !passed && !timeout && wasClosing && !as.willMiss &&
+        gapNow > hitZone && gapNow < A.claim.waitGap && as.t < A.claim.lead) {
+      as.hitAt += dt;
+      return;
+    }
+
+    if (as.willMiss || (spMiss && gapNow > hitZone)) {
       this.aerialStrike = null;
       this.kickCooldown = CONFIG.player.kickCooldown * 0.5; // отмашка ногой — пауза
       return;
@@ -4102,13 +4251,35 @@ export class Player {
   // только человеческая ветка, а компьютер в замахе честно вставал столбом
   // (`updateFieldPlayer` обнулял движение внутри strikeHoldRadius) — то есть
   // ровно те 22 фигуры, на которые Олег и смотрит со стороны.
-  strikeApproach(tx, tz) {
+  // ТЕМП ПОДХОДА СЧИТАЕТСЯ ОТ ОСТАВШЕГОСЯ ВРЕМЕНИ (правило с 29.07.2026).
+  // tLeft — сколько секунд до встречи с мячом; null — время неизвестно, бежим
+  // как раньше, на полной.
+  //
+  // Без этого игрок ПРОСКАКИВАЛ точку встречи. Замер (tools/volley-rig.js →
+  // traceOne): стоя в 0.68 м от точки прилёта и имея 0.77 с в запасе, он
+  // разгонялся до 7.3 м/с, пролетал точку и в кадре контакта оказывался в
+  // 0.78 м от неё — зазор бутса/мяч 1.45 м при пороге 0.40, то есть промах.
+  // Бежать на полной, когда времени вагон, незачем: приходим ровно к мячу.
+  strikeApproach(tx, tz, tLeft = null) {
     const APP = CONFIG.player.approach;
+    const C = CONFIG.player.aerial.claim;
     const pos = this.group.position;
     const dax = tx - pos.x;
     const daz = tz - pos.z;
     const da = Math.hypot(dax, daz);
-    if (da > APP.strikeHoldRadius) return { x: dax / da, z: daz / da };
+    // ТЕМП: сколько от максимальной скорости нужно, чтобы прийти ровно к мячу.
+    // Времени в обрез (или оно неизвестно) — бежим на полной, как раньше;
+    // запас есть — идём медленнее и НЕ ПРОСКАКИВАЕМ точку. Нижнего предела
+    // здесь нет намеренно: игрок, уже стоящий на точке, обязан на ней и
+    // остаться. Для AI это ничего не меняет — он приходит издалека, ему нужно
+    // 8–9 м/с при потолке 6.8, то есть k = 1 (проверено contactStats).
+    let k = 1;
+    if (C && tLeft != null && tLeft > 1e-3) {
+      const need = (da / tLeft) * C.paceLead;
+      const cap = this._runSpeedCap() || CONFIG.player.speed;
+      k = Math.min(1, need / cap);
+    }
+    if (da > APP.strikeHoldRadius) return { x: (dax / da) * k, z: (daz / da) * k };
     const runLen = Math.hypot(this.vel.x, this.vel.z);
     if (runLen <= 0.6) return { x: 0, z: 0 };  // и правда стояли — стоим дальше
     const keep = APP.strikeGlide;   // доля прежнего курса, которую держим
@@ -4117,7 +4288,10 @@ export class Player {
     const gx = ux * keep + (da > 0.01 ? (dax / da) * (1 - keep) : 0);
     const gz = uz * keep + (da > 0.01 ? (daz / da) * (1 - keep) : 0);
     const gl = Math.hypot(gx, gz) || 1;
-    return { x: gx / gl, z: gz / gl };
+    // Добор курса тоже подчиняется темпу: без этого игрок, дошедший до точки
+    // раньше мяча, разгонялся ВНУТРИ радиуса удержания до 7 м/с и улетал.
+    // Замер: до правки зазор бутса/мяч 0.70 м при пороге 0.40 — промах.
+    return { x: (gx / gl) * k, z: (gz / gl) * k };
   }
 
   // ВСТРЕЧАЕМ МЯЧ НА ХОДУ, А НЕ ЖДЁМ ЕГО НА ТОЧКЕ (правило с 29.07.2026).

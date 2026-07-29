@@ -316,11 +316,18 @@ export async function traceOne(opts = {}) {
         'высота мяча': +bp.y.toFixed(2),
         'зазор, м': lastGap != null ? +lastGap.toFixed(2) : null,
         'порог': CONFIG.player.aerial.sync.contactRadius,
-        't замаха': +as.t.toFixed(2),
+        'т замаха': +as.t.toFixed(2),
         'hitAt': +as.hitAt.toFixed(2),
         'minDist': +as.minDist.toFixed(2),
         willMiss: as.willMiss,
         стиль: as.styleName,
+        клип: as.clipName,
+        // Прогнозная высота контакта против настоящей: по ней выбирается клип
+        // (носок 0.06 м против колена 1.07), и ошибка здесь = удар под мячом
+        'прогноз h': as.hitY != null ? +as.hitY.toFixed(2) : null,
+        'реально h': +b.mesh.position.y.toFixed(2),
+        'заряд': as.charge != null ? +as.charge.toFixed(2) : null,
+        claimed: !!as.claimed,
       });
     }
     return r;
@@ -358,6 +365,10 @@ export async function traceOne(opts = {}) {
           'высота': +bp.y.toFixed(2),
           'игрок до точки, м': land
             ? +Math.hypot(land.x - pp.x, land.z - pp.z).toFixed(2) : null,
+          // ГЛАВНАЯ метрика: дошёл ли игрок туда, куда его ведёт сам замах
+          'до as.point, м': S.striker.aerialStrike && S.striker.aerialStrike.point
+            ? +Math.hypot(S.striker.aerialStrike.point.x - pp.x,
+                          S.striker.aerialStrike.point.z - pp.z).toFixed(2) : null,
           'скорость игрока': +Math.hypot(S.striker.vel.x, S.striker.vel.z).toFixed(1),
           замах: S.striker.aerialStrike ? 'идёт' : '—',
           pending: S.striker.pendingStrike ? S.striker.pendingStrike.type : '—',
