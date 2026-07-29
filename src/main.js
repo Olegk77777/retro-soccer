@@ -310,6 +310,22 @@ foldBtn.addEventListener('click', (e) => {
 });
 syncFoldBtn();
 
+// Темп игры: множитель хода игрового времени (Game Speed из PES).
+// Пишем прямо в живой CONFIG — frame() читает его каждый кадр, поэтому
+// ползунок меняет темп на ходу, без перезапуска матча.
+const tempoSlider = document.getElementById('set-tempo');
+const tempoVal = document.getElementById('set-tempo-val');
+const TEMPO_LABEL = { 70: 'очень размеренный', 80: 'размеренный', 90: 'спокойный', 100: 'обычный', 110: 'быстрый' };
+const savedTempo = Number(localStorage.getItem('f98.gameSpeed'));
+if (savedTempo >= 70 && savedTempo <= 110) CONFIG.gameSpeed = savedTempo / 100;
+tempoSlider.value = Math.round(CONFIG.gameSpeed * 100);
+tempoVal.textContent = TEMPO_LABEL[tempoSlider.value] || `${tempoSlider.value}%`;
+tempoSlider.addEventListener('input', () => {
+  CONFIG.gameSpeed = Number(tempoSlider.value) / 100;
+  tempoVal.textContent = TEMPO_LABEL[tempoSlider.value] || `${tempoSlider.value}%`;
+  remember('f98.gameSpeed', tempoSlider.value);
+});
+
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
 const assistSlider = document.getElementById('set-assist');
@@ -430,19 +446,26 @@ function smooth01(t) {
 
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 30); // защита от рывка после сворачивания вкладки
+  // ТЕМП ИГРЫ. Кадр делится надвое: ИГРОВОЕ время (gdt) и РЕАЛЬНОЕ (dt).
+  // По игровому живёт всё, что относится к матчу, — ввод, 22 игрока с их
+  // анимацией, мяч, ворота, часы, повтор. По реальному — стадион и стекло
+  // кинескопа: трибуна, файеры, мошкара, ветер в футболках, доводка камеры,
+  // послесвечение ТВ-прохода. Их темп к футболу отношения не имеет, и
+  // замедлять дым вместе с игрой значило бы объявлять слоу-мо всему кадру.
+  const gdt = dt * CONFIG.gameSpeed;
   // Часы ветра в футболках — ОДИН объект на весь матч. Все 22 материала
   // формы держат на него ссылку, поэтому это присваивание заменяет
   // двадцать два обновления юниформа.
   clothTime.value += dt;
   const t = clock.elapsedTime;
 
-  input.update(dt);
-  if (match) match.update(dt); // 22 игрока: человек + AI-мозги
+  input.update(gdt);
+  if (match) match.update(gdt); // 22 игрока: человек + AI-мозги
   // На повторе физика молчит: тела и мяч расставляет запись (src/replay.js).
   // В празднование мяч уже в сетке — его физику тоже не трогаем.
   const replaying = !!(match && (match.state === 'replay' || match.state === 'celebration'));
-  const event = replaying ? null : ball.update(dt);
-  if (!replaying) goals.update(dt);
+  const event = replaying ? null : ball.update(gdt);
+  if (!replaying) goals.update(gdt);
   // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
   if (scene.userData.shadows) scene.userData.shadows.update();
   if (scene.userData.flashes) scene.userData.flashes.update(dt);

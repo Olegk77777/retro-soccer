@@ -13,7 +13,13 @@
 // Ничего в игре не остаётся сломанным: все патчи снимаются в finally, после
 // прогона матч перезапускается с центра.
 
-const FRAME = 1 / 60;
+// Шаг симуляции по умолчанию. Это ИГРОВОЕ время, а не реальное: множитель
+// темпа (CONFIG.gameSpeed) стенд НЕ применяет, поэтому эталоны баланса
+// сравнимы при любой настройке «Темп игры». Параметр opts.frame нужен для
+// другого — проверить, что мельче шаг не двигает баланс: при темпе 80 % и
+// 60 кадрах в секунду игра реально считает по 1/60 × 0.8, и точность
+// заметания контактов (sweptContact) там выше, чем на эталонном шаге.
+const DEFAULT_FRAME = 1 / 60;
 
 // Ключи Match.stats, которые ведёт сам движок (Team.bump)
 const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', 'loose'];
@@ -54,6 +60,7 @@ export async function runSim(opts = {}) {
   // прогон в десятки раз. 5400 кадров = 90 секунд игры за один заход.
   const chunk = opts.chunk != null ? opts.chunk : 5400;
   const quiet = !!opts.quiet;
+  const FRAME = opts.frame != null ? opts.frame : DEFAULT_FRAME;
 
   const DBG = window.DBG;
   if (!DBG || !DBG.match) throw new Error('Матч ещё не загрузился — подожди секунду и повтори');
@@ -138,12 +145,15 @@ export async function runSim(opts = {}) {
       const before = { stats: snapStats(match), probe: snapProbe(probe) };
       const startGoals = [...match.score];
       let frames = 0;
-      const limit = Math.ceil(CONFIG.match.realMinutes * 60 * 60 * 1.15); // страховка от зависания
+      // Страховка от зависания. Считается ОТ ШАГА, а не от 60 кадров в
+      // секунду: на мелком шаге кадров на тот же матч уходит больше, и
+      // фиксированный потолок обрубал бы матч до финального свистка.
+      const limit = Math.ceil(CONFIG.match.realMinutes * 60 / FRAME * 1.15);
 
       // Гоняем ровно один игровой матч: до финального свистка
       while (match.state !== 'fulltime' && frames < limit) {
         for (let k = 0; k < chunk && match.state !== 'fulltime' && frames < limit; k++) {
-          step(match, ball, goals, probe, F, boxDepth, boxHalfZ);
+          step(match, ball, goals, probe, F, boxDepth, boxHalfZ, FRAME);
           frames++;
         }
         await new Promise((r) => setTimeout(r, 0));
@@ -194,7 +204,7 @@ export async function runSim(opts = {}) {
 
 // Один кадр симуляции: то же, что делает главный цикл в main.js, но без
 // рендера, камеры и атмосферы (они на игру не влияют)
-function step(match, ball, goals, probe, F, boxDepth, boxHalfZ) {
+function step(match, ball, goals, probe, F, boxDepth, boxHalfZ, FRAME) {
   match.update(FRAME);
   const replaying = match.state === 'replay' || match.state === 'celebration';
   const event = replaying ? null : ball.update(FRAME);
