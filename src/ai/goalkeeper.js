@@ -163,7 +163,7 @@ function resolveContact(p, ball, match, gk, ctx) {
     ball.spin = 0;
     ball.afterTouch = 0;
     p.kickCooldown = Math.max(p.kickCooldown, K.catchCooldown);
-    p.playOneShot('gk_catch', 1.4, 0.2);
+    if (p.diveT <= 0 && p.downT <= 0) p.playOneShot('gk_catch', 1.4, 0.2);
     gk.claim = null;
     gk.claimPunch = false;
     team.bump('parry');
@@ -190,8 +190,13 @@ function resolveContact(p, ball, match, gk, ctx) {
   let heightF = 1;
   if (bp.y > 1.9) heightF = 1 - K.holdHighDrop;
   else if (bp.y < 0.30) heightF = 1 - K.holdLowDrop;
+  // Лёжа мяч забирается хуже: под него не подставить корпус, работают только
+  // руки. Мяч, накрытый лёжа, чаще остаётся в игре — и это правильно, иначе
+  // «лежачий сейв» стал бы бесплатным продолжением каждого броска
+  const lyingF = p.downT > 0 ? 1 - K.downHoldDrop : 1;
   const hold = K.holdBase * (1 - veloDiff) * (1 - sudden) *
-    (1 - K.holdReachDrop * ctx.rel * ctx.rel) * heightF * (0.7 + 0.3 * handling);
+    (1 - K.holdReachDrop * ctx.rel * ctx.rel) * heightF * lyingF *
+    (0.7 + 0.3 * handling);
 
   if (hold > K.holdThreshold) {
     // Иногда руки подводят даже на «своём» мяче — ошибка вратаря (ресёрч 16:
@@ -203,7 +208,7 @@ function resolveContact(p, ball, match, gk, ctx) {
       ball.spin = 0;
       ball.afterTouch = 0;
       p.kickCooldown = Math.max(p.kickCooldown, 0.55); // сам не подберёт мгновенно
-      p.playOneShot('gk_scoop', 1.2, 0.2);
+      if (p.diveT <= 0 && p.downT <= 0) p.playOneShot('gk_scoop', 1.2, 0.2);
       return 'fumble';
     }
     catchBall(p, ball, match);
@@ -281,7 +286,7 @@ function resolveContact(p, ball, match, gk, ctx) {
   p.kickCooldown = Math.max(p.kickCooldown, K.catchCooldown);
   // Отбой стоя — тоже движение: раньше здесь всегда играл gk_dive, то есть
   // вратарь падал вбок от мяча, отбитого в упор. Клип выбирается по стороне
-  if (p.diveT <= 0) {
+  if (p.diveT <= 0 && p.downT <= 0) {
     // Та же проверенная форма, что в updateLoco и startKeeperDive:
     // side = fx·nz − fz·nx, > 0 — мяч ушёл вправо от взгляда
     const side = Math.sin(p.rot) * ctx.nz - Math.cos(p.rot) * ctx.nx;
@@ -398,29 +403,50 @@ export function updateKeeper(p, dt, ball) {
   const faceBall = Math.atan2(bp.x - pos.x, bp.z - pos.z);
   gk.collecting = false;
 
-  // Лежим после броска — только встаём (кадр отдан анимации подъёма)
-  if (p.downT > 0) {
-    gk.diving = false;
-    gk.rushing = false;
-    gk.retreating = false;
-    p.aiUpdate(dt, { x: 0, z: 0 }, { face: faceBall, faceLock: true });
-    return;
-  }
-
   // ---- Контакт: единственная дверь, через которую мяч попадает в руки ----
-  const canTouch = gk.saveCd <= 0 && p.kickCooldown <= 0 &&
+  // ПРОВЕРКА СТОИТ ВЫШЕ ВЕТКИ «ЛЕЖИМ» (правило с 29.07.2026). Раньше ветка
+  // `downT > 0` возвращалась ДО неё, и лежащий вратарь был ПРИЗРАКОМ: мяч
+  // проходил сквозь тело, а он смотрел ему вслед. Замер на стенде (throughTest,
+  // мяч приходит через 0.28 с — типичное добивание): свежий кипер пропускал
+  // 4 мяча из 9, лежащий — ВСЕ ДЕВЯТЬ, включая мяч, катящийся ему в руки на
+  // 6 м/с в ноль сантиметров от корпуса. В воронке живых матчей это 4 гола из
+  // 10. В жизни всё наоборот: лежащий вратарь накрывает мяч руками — это самая
+  // типичная картина штрафной, и по створу лежащее тело занимает БОЛЬШЕ места,
+  // а не меньше. Но играет он только НИЗОМ (downMaxY) и только тем, до чего
+  // дотянулся не вставая (downReach): подняться и переместиться он не может.
+  //
+  // АНТИДРЕБЕЗГ НЕ ИМЕЕТ ПРАВА СТОИТЬ ГОЛА (правило с 29.07.2026). Пауза в
+  // 0.25 с после своего касания нужна: без неё вратарь схватил бы отбитый им же
+  // мяч в следующем кадре, и отбоя как явления не существовало бы. Но у неё
+  // была цена, которую видно только в воронке: замер по 4 матчам показал, что
+  // у ВСЕХ ШЕСТИ голов категории «прошло сквозь вратаря» кулдаун был АКТИВЕН
+  // (0.05…0.18 с), а скорости мяча — 6.3…13.4 м/с. То есть кипер отбивал мяч
+  // себе за спину и слеп ровно на то время, за которое тот закатывался в
+  // ворота. Это и была жалоба «еле катящийся гол». Живой вратарь так не стоит:
+  // отбив мяч под себя, он его тут же и накрывает. Второй контакт разрешаем
+  // рано (reboundCooldown), но ТОЛЬКО по мячу, который идёт в свои ворота, —
+  // безопасный отбой в поле по-прежнему честно уходит из рук.
+  const cdLeft = Math.max(gk.saveCd, p.kickCooldown);
+  const rebound = cdLeft > 0 &&
+    gk.saveCd <= K.catchCooldown - K.reboundCooldown &&
+    p.kickCooldown <= K.catchCooldown - K.reboundCooldown &&
+    !!predictGoalPlane(ball, goalX, K.reboundHorizon);
+  const canTouch = (cdLeft <= 0 || rebound) &&
     match.state !== 'restart';
   if (canTouch) {
     const diving = p.diveT > 0;
+    const lying = p.downT > 0;
     // Зона контакта — не цилиндр в полный рост. Пока не истекла реакция,
     // играет только КОРПУС; выше метра боковая досягаемость тает; стоя выше
     // standMaxY мяч не берётся вовсе — за верхними углами надо прыгать
     const reacted = gk.reactLeft <= 0;
-    const base = diving ? K.handReach + K.diveHandBonus
-      : (reacted ? K.handReach : K.bodyReach);
+    const base = lying ? K.downReach
+      : (diving ? K.handReach + K.diveHandBonus
+        : (reacted ? K.handReach : K.bodyReach));
     const reachAt = (y) => base * Math.max(0.25,
       1 - K.reachHighCost * Math.max(0, y - 1.0));
-    const maxY = diving || p.jumpT > 0 ? K.handleMaxY : K.standMaxY;
+    const maxY = lying ? K.downMaxY
+      : (diving || p.jumpT > 0 ? K.handleMaxY : K.standMaxY);
     const ctx = sweptContact(p, ball, dt, reachAt, maxY);
     if (ctx) {
       // Мяч под контролем СВОЕГО полевого — вратарь его не отнимает
@@ -434,11 +460,24 @@ export function updateKeeper(p, dt, ball) {
           rel: ctx.rel,
           y: ctx.y,
         };
-        p.aiUpdate(dt, { x: 0, z: 0 }, { face: faceBall, faceLock: true });
+        // Лежачему корпус не доворачиваем: цепочку падения ведёт клип, и
+        // доворот поверх неё — та же грабля, что «слой живого корпуса» во
+        // время одноразовых клипов (CLAUDE.md, правило про updatePose)
+        p.aiUpdate(dt, { x: 0, z: 0 },
+          p.downT > 0 ? {} : { face: faceBall, faceLock: true });
         if (p.ai.holding) p.holdBallInHands(ball, K.holdY);
         return;
       }
     }
+  }
+
+  // Лежим после броска — только встаём (кадр отдан анимации подъёма)
+  if (p.downT > 0) {
+    gk.diving = false;
+    gk.rushing = false;
+    gk.retreating = false;
+    p.aiUpdate(dt, { x: 0, z: 0 }, { face: faceBall, faceLock: true });
+    return;
   }
 
   // В броске корпус летит по diveDir — рулить нельзя, только доигрывать
@@ -646,7 +685,19 @@ function decideSave(p, ball, gk, shot, K, G) {
   // каждый высокий отскок кончались голом в пустые ворота при неподвижном
   // вратаре — ровно жалоба «мяч летит издалека, а он вообще не реагирует».
   // Правильный вопрос не «достану ли я тут», а «войдёт ли мяч В ВОРОТА».
-  const overMe = shot.y > K.diveMaxY + K.retreatMargin;
+  // ЗАПАС ОТСЧИТЫВАЕТСЯ ВНИЗ ОТ ДОСЯГАЕМОСТИ, А НЕ ВВЕРХ ОТ НЕЁ (правило с
+  // 29.07.2026). Здесь стояли ДВА РАЗНЫХ порога: пятиться — выше 2.57, а
+  // «впритык выше рук, стоим» — выше 2.45. Между ними лежала МЁРТВАЯ ПОЛОСА
+  // в 12 см: мяч на этой высоте не игрался ничем и не вызывал отступления.
+  // Стоила она дорого, потому что попадали в неё не редкие мячи, а самые
+  // обычные: замер трассы навеса (lobTrace) показал, что на плоскости вратаря
+  // мяч выше, чем на линии, на 0.34 м с 18 метров и на 1.14 м с 24 — то есть
+  // мяч, входящий в ворота на высоте груди (1.4 м), проходит над вратарём как
+  // раз на 2.5 м. Отсюда и «пропускает мячи, летящие прямо по центру»: кипер
+  // объявлял «выше моих рук» и оставался стоять, а мяч спокойно опускался под
+  // перекладину за его спиной. Порог теперь ОДИН, и запас работает в правильную
+  // сторону — пятиться начинаем чуть РАНЬШЕ, чем мяч станет недосягаемым.
+  const overMe = shot.y > K.diveMaxY - K.retreatMargin;
   if (overMe) {
     const G2 = CONFIG.goal;
     const intoGoal = shot.goalT != null &&
@@ -663,7 +714,6 @@ function decideSave(p, ball, gk, shot, K, G) {
       step: Math.max(-lim, Math.min(lim, shot.goalZ)),
     };
   }
-  if (shot.y > K.diveMaxY) return step; // впритык выше рук — шагом, не броском
 
   // ВЫПРЫГ ПОД УДАР (правило с 28.07.2026). Стоя вратарь достаёт только до
   // `standMaxY` (2.05 м) — это и есть потолок зоны контакта. Всё, что проходит
@@ -761,17 +811,22 @@ function tryCollect(p, dt, ball, match, gk, K, shot, faceBall) {
   const committed = gk.collectSeq === seq && gk.collectOn;
   if (!committed && (shot.speed > K.collectSpeed || bp.y > K.collectMaxY)) return false;
 
-  // Самая ранняя точка траектории, до которой кипер успевает с запасом
-  let best = null;
-  flightPath(ball, (x, y, z, t) => {
-    if (y > K.collectMaxY) return false;
-    if (!inOwnBox(team, x, z)) return false;          // руками — только в штрафной
-    if (Math.abs(x - goalX) > K.collectRange) return false;
-    const d = Math.hypot(x - pos.x, z - pos.z);
-    if (d / K.lungeSpeed + K.collectOwnLead > t) return false;
-    best = { x, z, t, d };
-    return true;
-  }, K.readHorizon);
+  // Самая ранняя точка траектории, до которой кипер успевает с запасом.
+  //
+  // ВЫШЕЛ — ДОВОДИ (правило с 29.07.2026). Раньше требование «успеваю» стояло и
+  // на решении, и на КАЖДОМ последующем кадре, и достаточно было мячу разок
+  // подпрыгнуть, чтобы кипер, уже убежавший с ленточки, объявил «не успеваю» и
+  // побрёл домой — а мяч закатывался в пустые ворота у него за спиной. Замер
+  // воронки (4 матча): три гола из восьми пришли ровно так, со скоростью мяча
+  // 7.0–7.7 м/с, то есть на еле катящихся мячах. Решение принимается ОДИН раз
+  // (strict), дальше цель считается без него: пусть кипер придёт на полшага
+  // позже, чем хотел, — это всё равно лучше, чем не прийти вовсе.
+  const best = interceptPoint(pos, ball, K.lungeSpeed, K.readHorizon, {
+    lead: K.collectOwnLead,
+    strict: !committed,
+    accept: (x, y, z) => y <= K.collectMaxY && inOwnBox(team, x, z) &&
+      Math.abs(x - goalX) <= K.collectRange,
+  });
   if (!best) { if (!committed) gk.collectOn = false; return false; }
 
   if (!committed) {
@@ -826,6 +881,13 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
   // Заявка на этот мяч уже отменена — второй раз не думаем
   if (gk.claimSeq === seq && !gk.claim) return false;
 
+  // Приказ человека (W / Y) меняет ДВЕ вещи сразу: кипер бежит быстрее и не
+  // требует запаса на свой приход. Расчёт «успею ли я» — это осторожность
+  // движка, а человек её как раз и отменяет нажатием кнопки.
+  const ordered = gk.orderT > 0;
+  const goSpeed = ordered ? K.orderSpeed : K.lungeSpeed;
+  const ownLead = ordered ? 0 : K.claimOwnLead;
+
   const committed = gk.claimSeq === seq && gk.claim;
   if (!committed) {
     // Подача — это ВЕРХОВОЙ мяч. Проверять «летит ли он к нашим воротам» по
@@ -836,19 +898,15 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
 
     // САМАЯ РАННЯЯ точка траектории, до которой кипер успевает и где мяч ещё
     // в пределах вытянутых рук в прыжке. Раньше = выше над головами и дальше
-    // от ворот — именно так и выходят на подачу.
-    let best = null;
-    flightPath(ball, (x, y, z, t) => {
-      if (y > K.claimMaxY || y < CONFIG.ball.radius * 2) return false;
-      const depth = Math.abs(x - goalX);
-      if (depth > K.claimZoneX || Math.abs(z) > K.claimZoneZ) return false;
-      const d = Math.hypot(x - pos.x, z - pos.z);
-      // Запас на СВОЙ приход обязателен: «успеваю ровно впритык» — это не
-      // выход, а подарок. Кипер должен прийти в точку ДО мяча и стоять там
-      if (d / K.lungeSpeed + K.claimOwnLead > t) return false;
-      best = { x, z, y, t, d };
-      return true;                              // первая же годная точка и есть наша
-    }, K.readHorizon);
+    // от ворот — именно так и выходят на подачу. Запас на СВОЙ приход
+    // обязателен: «успеваю ровно впритык» — это не выход, а подарок; по
+    // приказу человека запаса нет (см. ownLead выше).
+    const best = interceptPoint(pos, ball, goSpeed, K.readHorizon, {
+      lead: ownLead,
+      strict: true,
+      accept: (x, y, z) => y <= K.claimMaxY && y >= CONFIG.ball.radius * 2 &&
+        Math.abs(x - goalX) <= K.claimZoneX && Math.abs(z) <= K.claimZoneZ,
+    });
     if (!best) { gk.claimSeq = seq; gk.claim = null; return false; }
 
     // Соперники — да, свои — нет: на выходе вратарь хозяин штрафной и кричит
@@ -863,7 +921,6 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
     }
     // Приказ человека (W / Y) отменяет расчёт: решил выходить — выходим,
     // и промах становится ЕГО ошибкой. Ровно так это работает в FIFA/FC.
-    const ordered = gk.orderT > 0;
     if (!ordered && best.d / K.lungeSpeed > theirs - K.claimLead) {
       gk.claimSeq = seq; gk.claim = null; return false;
     }
@@ -884,14 +941,18 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
   // пересчитываться (то же правило, что у адресата верхового паса в team.js).
   // А вот «идти или не идти» пересматривать нельзя: кипер, передумывающий на
   // бегу, — худшее, что может быть в штрафной.
-  let land = null;
-  flightPath(ball, (x, y, z, t) => {
-    if (y > K.claimMaxY || y < CONFIG.ball.radius * 2) return false;
-    const depth = Math.abs(x - goalX);
-    if (depth > K.claimZoneX + 2 || Math.abs(z) > K.claimZoneZ + 2) return false;
-    land = { x, z, y, t };
-    return true;
-  }, K.readHorizon);
+  //
+  // И ЦЕЛЬ ЭТА — ТОЧКА ПЕРЕХВАТА, А НЕ ПЕРВАЯ ГОДНАЯ ТОЧКА ТРАЕКТОРИИ (правило
+  // с 29.07.2026). Здесь была вторая половина жалобы «выходит, но мяч не
+  // перехватывает»: цель бралась как первый же кадр полёта в пределах зоны, то
+  // есть практически ТЕКУЩАЯ позиция мяча. Вратарь бежал за тенью и приезжал
+  // туда, откуда мяч уже ушёл. Замер (навес с фланга, приказ зажат): ближе
+  // всего он оказывался в 1.24 м при вытянутой руке 0.95 — не хватало ровно
+  // тридцати сантиметров, и так на каждой подаче.
+  const land = interceptPoint(pos, ball, goSpeed, K.readHorizon, {
+    accept: (x, y, z) => y <= K.claimMaxY && y >= CONFIG.ball.radius * 2 &&
+      Math.abs(x - goalX) <= K.claimZoneX + 2 && Math.abs(z) <= K.claimZoneZ + 2,
+  });
   // Мяча в воздухе больше нет (сбит, принят, укатился) — выход окончен.
   // Если вратарь при этом уже бежал и мяч ушёл далеко — это ФЛАП, и он обязан
   // быть ВИДЕН: кипер хватает воздух (gk_miss). Молча развернуться и потрусить
@@ -917,16 +978,51 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
   }
 
   const mv = seek(pos.x, pos.z, land.x, land.z);
-  const ordered = gk.orderT > 0;
   p.aiUpdate(dt, mv, {
     sprint: true,
     face: faceBall,
     // На коротком выходе кипер идёт лицом к мячу, на длинном честно бежит
     faceLock: dLand < 3.5,
-    speedCap: ordered ? K.orderSpeed : K.lungeSpeed,
+    speedCap: goSpeed,
   });
   gk.rushing = true;
   return true;
+}
+
+// ТОЧКА ПЕРЕХВАТА, А НЕ ТЕНЬ МЯЧА (правило с 29.07.2026).
+//
+// Жалоба Олега: «зажимаешь кнопку выхода — он выходит, но мяч не перехватывает,
+// что делает выход бесполезным». Причина была в одной строке: приказ вёл кипера
+// в `seek(pos, ball.x, ball.z)` — на ТЕКУЩУЮ позицию мяча. Это погоня за
+// хвостом: пока вратарь добежит, мяч уже в другом месте, и на летящем мяче он
+// не сходится с ним НИКОГДА. Верно другое — бежать туда, где мяч БУДЕТ.
+//
+// Берём САМУЮ РАННЮЮ точку траектории, до которой успеваем (раньше = дальше от
+// ворот и выше над головами — ровно так и выходят), а если не успеваем никуда,
+// бежим в точку наименьшего опоздания: приказ есть приказ, и промах по нему —
+// осознанная ошибка человека, а не отказ движка выполнять команду.
+// accept — фильтр допустимой точки (зона выхода, высота приёма);
+// lead — запас на свой приход; strict — «нет точки, куда успеваю» вернуть null,
+// а не гнаться за недостижимой (так решается «идти или не идти»).
+function interceptPoint(pos, ball, speed, horizon, opts = {}) {
+  const accept = opts.accept || null;
+  const lead = opts.lead || 0;
+  let best = null;
+  let fallback = null;
+  let bestLack = Infinity;
+  flightPath(ball, (x, y, z, t) => {
+    if (accept && !accept(x, y, z, t)) return false;
+    const d = Math.hypot(x - pos.x, z - pos.z);
+    const lack = d / Math.max(0.5, speed) + lead - t;  // > 0 — опаздываю
+    if (lack <= 0) { best = { x, y, z, t, d }; return true; }
+    if (lack < bestLack) { bestLack = lack; fallback = { x, y, z, t, d }; }
+    return false;
+  }, horizon);
+  if (best) return best;
+  if (opts.strict) return null;
+  if (fallback) return fallback;
+  const bp = ball.mesh.position;
+  return { x: bp.x, y: bp.y, z: bp.z, t: 0, d: Math.hypot(bp.x - pos.x, bp.z - pos.z) };
 }
 
 // Выход на мяч за спину защите и 1в1: сокращаем угол. Вышел рано — обыграют,
@@ -944,7 +1040,18 @@ function tryRush(p, dt, ball, match, gk, K, faceBall) {
   // Это тот же принцип, что у кнопки вратаря в FIFA/FC: не «умный помощник»,
   // а прямое управление риском.
   if (gk.orderT > 0 && dGoal < K.orderRange && !(owner && owner.team === team)) {
-    const mv = seek(pos.x, pos.z, bp.x, bp.z);
+    const aim = interceptPoint(pos, ball, K.orderSpeed, K.readHorizon);
+    const dAim = Math.hypot(aim.x - pos.x, aim.z - pos.z);
+    // Мяч встречается выше вытянутых рук — ВЫПРЫГИВАЕМ под него, как на
+    // подаче. Без этого приказ на навес был заведомо мёртвым: кипер приходил
+    // под мяч и стоял, а мяч проходил над ним (замер orderTest: подошёл на
+    // 1.24 м при вытянутой руке 0.95 — не хватило тридцати сантиметров).
+    if (aim.y > K.claimJumpFrom && p.jumpT <= 0 && dAim < 1.8 && aim.t < 0.5) {
+      p.startJump(Math.max(0.08, aim.t),
+        Math.min(0.5, aim.y - K.claimJumpFrom + 0.12));
+      p.playOneShot('gk_catch', 1.3, 0.15);
+    }
+    const mv = seek(pos.x, pos.z, aim.x, aim.z);
     p.aiUpdate(dt, mv, {
       sprint: true,
       face: faceBall,

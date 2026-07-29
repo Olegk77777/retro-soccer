@@ -4,13 +4,26 @@
 //
 // Как запустить (консоль браузера на открытой игре):
 //   const gk = await import('./tools/gk-rig.js');
-//   await gk.runGk({ matches: 2 });     // разворот, выходы, воронка сейвов
+//   await gk.runGk({ matches: 4 });     // разворот, выходы + ВОРОНКА ПРИЧИН
+//   gk.throughTest();                   // мяч идёт прямо в вратаря: сыграет?
+//   gk.orderTest();                     // приказ «на выход» (W / Y): перехватит?
+//   gk.rollTest();                      // еле катящийся мяч издалека
 //   gk.lobTest();                       // навесной удар издалека: перебрасывают?
+//   gk.lobTrace({ d: 30, wantY: 1.4 }); // покадровый разбор одного навеса
 //   gk.netTest();                       // фантомные голы сквозь сетку
+//
+// ЭТАЛОНЫ СБОРКИ (29.07.2026, сессия 58):
+//   throughTest — свежий 5/9 · лежит 4/9 · в броске 3/9 · кулдаун 3/9
+//   orderTest   — 5 из 5 «в руках» (без приказа 2 из 5)
+//   rollTest    — 0 голов из 27, НИ ОДНОГО броска
+//   lobTest     — 8 голов из 40
+//   netTest     — 2 фантомных на 1500 выстрелов
+//   баланс (tools/sim.js, 8 матчей) — 2.75 гола за матч
 //
 // Стенд НИЧЕГО не оставляет сломанным: все патчи снимаются в finally.
 
 import { updateKeeper } from '../src/ai/goalkeeper.js';
+import { predictGoalPlane } from '../src/ai/steering.js';
 
 const FRAME = 1 / 60;
 
@@ -30,7 +43,54 @@ function newGkProbe() {
     concededNoRead: 0,  // ...из них удар вообще не был прочитан как удар
     concededNoAct: 0,   // ...из них кипер не бросился и не переступил
     lastSeen: null,
+    snap: null,         // последний снимок «мяч летит в створ» — для воронки
+    misses: [],         // разбор КАЖДОГО пропущенного мяча (см. snapshot)
   };
+}
+
+// СНИМОК СИТУАЦИИ «мяч идёт в створ». Пишется каждый кадр, пока прогноз видит
+// мяч на линии, и читается в момент гола: только так можно узнать, ЧТО кипер
+// делал за миг до пропущенного, — после гола состояние уже сброшено.
+function snapshot(k, cross, bp, goalX) {
+  const kp = k.group.position;
+  const g = k.gk || {};
+  let act = 'стоял';
+  if (k.downT > 0) act = 'лежал';
+  else if (k.diveT > 0) act = 'бросок';
+  else if (g.collecting) act = 'выход за мячом';
+  else if (g.retreating) act = 'пятился';
+  else if (g.rushing) act = 'выход';
+  else if (k.jumpT > 0) act = 'прыжок';
+  else if (Math.hypot(k.vel.x, k.vel.z) > 0.7) act = 'шаг';
+  return {
+    act,
+    speed: +cross.speed.toFixed(1),      // скорость мяча НА ЛИНИИ
+    z: +cross.z.toFixed(2),              // куда по створу
+    y: +cross.y.toFixed(2),              // и по высоте
+    t: +cross.t.toFixed(2),              // сколько ему ещё лететь
+    kz: +kp.z.toFixed(2),                // где стоит кипер вдоль ворот
+    depth: +Math.abs(kp.x - goalX).toFixed(2), // и в скольких метрах от ленты
+    dz: +Math.abs(cross.z - kp.z).toFixed(2),  // промах по створу
+    react: +(g.reactLeft || 0).toFixed(2),
+    read: !!g.shotLive,
+    // Кулдауны — отдельная и НЕОЧЕВИДНАЯ причина «не сыграл». Пока идёт
+    // антидребезг после своего же отбоя, вратарь мяч не видит вовсе
+    saveCd: +(g.saveCd || 0).toFixed(2),
+    kickCd: +(k.kickCooldown || 0).toFixed(2),
+    лежитЕщё: +(k.downT || 0).toFixed(2),
+  };
+}
+
+// Куда именно прошёл мяч мимо вратаря. Категория важнее счёта: «не дотянулся
+// вбок» лечится броском, «прошёл через него» — контактом, «пустые ворота» —
+// позицией. Три разных бага дают один и тот же счёт на табло.
+function missKind(s, K, G) {
+  if (!s) return 'не прочитал';
+  if (s.act === 'выход' || s.act === 'выход за мячом') return 'ушёл с линии';
+  if (s.y > K.diveMaxY) return 'ПЕРЕКИНУЛИ (выше рук)';
+  if (s.dz < K.handReach + 0.25) return 'СКВОЗЬ ВРАТАРЯ (был на линии мяча)';
+  if (s.dz < K.handReach + K.diveSpeed * K.diveTime) return 'не дотянулся в броске';
+  return 'угол (недосягаем)';
 }
 
 export async function runGk(opts = {}) {
@@ -40,6 +100,7 @@ export async function runGk(opts = {}) {
   if (!DBG || !DBG.match) throw new Error('Матч ещё не загрузился');
   const { match, ball, goals, CONFIG } = DBG;
   const F = CONFIG.field;
+  const G = CONFIG.goal;
 
   const saved = {
     setControlled: match.setControlled,
@@ -81,6 +142,13 @@ export async function runGk(opts = {}) {
         const g = k.gk || {};
         if (!g.shotLive) probes[i].concededNoRead++;
         if (!g.diving && k.diveT <= 0 && k.downT <= 0) probes[i].concededNoAct++;
+        const s = probes[i].snap;
+        probes[i].misses.push({
+          команда: i,
+          причина: missKind(s, CONFIG.ai.keeper, CONFIG.goal),
+          ...(s || {}),
+        });
+        probes[i].snap = null;
       }
       return saved.onGoal.apply(this, args);
     };
@@ -96,7 +164,7 @@ export async function runGk(opts = {}) {
       const limit = Math.ceil(CONFIG.match.realMinutes * 60 * 60 * 1.15);
       while (match.state !== 'fulltime' && frames < limit) {
         for (let n = 0; n < chunk && match.state !== 'fulltime' && frames < limit; n++) {
-          step(match, ball, goals, probes, F);
+          step(match, ball, goals, probes, F, G);
           frames++;
         }
         await new Promise((r) => setTimeout(r, 0));
@@ -141,15 +209,22 @@ export async function runGk(opts = {}) {
     'ничего не сделал': p.concededNoAct,
   }));
   console.table(rep);
-  window.GKRIG = { rep, probes, score };
-  return { rep, score };
+  // ВОРОНКА ПРОПУЩЕННЫХ — главная таблица стенда. Счёт говорит «плохо», а она
+  // говорит ГДЕ: не дотянулся вбок / прошло сквозь него / перекинули / ушёл с линии.
+  const misses = probes.flatMap((p) => p.misses);
+  const byKind = {};
+  for (const m of misses) byKind[m.причина] = (byKind[m.причина] || 0) + 1;
+  console.table(misses);
+  console.log('ПРИЧИНЫ ПРОПУЩЕННЫХ:', byKind, '| счёт по матчам:', score);
+  window.GKRIG = { rep, probes, score, misses, byKind };
+  return { rep, score, misses, byKind };
 }
 
 function pct(a, b) {
   return b > 0 ? +((100 * a) / b).toFixed(1) : 0;
 }
 
-function step(match, ball, goals, probes, F) {
+function step(match, ball, goals, probes, F, G) {
   match.update(FRAME);
   const replaying = match.state === 'replay' || match.state === 'celebration';
   const event = replaying ? null : ball.update(FRAME);
@@ -193,6 +268,13 @@ function step(match, ball, goals, probes, F) {
     }
     if (k.diveT > 0 && !k._rigDiving) { p.dives++; k._rigDiving = true; }
     if (k.diveT <= 0) k._rigDiving = false;
+
+    // Снимок «мяч идёт в наши ворота» — читается в момент гола. Прогноз тот же,
+    // что у самого вратаря, поэтому воронка меряет ЕГО картину мира, а не свою.
+    const cross = predictGoalPlane(ball, t.ownGoalX, 3.4);
+    if (cross && Math.abs(cross.z) < G.width / 2 + 0.3 && cross.y < G.height + 0.3) {
+      p.snap = snapshot(k, cross, bp, t.ownGoalX);
+    }
   }
 }
 
@@ -339,6 +421,321 @@ export function lobTest(opts = {}) {
   console.log(`ПРОПУЩЕНО ${goals} из ${rows.length} (${(100 * goals / rows.length).toFixed(0)}%)`);
   window.GKLOB = rows;
   return rows;
+}
+
+// ===== 2в. МЯЧ СКВОЗЬ ВРАТАРЯ: играет ли он мяч, идущий прямо в него =====
+// Воронка пропущенных (runGk, 4 матча) назвала это главной причиной: 7 голов из
+// 10 прошли в пределах вытянутой руки от кипера — то есть он СТОЯЛ НА ЛИНИИ
+// МЯЧА и не сыграл. Стенд разбирает случай по СОСТОЯНИЮ вратаря: свежий, в
+// броске, ЛЕЖА после броска и сразу после отбоя (кулдауны). Все четыре
+// состояния в матче встречаются постоянно, а мяч в них один и тот же.
+export function throughTest(opts = {}) {
+  const { match, ball, CONFIG } = window.DBG;
+  const team = match.teams[1];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const speeds = opts.speeds || [6, 10, 16];
+  const offs = opts.offs || [0, 0.4, 0.8];       // промах мимо центра корпуса, м
+  const states = opts.states || ['свежий', 'лежит', 'в броске', 'кулдаун'];
+  // ВРЕМЯ ПРИХОДА, А НЕ ДИСТАНЦИЯ. Первая редакция пускала мяч с фиксированных
+  // 9 м, и медленный мяч летел полторы секунды — вратарь успевал ВСТАТЬ, стенд
+  // мерил не лёжку, а подъём. В матче добивание приходит через 0.2–0.4 с, то
+  // есть ВНУТРИ лёжки; равное время прихода — единственный честный вход.
+  const arriveIn = opts.arriveIn != null ? opts.arriveIn : 0.28;
+  const rows = [];
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const savedIntro = match.startIntro;
+  const savedReplay = match.startReplay;
+  const savedGoal = match.onGoal;
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+
+  try {
+    for (const st of states) {
+      for (const sp of speeds) {
+        for (const off of offs) {
+          let goal = false;
+          match.onGoal = function () { goal = true; };
+          match.state = 'play';
+          k.reset();
+          k.group.position.set(goalX - sign * 1.2, 0, 0);
+          k.vel.set(0, 0, 0);
+          k.gk = null;
+          ball.reset();
+          ball.goalScored = false;
+
+          // Состояние вратаря воспроизводим ЧЕСТНО, а не выставляем флаги:
+          // бросок в сторону и есть источник и downT, и кулдаунов в матче.
+          if (st === 'лежит') {
+            k.startKeeperDive(0, 1, { dur: 0.3, speed: 3.6, recover: 0.8 });
+            for (let w = 0; w < 30; w += 1) { updateKeeper(k, FRAME, ball); ball.update(FRAME); }
+          } else if (st === 'в броске') {
+            k.startKeeperDive(0, 1, { dur: 0.55, speed: 3.6, recover: 0.8 });
+            for (let w = 0; w < 6; w += 1) { updateKeeper(k, FRAME, ball); ball.update(FRAME); }
+          } else if (st === 'кулдаун') {
+            k.kickCooldown = 0.25;
+            const g = k.gk || (updateKeeper(k, FRAME, ball), k.gk);
+            if (g) g.saveCd = 0.25;
+          }
+          const kp = k.group.position;
+          const lying = k.downT;
+          // Мяч катится ПРЯМО В КИПЕРА (плюс промах off вдоль створа)
+          const from = Math.max(1.6, sp * arriveIn);
+          ball.mesh.position.set(kp.x - sign * from, CONFIG.ball.radius, kp.z + off);
+          ball.vel.set(sign * sp, 0, 0);
+          ball.seq = (ball.seq || 0) + 1;
+          ball.strikeAge = 0;
+
+          let res = null; let act = 'стоял';
+          for (let i = 0; i < 300 && !goal; i += 1) {
+            updateOne(match, k, ball, FRAME);
+            if (k.diveT > 0) act = 'бросок';
+            else if (k.downT > 0 && act === 'стоял') act = 'лежал';
+            if (k.ai && k.ai.holding) { res = 'в руках'; break; }
+            if (!res && k.gk && k.gk.last) res = k.gk.last.outcome;
+            if (ball.goalScored) goal = true;
+            if (Math.abs(ball.mesh.position.x) > CONFIG.field.length / 2 + 3) break;
+          }
+          rows.push({
+            состояние: st,
+            'лежал/летел, с': +(lying || k.diveT).toFixed(2),
+            'скорость, м/с': sp,
+            'мимо центра, м': off,
+            итог: goal ? 'ГОЛ' : (res || 'мяч прошёл мимо'),
+            кипер: act,
+          });
+        }
+      }
+    }
+  } finally {
+    match.startIntro = savedIntro;
+    match.startReplay = savedReplay;
+    match.onGoal = savedGoal;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  const g = rows.filter((r) => r.итог === 'ГОЛ').length;
+  const byState = {};
+  for (const r of rows) {
+    byState[r.состояние] = byState[r.состояние] || { голов: 0, всего: 0 };
+    byState[r.состояние].всего++;
+    if (r.итог === 'ГОЛ') byState[r.состояние].голов++;
+  }
+  console.log(`ПРОПУЩЕНО ${g} из ${rows.length}`, byState);
+  window.GKTHRU = { rows, goals: g, byState };
+  return { rows, goals: g, byState };
+}
+
+// ===== 2г. ПРИКАЗ «НА ВЫХОД» (W / Y): доходит ли кипер до мяча =====
+// Жалоба Олега: «зажимаешь кнопку выхода — он выходит, но мяч не перехватывает,
+// что делает выход бесполезным». Стенд гоняет типовые доставки мяча в штрафную
+// (прострел, навес, заброс за спину, отскок) с приказом и без него и меряет
+// ГЛАВНОЕ: сблизился ли кипер с мячом настолько, чтобы сыграть.
+export function orderTest(opts = {}) {
+  const { match, ball, CONFIG } = window.DBG;
+  const team = match.teams[1];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const K = CONFIG.ai.keeper;
+
+  // Доставки мяча в штрафную: откуда, куда и с какой дугой. Все — «мяч у
+  // соперника», то есть ровно те моменты, ради которых кнопка и существует.
+  const plays = opts.plays || [
+    { имя: 'прострел низом', from: { x: 13, z: 22 }, to: { x: 5.5, z: -6 }, sp: 17, lift: 0 },
+    { имя: 'навес с фланга', from: { x: 16, z: 24 }, to: { x: 6, z: -2 }, sp: 15, lift: 7.5 },
+    { имя: 'заброс за спину', from: { x: 30, z: 8 }, to: { x: 8, z: 2 }, sp: 14, lift: 4.5 },
+    { имя: 'отскок в штрафной', from: { x: 14, z: -8 }, to: { x: 6, z: 3 }, sp: 11, lift: 1.5 },
+    { имя: 'пас вдоль вратарской', from: { x: 12, z: 16 }, to: { x: 4.5, z: -8 }, sp: 19, lift: 0 },
+  ];
+  const rows = [];
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const savedIntro = match.startIntro;
+  const savedReplay = match.startReplay;
+  const savedGoal = match.onGoal;
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+
+  try {
+    for (const pl of plays) {
+      for (const ordered of [false, true]) {
+        match.onGoal = function () {};
+        match.state = 'play';
+        k.reset();
+        k.group.position.set(goalX - sign * 1.2, 0, 0);
+        k.vel.set(0, 0, 0);
+        k.gk = null;
+        ball.reset();
+        ball.goalScored = false;
+
+        // Мяч держит СОПЕРНИК — иначе приказ гасится (mateOnBall) и кипер
+        // считает свободный мяч своим по обычной ветке свипера
+        const shooter = match.teams[0].fieldPlayers[0];
+        shooter.group.position.set(goalX - sign * pl.from.x, 0, pl.from.z);
+        const savedToucher = match.toucher;
+        match.toucher = shooter;
+
+        // Вратарь сначала занимает свою точку на дуге
+        ball.mesh.position.set(goalX - sign * pl.from.x, 0.2, pl.from.z);
+        ball.vel.set(0, 0, 0);
+        for (let w = 0; w < 60; w += 1) updateOne(match, k, ball, FRAME);
+        const startDepth = Math.abs(k.group.position.x - goalX);
+
+        const dx = (goalX - sign * pl.to.x) - (goalX - sign * pl.from.x);
+        const dz = pl.to.z - pl.from.z;
+        const dl = Math.hypot(dx, dz) || 1;
+        ball.strike({ x: dx / dl, z: dz / dl }, pl.sp, pl.lift, 0);
+
+        let near = 99; let res = null; let maxOut = startDepth;
+        for (let i = 0; i < 180; i += 1) {
+          if (ordered) k.gkOrder = true;      // кнопка ЗАЖАТА (см. updateKeeperOrder)
+          updateOne(match, k, ball, FRAME);
+          const kp = k.group.position;
+          const bp = ball.mesh.position;
+          near = Math.min(near, Math.hypot(bp.x - kp.x, bp.z - kp.z, (bp.y - 1.0) * 0.6));
+          maxOut = Math.max(maxOut, Math.abs(kp.x - goalX));
+          if (k.ai && k.ai.holding) { res = 'в руках'; break; }
+          if (!res && k.gk && k.gk.last) res = k.gk.last.outcome;
+          if (Math.abs(bp.x) > CONFIG.field.length / 2 + 2) break;
+        }
+        match.toucher = savedToucher;
+        rows.push({
+          эпизод: pl.имя,
+          приказ: ordered ? 'ДЕРЖУ W' : '—',
+          'ближе всего, м': +near.toFixed(2),
+          'вышел на, м': +maxOut.toFixed(1),
+          итог: res || 'НЕ СЫГРАЛ',
+        });
+      }
+    }
+  } finally {
+    match.startIntro = savedIntro;
+    match.startReplay = savedReplay;
+    match.onGoal = savedGoal;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  const ord = rows.filter((r) => r.приказ !== '—');
+  const got = ord.filter((r) => r.итог !== 'НЕ СЫГРАЛ').length;
+  console.log(`ПО ПРИКАЗУ сыграл ${got} из ${ord.length}`);
+  window.GKORDER = rows;
+  return { rows, got, of: ord.length };
+}
+
+// ===== 2д. ТРАССА ОДНОГО НАВЕСНОГО УДАРА =====
+// lobTest говорит «гол», трасса говорит ПОЧЕМУ. Печатает по кадрам, что вратарь
+// ЧИТАЕТ — высоту мяча на СВОЕЙ плоскости против высоты на ЛИНИИ ВОРОТ — и что
+// при этом делает. Прицел подбирается под заданную высоту НА ЛИНИИ (как в
+// lobTest): без этого «навес» с 18 м и с 30 м — два разных удара.
+export function lobTrace(opts = {}) {
+  const { match, ball, CONFIG } = window.DBG;
+  const team = match.teams[1];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const d = opts.d != null ? opts.d : 18;
+  const tz = opts.z != null ? opts.z : 0;
+  const wantY = opts.wantY != null ? opts.wantY : 1.8;
+  const sp = opts.sp != null ? opts.sp : Math.max(13, 27 - d * 0.16);
+
+  // Подбор подъёма под нужную высоту НА ЛИНИИ
+  const dl = Math.hypot(d, tz) || 1;
+  const tryLift = (lift) => {
+    ball.reset();
+    ball.mesh.position.set(goalX - sign * d, 0.16, 0);
+    ball.vel.set((sp * sign * d) / dl, lift, (sp * tz) / dl);
+    const c = predictGoalPlane(ball, goalX, 4, sign);
+    return c ? c.y : -1;
+  };
+  let lo = 0; let hi = 16;
+  for (let i = 0; i < 26; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (tryLift(mid) < wantY) lo = mid; else hi = mid;
+  }
+  const lift = (lo + hi) / 2;
+
+  const rows = [];
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const savedIntro = match.startIntro;
+  const savedReplay = match.startReplay;
+  const savedGoal = match.onGoal;
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+  let goal = false;
+  match.onGoal = function () { goal = true; };
+  let worstGap = 0;   // максимум «у меня выше, чем на линии» — суть дефекта
+
+  try {
+    match.state = 'play';
+    k.reset();
+    k.group.position.set(goalX - sign * 1.2, 0, 0);
+    k.vel.set(0, 0, 0);
+    k.gk = null;
+    ball.reset();
+    ball.goalScored = false;
+    const shooter = match.teams[0].fieldPlayers[0];
+    shooter.group.position.set(goalX - sign * d, 0, 0);
+    const savedToucher = match.toucher;
+    match.toucher = shooter;
+    ball.mesh.position.set(goalX - sign * d, 0.16, 0);
+    ball.vel.set(0, 0, 0);
+    for (let w = 0; w < 90; w += 1) updateOne(match, k, ball, FRAME);
+    match.toucher = savedToucher;
+    ball.mesh.position.set(goalX - sign * d, 0.16, 0);
+    ball.strike({ x: (sign * d) / dl, z: tz / dl }, sp, lift, 0);
+
+    for (let i = 0; i < 220; i += 1) {
+      updateOne(match, k, ball, FRAME);
+      const bp = ball.mesh.position;
+      const kp = k.group.position;
+      const behind = (bp.x - goalX) * sign > 0;      // мяч уже за линией
+      const own = predictGoalPlane(ball, kp.x, 3.4, sign);
+      const line = predictGoalPlane(ball, goalX, 3.4, sign);
+      if (own && line) worstGap = Math.max(worstGap, own.y - line.y);
+      // Печатаем только «горячие» кадры: мяч ближе 10 м к линии
+      if (Math.abs(bp.x - goalX) < 10 && i % 3 === 0) {
+        rows.push({
+          'мяч до линии, м': +Math.abs(bp.x - goalX).toFixed(1),
+          'мяч y': +bp.y.toFixed(2),
+          'кипер в, м': +Math.abs(kp.x - goalX).toFixed(2),
+          'у МЕНЯ y': own ? +own.y.toFixed(2) : null,
+          'на ЛИНИИ y': line ? +line.y.toFixed(2) : null,
+          решение: k.diveT > 0 ? 'бросок'
+            : (k.gk && k.gk.retreating ? 'ПЯТИТСЯ'
+              : (k.jumpT > 0 ? 'прыжок' : 'шаг')),
+        });
+      }
+      if (goal || behind) break;
+    }
+  } finally {
+    match.startIntro = savedIntro;
+    match.startReplay = savedReplay;
+    match.onGoal = savedGoal;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  console.log(goal ? 'ГОЛ' : 'спас', '| максимум «у меня выше, чем на линии»:',
+    worstGap.toFixed(2), 'м');
+  window.GKTRACE = { rows, goal, worstGap };
+  return { rows, goal, worstGap: +worstGap.toFixed(2) };
 }
 
 // Один кадр «вратарь против мяча», без остальных двадцати одного
