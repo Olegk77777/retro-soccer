@@ -17,7 +17,7 @@
 // Все числа — CONFIG.ai.keeper, в логике не хардкодим.
 
 import { CONFIG } from '../config.js';
-import { arrive, seek, interposePoint, distToBall, predictGoalPlane, predictLanding, flightPath } from './steering.js';
+import { arrive, seek, interposePoint, predictGoalPlane, flightPath } from './steering.js';
 
 // Нормальное распределение (Бокс–Мюллер): ошибка чтения удара должна быть
 // колоколом, а не равномерным шумом — иначе кипер «одинаково часто» ошибается
@@ -490,15 +490,21 @@ export function updateKeeper(p, dt, ball) {
   const shot = readShot(p, ball, gk, dt, match, K, G);
   gk.shotLive = !!shot;
 
+  // ---- Медленный мяч НЕ ОТБИВАЮТ, ЕГО ЗАБИРАЮТ (правило с 28.07.2026) ----
+  // Просьба Олега прямым текстом: «еле катящиеся мячи издалека — тут его надо
+  // просто брать в руки». Живой вратарь на такой мяч ВЫХОДИТ и накрывает его в
+  // нескольких метрах перед линией, а не ждёт на ленточке, пока мяч допрыгает.
+  // Условия узкие: мяч тихий, низкий, точка встречи в своей штрафной (руками
+  // играть можно только там) и ни один соперник к ней не поспевает — иначе это
+  // не выход, а подарок на пустые ворота.
+  //
+  // ВЫЗОВ СТОИТ ВЫШЕ ВЕТКИ УДАРА И ОТ НЕЁ НЕ ЗАВИСИТ (правило с 29.07.2026).
+  // Раньше он жил ВНУТРИ `if (shot)`, то есть работал только для мяча, который
+  // дойдёт до линии ворот. Мяч, замирающий в штрафной, ударом не считается —
+  // и вратарь за ним не шёл вовсе.
+  if (gk.reactLeft <= 0 && tryCollect(p, dt, ball, match, gk, K, faceBall)) return;
+
   if (shot && gk.reactLeft <= 0) {
-    // ---- Медленный мяч НЕ ОТБИВАЮТ, ЕГО ЗАБИРАЮТ (правило с 28.07.2026) ----
-    // Просьба Олега прямым текстом: «еле катящиеся мячи издалека — тут его надо
-    // просто брать в руки». Живой вратарь на такой мяч ВЫХОДИТ и накрывает его
-    // в нескольких метрах перед линией, а не ждёт на ленточке, пока мяч
-    // допрыгает. Условия узкие: мяч тихий, низкий, точка встречи в своей
-    // штрафной (руками играть можно только там) и никто из соперников к ней
-    // не поспевает — иначе это не выход, а подарок на пустые ворота.
-    if (tryCollect(p, dt, ball, match, gk, K, shot, faceBall)) return;
     const act = decideSave(p, ball, gk, shot, K, G);
     if (act === 'dive') return;               // бросок пошёл, кадр закрыт
     if (act && act.retreat) {
@@ -792,15 +798,19 @@ function decideSave(p, ball, gk, shot, K, G) {
 // Кипер идёт НАВСТРЕЧУ и накрывает его в нескольких метрах перед линией: чем
 // раньше мяч в руках, тем меньше поводов для рикошета и добивания. Условия
 // узкие нарочно (тот же принцип, что у выхода на подачу): точка встречи — в
-// СВОЕЙ штрафной, иначе руками играть нельзя, и ни один соперник к ней не
-// поспевает. Решение пересматривается каждый кадр само: изменилась траектория
-// (рикошет, подрезка) — `readShot` перестаёт отдавать удар, и ветка гаснет.
-function tryCollect(p, dt, ball, match, gk, K, shot, faceBall) {
+// СВОЕЙ штрафной, иначе руками играть нельзя, и соперник к ней не поспевает.
+// Решение принимается один раз на этот полёт мяча (`collectSeq` = ball.seq) и
+// дальше держится: перебили мяч — считаем заново, всё остальное время «вышел,
+// доводи». Гаснет ветка сама, когда годной точки в зоне больше нет.
+function tryCollect(p, dt, ball, match, gk, K, faceBall) {
   const team = p.team;
   const pos = p.group.position;
   const bp = ball.mesh.position;
   const goalX = team.ownGoalX;
   const seq = ball.seq || 0;
+  // Приказ человека ведёт tryRush со своими правилами — двух ветвей выхода
+  // одновременно быть не должно
+  if (gk.orderT > 0) return false;
   // РЕШЕНИЕ ДЕРЖИТСЯ, ТОЧКА ПЕРЕСЧИТЫВАЕТСЯ — та же развилка, что у выхода на
   // подачу, и здесь она стоила голов. Мяч тормозится о газон, поэтому его
   // скорость ползёт мимо порога туда-обратно: замер дал «своя sp» 8.9 / 9.1 /
@@ -809,7 +819,21 @@ function tryCollect(p, dt, ball, match, gk, K, shot, faceBall) {
   // идёт до конца; отменяет выход только смена траектории (рикошет тикает
   // ball.seq) или сам факт, что мяч больше не идёт в створ.
   const committed = gk.collectSeq === seq && gk.collectOn;
-  if (!committed && (shot.speed > K.collectSpeed || bp.y > K.collectMaxY)) return false;
+  if (!committed && bp.y > K.collectMaxY) return false;
+
+  // МЯЧ ПОД ЧЬИМ-ТО КОНТРОЛЕМ — ЭТО УЖЕ НЕ ПОДБОР. У своего защитника вратарь
+  // мяч не отнимает никогда; мяч, взятый соперником, — забота выхода 1в1
+  // (tryRush), у которого своя стоп-дистанция и своя «звезда». Но уже начатый
+  // выход так не отменяют — «вышел, доводи»: гасим его только когда гонка
+  // проиграна начисто, то есть соперник и мячом владеет, и стоит к нему ближе.
+  const owner = match.toucher;
+  if (owner && owner !== p) {
+    const mate = owner.team === team;
+    const op = owner.group.position;
+    const lost = Math.hypot(op.x - bp.x, op.z - bp.z) <
+      Math.hypot(pos.x - bp.x, pos.z - bp.z) - K.handReach;
+    if (mate || !committed || lost) { gk.collectOn = false; return false; }
+  }
 
   // Самая ранняя точка траектории, до которой кипер успевает с запасом.
   //
@@ -821,23 +845,59 @@ function tryCollect(p, dt, ball, match, gk, K, shot, faceBall) {
   // 7.0–7.7 м/с, то есть на еле катящихся мячах. Решение принимается ОДИН раз
   // (strict), дальше цель считается без него: пусть кипер придёт на полшага
   // позже, чем хотел, — это всё равно лучше, чем не прийти вовсе.
+  // СКОРОСТЬ СМОТРИМ В ТОЧКЕ ВСТРЕЧИ, А НЕ СЕЙЧАС И НЕ НА ЛИНИИ (правило с
+  // 29.07.2026). Прежняя редакция брала её из `shot.speed`, то есть жила ВНУТРИ
+  // ветки удара, — а «удар» у нас существует только для мяча, который дойдёт до
+  // линии ворот. Мяч, тормозящий о газон, до неё чаще всего НЕ доходит: при
+  // λ ≈ 0.72 1/с мяч, катящийся на 3 м/с, встаёт через 4.2 м. То есть самый
+  // частый вид «еле катящегося мяча» — тот, что замирает в штрафной, — вратарь
+  // не читал как удар и не забирал ВООБЩЕ: он ждал на дуге, пока к мячу добежит
+  // нападающий (замер looseTest: 7 голов из 18). Теперь решение о подборе не
+  // зависит от того, доедет ли мяч до ворот.
   const best = interceptPoint(pos, ball, K.lungeSpeed, K.readHorizon, {
     lead: K.collectOwnLead,
     strict: !committed,
-    accept: (x, y, z) => y <= K.collectMaxY && inOwnBox(team, x, z) &&
-      Math.abs(x - goalX) <= K.collectRange,
+    vel: p.vel,
+    reach: K.handReach,
+    accept: (x, y, z, t, sp) => y <= K.collectMaxY && inOwnBox(team, x, z) &&
+      Math.abs(x - goalX) <= K.collectRange && (committed || sp <= K.collectSpeed),
   });
   if (!best) { if (!committed) gk.collectOn = false; return false; }
 
   if (!committed) {
-    const oppSpeed = CONFIG.player.speed * CONFIG.player.sprintFactor;
-    const mine = best.d / K.lungeSpeed;
-    for (const o of match.otherTeam(team).players) {
-      const op = o.group.position;
-      if (Math.hypot(op.x - best.x, op.z - best.z) / oppSpeed < mine + K.collectLead) {
-        gk.collectOn = false;
-        return false;
-      }
+    // Гонка честная в ОБЕ стороны: своё время — с разгоном и с учётом того, что
+    // мяч берут РУКАМИ, чужое — по фактической скорости спринта (а не по
+    // формуле без speedFactor, которая дарила сопернику лишние 6 %) и с
+    // реакцией, если он на мяч ещё не бежит.
+    const mine = reachTime(pos.x, pos.z, p.vel.x, p.vel.z, best.x, best.z,
+      K.lungeSpeed, K.handReach);
+    // ЗАПАС ЗАВИСИТ ОТ ЦЕНЫ НЕВЫХОДА (правило с 29.07.2026). Постоянные 0.30 с
+    // читались как осторожность, а были слепотой: мяч, лежащий в семи метрах
+    // от ворот, вратарь брал с честной форой 0.18 с — и не шёл, потому что до
+    // 0.30 не дотягивал. Дальше форы становилось только меньше, и эпизод
+    // кончался тем, что нападающий спокойно добегал и бил в стоящего на линии
+    // кипера. Но у невыхода тоже есть цена, и у самой ленты она равна голу:
+    // мяч в трёх метрах от ворот отдавать сопернику нельзя ни при каком
+    // расчёте. Поэтому полный запас требуется на КРАЮ зоны сбора, а у ворот он
+    // тает до нуля — ровно так и играют живые вратари.
+    const dPoint = Math.hypot(best.x - goalX, best.z);
+    const lead = K.collectLead * Math.max(0, Math.min(1, dPoint / K.collectRange));
+    const theirs = foeReach(match, team, best.x, best.z);
+    if (theirs < mine + lead) {
+      gk.collectOn = false;
+      return false;
+    }
+    // ВЫХОДЯТ ЗА МЯЧОМ, КОТОРЫЙ ИНАЧЕ ДОСТАНЕТСЯ СОПЕРНИКУ (правило с
+    // 29.07.2026). Без этого условия кипер шёл подбирать ЛЮБОЙ тихий мяч в
+    // штрафной — в том числе тот, который спокойно выносит свой защитник. В
+    // футболе так не играют, и цена видна числом: ablation на автосимуляции
+    // (по 4 матча, ветка выключается своим числом в конфиге) дал при жадном
+    // сборе 0.5 гола за матч против 2.5 с выключенным — вратарь съедал не
+    // моменты, а сами ПЕРЕДАЧИ, и точность паса падала с 46 % до 41 %.
+    // Свой полевой успевает раньше соперника — мяч его, вратарь остаётся дома.
+    if (sideReach(team.players, best.x, best.z, p) + K.collectMateLead < theirs) {
+      gk.collectOn = false;
+      return false;
     }
     gk.collectSeq = seq;
     gk.collectOn = true;
@@ -904,6 +964,8 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
     const best = interceptPoint(pos, ball, goSpeed, K.readHorizon, {
       lead: ownLead,
       strict: true,
+      vel: p.vel,
+      reach: K.handReach,
       accept: (x, y, z) => y <= K.claimMaxY && y >= CONFIG.ball.radius * 2 &&
         Math.abs(x - goalX) <= K.claimZoneX && Math.abs(z) <= K.claimZoneZ,
     });
@@ -912,16 +974,14 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
     // Соперники — да, свои — нет: на выходе вратарь хозяин штрафной и кричит
     // «моё!». Прежняя версия считала своих защитников конкурентами, а на
     // подаче они рядом всегда — потому выход и не случался НИ РАЗУ.
-    let theirs = Infinity;
-    const opp = match.otherTeam(team).players;
-    for (const o of opp) {
-      const op = o.group.position;
-      const d = Math.hypot(op.x - best.x, op.z - best.z);
-      theirs = Math.min(theirs, d / (CONFIG.player.speed * CONFIG.player.sprintFactor));
-    }
+    // Обе стороны гонки считает одна модель (reachTime): разгон, реакция того,
+    // кто ещё не бежит, и разная длина «дотягивания» — руки против бутсы.
+    const theirs = foeReach(match, team, best.x, best.z);
+    const mine = reachTime(pos.x, pos.z, p.vel.x, p.vel.z, best.x, best.z,
+      goSpeed, K.handReach);
     // Приказ человека (W / Y) отменяет расчёт: решил выходить — выходим,
     // и промах становится ЕГО ошибкой. Ровно так это работает в FIFA/FC.
-    if (!ordered && best.d / K.lungeSpeed > theirs - K.claimLead) {
+    if (!ordered && mine > theirs - K.claimLead) {
       gk.claimSeq = seq; gk.claim = null; return false;
     }
     gk.claimSeq = seq;
@@ -929,7 +989,7 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
     gk.claimStart = best.d;
     // Толпа в точке — играем КУЛАКОМ: ловить мяч в сутолоке нельзя
     let crowd = 0;
-    for (const o of opp) {
+    for (const o of match.otherTeam(team).players) {
       const op = o.group.position;
       if (Math.hypot(op.x - best.x, op.z - best.z) < K.punchRadius) crowd++;
     }
@@ -1007,22 +1067,82 @@ function tryClaim(p, dt, ball, match, gk, K, faceBall) {
 function interceptPoint(pos, ball, speed, horizon, opts = {}) {
   const accept = opts.accept || null;
   const lead = opts.lead || 0;
+  const vel = opts.vel || null;
+  const reach = opts.reach || 0;
   let best = null;
   let fallback = null;
   let bestLack = Infinity;
-  flightPath(ball, (x, y, z, t) => {
-    if (accept && !accept(x, y, z, t)) return false;
+  flightPath(ball, (x, y, z, t, sp) => {
+    if (accept && !accept(x, y, z, t, sp)) return false;
     const d = Math.hypot(x - pos.x, z - pos.z);
-    const lack = d / Math.max(0.5, speed) + lead - t;  // > 0 — опаздываю
-    if (lack <= 0) { best = { x, y, z, t, d }; return true; }
-    if (lack < bestLack) { bestLack = lack; fallback = { x, y, z, t, d }; }
+    const mine = vel
+      ? reachTime(pos.x, pos.z, vel.x, vel.z, x, z, speed, reach)
+      : d / Math.max(0.5, speed);
+    const lack = mine + lead - t;                      // > 0 — опаздываю
+    if (lack <= 0) { best = { x, y, z, t, d, sp }; return true; }
+    if (lack < bestLack) { bestLack = lack; fallback = { x, y, z, t, d, sp }; }
     return false;
   }, horizon);
   if (best) return best;
   if (opts.strict) return null;
   if (fallback) return fallback;
   const bp = ball.mesh.position;
-  return { x: bp.x, y: bp.y, z: bp.z, t: 0, d: Math.hypot(bp.x - pos.x, bp.z - pos.z) };
+  return {
+    x: bp.x, y: bp.y, z: bp.z, t: 0, sp: ball.vel.length(),
+    d: Math.hypot(bp.x - pos.x, bp.z - pos.z),
+  };
+}
+
+// ВРЕМЯ ВЫХОДА НА ТОЧКУ — ТА ЖЕ ФОРМУЛА, ПО КОТОРОЙ ЖИВЁТ ДВИЖОК (правило с
+// 29.07.2026). Все решения вратаря о выходе — это сравнение «успею ли я раньше
+// соперника», и раньше обе стороны считались наивным `дистанция / скорость`.
+// Замер разгона (aiUpdate гонит скорость к пределу экспонентой с CONFIG.player
+// .accel = 10 1/с): полевой на спринте проходит 10 м за 1.27 с, вратарь — за
+// 1.65, а наивная формула обещает 1.09 и 1.56. Ошибка невелика сама по себе,
+// но она РАЗНАЯ у быстрого и медленного, то есть систематически дарит фору
+// сопернику — как раз в те доли секунды, которыми решение и определяется.
+// Интеграл экспоненты даёт точный ответ: s = v·t − (v − v0)/a, отсюда
+//   t = d/v + (1 − v0∥/v)/a.
+// Проверка: 10/8.63 + 0.1 = 1.26 против замеренных 1.27; 10/6.4 + 0.1 = 1.66
+// против 1.65.
+//
+// reach — то, чем игрок ДОТЯГИВАЕТСЯ до мяча (у вратаря руки, у полевого
+// радиус подбора): сравнивать надо приход НОГИ и приход РУКИ, а не центров.
+// react начисляется только тому, кто на мяч ещё не бежит: нападающий, уже
+// летящий к мячу, реакцию потратил, а стоящий — нет.
+function reachTime(px, pz, vx, vz, tx, tz, vmax, reach = 0, react = 0) {
+  const dx = tx - px;
+  const dz = tz - pz;
+  const raw = Math.hypot(dx, dz);
+  const d = Math.max(0, raw - reach);
+  if (d <= 0.001) return 0;
+  const along = raw > 1e-4 ? (vx * dx + vz * dz) / raw : 0;
+  const v = Math.max(0.5, vmax);
+  const lag = Math.max(0, 1 - Math.max(0, along) / v) / CONFIG.player.accel;
+  return d / v + lag + (along > 1 ? 0 : react);
+}
+
+// Через сколько ближайший игрок команды сыграет мяч в этой точке.
+// Соперников считаем всегда — это гонка; своих только там, где надо ответить
+// «а справится ли защита без меня». В самой гонке свои не участвуют: на выходе
+// вратарь хозяин штрафной и кричит «моё!» (то же правило, что в tryClaim).
+function sideReach(players, x, z, skip = null) {
+  const P = CONFIG.player;
+  const sprint = P.speed * CONFIG.ai.speedFactor * P.sprintFactor;
+  const react = CONFIG.ai.passModel.oppReact;
+  let best = Infinity;
+  for (const o of players) {
+    if (o === skip || o.isKeeper) continue;
+    if (o.downT > 0 || o.tackleT > 0) continue;   // лежащий в гонке не участвует
+    const op = o.group.position;
+    best = Math.min(best,
+      reachTime(op.x, op.z, o.vel.x, o.vel.z, x, z, sprint, P.controlRadius, react));
+  }
+  return best;
+}
+
+function foeReach(match, team, x, z) {
+  return sideReach(match.otherTeam(team).players, x, z);
 }
 
 // Выход на мяч за спину защите и 1в1: сокращаем угол. Вышел рано — обыграют,
@@ -1062,16 +1182,21 @@ function tryRush(p, dt, ball, match, gk, K, faceBall) {
     return true;
   }
 
-  // (1) Свободный мяч за спиной защиты — подчистить (свипер)
+  // (1) Свободный мяч за спиной защиты — подчистить (свипер).
+  // ЦЕЛЬ — ТОЧКА ПЕРЕХВАТА, А НЕ ТЕНЬ МЯЧА (правило с 29.07.2026, третий случай
+  // одной и той же грабли — до этого на ней спотыкались приказ «на выход» и
+  // сам tryClaim). Свипер бежал в `bp.x, bp.z`, то есть туда, где мяч СЕЙЧАС;
+  // на катящемся мяче это погоня за хвостом, и гонку он вдобавок считал по той
+  // же уходящей точке. Обе стороны теперь считаются моделью reachTime.
   if ((!owner || owner === p) && dGoal < K.sweepRange && bp.y < 1.2) {
-    const mine = distToBall(p, ball) / K.lungeSpeed;
-    let theirs = Infinity;
-    for (const o of match.otherTeam(team).players) {
-      theirs = Math.min(theirs, distToBall(o, ball) /
-        (CONFIG.player.speed * CONFIG.player.sprintFactor));
-    }
-    if (mine < theirs - K.sweepMargin) {
-      const mv = seek(pos.x, pos.z, bp.x, bp.z);
+    const aim = interceptPoint(pos, ball, K.lungeSpeed, K.readHorizon, {
+      vel: p.vel,
+      reach: K.handReach,
+    });
+    const mine = reachTime(pos.x, pos.z, p.vel.x, p.vel.z, aim.x, aim.z,
+      K.lungeSpeed, K.handReach);
+    if (mine < foeReach(match, team, aim.x, aim.z) - K.sweepMargin) {
+      const mv = seek(pos.x, pos.z, aim.x, aim.z);
       // Вне штрафной руками нельзя — там кипер просто выносит ногой,
       // обычной механикой удара полевого игрока (aiKick через контакт)
       p.aiUpdate(dt, mv, {

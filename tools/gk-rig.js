@@ -8,17 +8,30 @@
 //   gk.throughTest();                   // мяч идёт прямо в вратаря: сыграет?
 //   gk.orderTest();                     // приказ «на выход» (W / Y): перехватит?
 //   gk.rollTest();                      // еле катящийся мяч издалека
+//   gk.looseTest();                     // свободный мяч у штрафной ПРОТИВ нападающего
 //   gk.lobTest();                       // навесной удар издалека: перебрасывают?
 //   gk.lobTrace({ d: 30, wantY: 1.4 }); // покадровый разбор одного навеса
 //   gk.netTest();                       // фантомные голы сквозь сетку
 //
-// ЭТАЛОНЫ СБОРКИ (29.07.2026, сессия 58):
-//   throughTest — свежий 5/9 · лежит 4/9 · в броске 3/9 · кулдаун 3/9
+// ЭТАЛОНЫ СБОРКИ (29.07.2026, сессия 59):
+//   throughTest — 13 голов из 36 (свежий 3/9 · лежит 4/9 · бросок 3/9 · кулдаун 3/9)
 //   orderTest   — 5 из 5 «в руках» (без приказа 2 из 5)
 //   rollTest    — 0 голов из 27, НИ ОДНОГО броска
-//   lobTest     — 8 голов из 40
+//   looseTest   — 0…3 гола из 18, забрано 15–18 (сам стенд шумит на ±2: в нём
+//                 живут и ошибка чтения удара, и решения AI нападающего). До
+//                 правки — 7 голов, забрано 11, и «вышел на» 1.2 м, то есть
+//                 кипер не сходил со стартовой точки ВООБЩЕ
+//   runGk       — воронка 4 матчей: сквозь вратаря 22 % (было 36 %),
+//                 «ушёл с линии» НОЛЬ, выходы на 20–22 % подач в штрафную
+//   lobTest     — 10…15 голов из 40, и это НЕ регрессия: очная ставка со сборкой
+//                 до правки (git archive в подпапку, тот же сервер) дала там
+//                 13/11/9 — стенд шумит из-за gauss()-ошибки чтения удара и
+//                 разницу меньше пяти голов на сорока попытках НЕ РАЗРЕШАЕТ.
+//                 Прежняя запись «8 из 40» была удачным прогоном, а не эталоном
 //   netTest     — 2 фантомных на 1500 выстрелов
-//   баланс (tools/sim.js, 8 матчей) — 2.75 гола за матч
+//   баланс (tools/sim.js) — 1.0 / 1.625 / 1.875 гола за матч на трёх выборках
+//                 по 8 матчей; до правки вратаря 2.25 и 3.0. Разница ≈ гол за
+//                 матч и она НАМЕРЕННАЯ: столько стоили дешёвые пропущенные
 //
 // Стенд НИЧЕГО не оставляет сломанным: все патчи снимаются в finally.
 
@@ -988,6 +1001,151 @@ export function parryTest(opts = {}) {
   console.log('исходы:', by, 'худшее расхождение тело↔физика:', worst.toFixed(2), 'м');
   window.GKPARRY = { rows, by, worst };
   return { rows, by, worst };
+}
+
+// ===== 3б. СВОБОДНЫЙ МЯЧ У ШТРАФНОЙ: выходит ли кипер ЗАБРАТЬ его =====
+// Жалоба Олега 29.07.2026: «вратарь у ИИ не выходит забрать мяч, когда тот
+// совсем не далеко от него, — стоит и ждёт, пока нападающий добежит и забьёт».
+//
+// Ни один прежний стенд этого не ловит ПО ПОСТРОЕНИЮ: в rollTest и orderTest
+// соперник СТОИТ в точке удара, а вся ветка выхода (tryCollect и свипер в
+// tryRush) отменяется именно расчётом «успею ли я раньше бегущего соперника».
+// Значит вход стенда обязан содержать нападающего, который к мячу БЕЖИТ.
+//
+// Гонка честная: работает полный match.update, то есть нападающего ведёт его
+// собственный AI, а не подсказка стенда. Остальные двадцать игроков уезжают на
+// чужую половину — меряем ОДНУ дуэль, а не эпизод с семью подстраховками.
+export function looseTest(opts = {}) {
+  const { match, ball, goals, CONFIG } = window.DBG;
+  const team = match.teams[1];          // обороняющаяся команда, ворота на +x
+  const foe = match.teams[0];
+  const goalX = team.ownGoalX;
+  const sign = Math.sign(goalX);
+  const k = team.keeper;
+  const dBalls = opts.dBalls || [7, 11, 15];   // м от линии ворот до мяча
+  const dOpps = opts.dOpps || [6, 10, 14];     // м от мяча до нападающего
+  const rolls = opts.rolls || [0, 3];          // м/с: мяч лежит или катится к воротам
+  const z0 = opts.z != null ? opts.z : 2;
+  const rows = [];
+
+  const saved = {
+    setControlled: match.setControlled,
+    updateSwitching: match.updateSwitching,
+    startIntro: match.startIntro,
+    startReplay: match.startReplay,
+    humanTeam: match.humanTeam,
+    controlled: match.controlled,
+    onGoal: match.onGoal,
+  };
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+
+  try {
+    match.setControlled = function () { this.controlled = null; };
+    match.updateSwitching = function () { this.input.consumeSwitch(); };
+    match.controlled = null;
+    match.humanTeam = { players: [], fieldPlayers: [], receiver: null, receiveTimer: 0 };
+    match.startIntro = function () { this.state = 'play'; };
+    match.startReplay = function () { return false; };
+
+    for (const dBall of dBalls) {
+      for (const dOpp of dOpps) {
+        for (const roll of rolls) {
+          let goal = false;
+          match.onGoal = function () { goal = true; };
+          match.state = 'play';
+          ball.reset();
+          ball.goalScored = false;
+
+          const striker = foe.fieldPlayers[9] || foe.fieldPlayers[0];
+          let n = 0;
+          for (const p of match.allPlayers) {
+            if (p === k || p === striker) continue;
+            p.reset(-sign * (CONFIG.field.length / 2 - 14), ((n++ % 10) - 5) * 4, sign * Math.PI / 2);
+          }
+          k.reset();
+          k.group.position.set(goalX - sign * 1.2, 0, 0);
+          k.vel.set(0, 0, 0);
+          k.gk = null;
+
+          const bx = goalX - sign * dBall;
+          ball.mesh.position.set(bx, CONFIG.ball.radius, z0);
+          ball.vel.set(roll ? sign * roll : 0, 0, 0);
+          ball.seq = (ball.seq || 0) + 1;
+          ball.strikeAge = 0.8;     // мяч уже катится какое-то время, это не удар в упор
+          striker.reset(bx - sign * dOpp, z0, sign * Math.PI / 2);
+
+          // Что кипер ВИДИТ на входе: идёт ли мяч в створ (от этого зависит,
+          // попадёт ли он вообще в ветку tryCollect) и какова его фора в гонке
+          const cross = predictGoalPlane(ball, goalX, CONFIG.ai.keeper.readHorizon);
+          const K = CONFIG.ai.keeper;
+          const mine = Math.hypot(bx - k.group.position.x, z0) / K.lungeSpeed;
+          const theirs = dOpp / (CONFIG.player.speed * CONFIG.player.sprintFactor);
+
+          let out = Math.abs(k.group.position.x - goalX);
+          let near = 99; let acted = 'стоял'; let first = null; let res = null;
+          match.lastTouch = null;
+          for (let i = 0; i < 260 && !goal; i += 1) {
+            match.update(FRAME);
+            const ev = ball.update(FRAME);
+            goals.update(FRAME);
+            if (ev === 'goal') match.onGoal();
+            const kp = k.group.position;
+            const bp = ball.mesh.position;
+            out = Math.max(out, Math.abs(kp.x - goalX));
+            near = Math.min(near, Math.hypot(bp.x - kp.x, bp.z - kp.z));
+            const g = k.gk || {};
+            if (acted === 'стоял') {
+              if (g.collecting) acted = 'выход за мячом';
+              else if (g.rushing) acted = 'выход';
+              else if (k.diveT > 0) acted = 'бросок';
+              else if (g.retreating) acted = 'пятился';
+            }
+            if (!first && match.lastTouch) first = match.lastTouch === k ? 'ВРАТАРЬ' : 'соперник';
+            if (k.ai && k.ai.holding) { res = 'в руках'; break; }
+            if (!res && k.gk && k.gk.last) res = k.gk.last.outcome;
+          }
+          rows.push({
+            'мяч в, м': dBall,
+            'соперник в, м': dOpp,
+            'катится, м/с': roll,
+            'в створ?': cross ? 'да' : 'нет',
+            'фора кипера, с': +(theirs - mine).toFixed(2),
+            кипер: acted,
+            'вышел на, м': +out.toFixed(1),
+            'ближе всего, м': +near.toFixed(2),
+            'первый на мяче': first || '—',
+            итог: goal ? 'ГОЛ' : (res || (first === 'соперник' ? 'у соперника' : 'жив')),
+          });
+        }
+      }
+    }
+  } finally {
+    match.setControlled = saved.setControlled;
+    match.updateSwitching = saved.updateSwitching;
+    match.startIntro = saved.startIntro;
+    match.startReplay = saved.startReplay;
+    match.humanTeam = saved.humanTeam;
+    match.onGoal = saved.onGoal;
+    match.controlled = saved.controlled;
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.score = [0, 0];
+    match.kickoff(0);
+  }
+  console.table(rows);
+  // «ВЫШЕЛ» МЕРЯЕТСЯ МЕТРАМИ, А НЕ ФЛАГОМ. Флаг `collecting` загорается и после
+  // того, как по мячу уже ударил соперник, — на исходной сборке он давал 15
+  // «выходов» из 18 при том, что кипер не сходил с ленточки (замер: «вышел на»
+  // 1.2 м, то есть стартовая позиция). Уходом с линии считаем 2.5 м и дальше.
+  const went = rows.filter((r) => r['вышел на, м'] > 2.5).length;
+  const got = rows.filter((r) => r.итог === 'в руках').length;
+  const goals_ = rows.filter((r) => r.итог === 'ГОЛ').length;
+  console.log(`ВЫШЕЛ ${went} из ${rows.length}; забрал ${got}; пропущено ${goals_}`);
+  window.GKLOOSE = { rows, went, got, goals: goals_ };
+  return { rows, went, got, goals: goals_ };
 }
 
 // ===== 4. Фантомные голы: мяч, не проходивший чистый проём =====
