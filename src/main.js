@@ -315,15 +315,21 @@ syncFoldBtn();
 // ползунок меняет темп на ходу, без перезапуска матча.
 const tempoSlider = document.getElementById('set-tempo');
 const tempoVal = document.getElementById('set-tempo-val');
-const TEMPO_LABEL = { 70: 'очень размеренный', 80: 'размеренный', 90: 'спокойный', 100: 'обычный', 110: 'быстрый' };
-const savedTempo = Number(localStorage.getItem('f98.gameSpeed'));
+const TEMPO_LABEL = {
+  70: 'очень размеренный', 80: 'размеренный', 90: 'спокойный',
+  95: 'чуть спокойнее', 100: 'обычный', 110: 'быстрый',
+};
+// Ключ с индексом ПОКОЛЕНИЯ, как у GRADE_BASE в грейдинге. Первая редакция
+// ставила темп 80 %, и это оказалось слишком вязким; у того, кто уже трогал
+// ползунок, в localStorage осталось бы старое число и перекрыло новую базу.
+const savedTempo = Number(localStorage.getItem('f98.gameSpeed2'));
 if (savedTempo >= 70 && savedTempo <= 110) CONFIG.gameSpeed = savedTempo / 100;
 tempoSlider.value = Math.round(CONFIG.gameSpeed * 100);
 tempoVal.textContent = TEMPO_LABEL[tempoSlider.value] || `${tempoSlider.value}%`;
 tempoSlider.addEventListener('input', () => {
   CONFIG.gameSpeed = Number(tempoSlider.value) / 100;
   tempoVal.textContent = TEMPO_LABEL[tempoSlider.value] || `${tempoSlider.value}%`;
-  remember('f98.gameSpeed', tempoSlider.value);
+  remember('f98.gameSpeed2', tempoSlider.value);
 });
 
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
