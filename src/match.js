@@ -10,7 +10,7 @@ import { Player, setLookTarget } from './player.js';
 import { Team } from './ai/team.js';
 import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
-import { distToBall, freeSpace, passPower, passStrikeKind } from './ai/steering.js';
+import { distToBall, freeSpace, passPower, passStrikeKind, passTime } from './ai/steering.js';
 import { solveSpacePass } from './ai/passing.js';
 import { playWhistle, setCrowdIntensity, crowdCheer, flareHiss } from './sfx.js';
 import { Replay } from './replay.js';
@@ -877,18 +877,47 @@ export class Match {
       // С мячом Q/LB курсор НЕ переключает: это модификатор СТЕНОЧКИ (Q+ПАС),
       // и курсор никогда не убегает с владеющего мячом (дух PES: L1 в атаке)
       if (this.controlled && (this.controlled.isToucher || this.controlled.hasBall)) return;
+      // ПОКА НАШ ПАС ЛЕТИТ, РУЧНОЕ ПЕРЕКЛЮЧЕНИЕ ЖДЁТ АДРЕСАТА (правило с
+      // 29.07.2026). `nearestFieldPlayer` ищет ближайшего К МЯЧУ, а мяч в этот
+      // момент ещё рядом с пасующим — то есть человек, жмущий Q «дайте мне
+      // того, к кому летит», получал кого угодно, только не его.
+      if (team.receiver && team.receiveTimer > 0 && !this.toucher &&
+          team.receiver !== this.controlled) {
+        this.setControlled(team.receiver, 0.25);
+        return;
+      }
       this.setControlled(this.nearestFieldPlayer(team, this.controlled), 0.25);
       return;
     }
     if (this.switchCd > 0) return;
 
-    // Пока наш пас/подача летит выбранному адресату (в т.ч. замыкающему
-    // навеса или адресату розыгрыша) и мяча ещё никто не коснулся — авто-
-    // переключение курсор НЕ трогает: адресат-AI сам добежит и примет, потом
-    // курсор перейдёт к нему («партнёр взял мяч»). Иначе, став controlled
-    // заранее, он терял автоприём и убегал от мяча (фидбек Олега 22.07)
+    // ---- ПЕРЕДАЧА КУРСОРА АДРЕСАТУ: ЗАРАНЕЕ, А НЕ ПО КАСАНИЮ ----
+    // (правило с 29.07.2026, фидбек Олега «игроки не всегда успевают
+    // переключиться, когда на них резко пас или навес идёт»).
+    //
+    // Пока мяч летит, курсор вёл адресат-AI, а человек получал управление
+    // только когда партнёр УЖЕ коснулся мяча (ветка ниже). Замер стенда
+    // switch-rig: пас в ноги на 12 м — курсор переходил на 0.97 с при встрече
+    // с мячом на 0.97 с, то есть ЗАПАС 0.00 с; на 22 м — курсор на 1.48 при
+    // встрече на 1.47, то есть −0.02 с, управление приходило уже ПОСЛЕ мяча.
+    // На таком запасе человек физически не успевает ничего: зрительная реакция
+    // сама по себе 0.20–0.25 с (то же число заложено вратарю).
+    //
+    // Но и переключать в момент паса нельзя — на этом обжигались 22.07:
+    // адресат, ставший controlled сразу, терял автоприём и убегал от мяча.
+    // Поэтому курсор передаётся ЗА handoff секунд до встречи: большую часть
+    // полёта мяч ведёт AI (он и бежит на приём), а последние полсекунды с
+    // лишним человек уже правит сам и успевает решить — принять, отпустить
+    // под удар или сыграть в касание.
     if (team.receiver && team.receiveTimer > 0 && !this.toucher &&
-        Math.hypot(this.ball.vel.x, this.ball.vel.z) > 2) return;
+        Math.hypot(this.ball.vel.x, this.ball.vel.z) > 2) {
+      const lead = this.receiverLead(team.receiver);
+      if (lead == null || lead > SW.handoff) return;
+      if (team.receiver !== this.controlled) {
+        this.setControlled(team.receiver, SW.handoffCd);
+      }
+      return;
+    }
 
     // Партнёр взял мяч — управление к нему (как после паса в PES)
     if (this.toucher && this.toucher.team === team &&
@@ -906,6 +935,31 @@ export class Match {
         if (nd < cur * SW.advantage && cur - nd > 2.5) this.setControlled(near);
       }
     }
+  }
+
+  // Сколько СЕКУНД мячу до адресата — по этому числу решается, когда отдавать
+  // курсор человеку. Катящийся мяч тормозит о газон экспонентой, поэтому его
+  // время берём готовой `passTime` (та же λ, что у расчёта силы паса): наивное
+  // «дистанция / скорость» на пасе через полполя врёт почти вдвое. Летящий
+  // мяч горизонтальную скорость почти держит — там хватает деления.
+  // null значит «встречи не будет»: мяч идёт мимо адресата или уже еле ползёт.
+  receiverLead(mate) {
+    if (!mate) return null;
+    const bp = this.ball.mesh.position;
+    const mp = mate.group.position;
+    const dx = mp.x - bp.x;
+    const dz = mp.z - bp.z;
+    const d = Math.hypot(dx, dz);
+    const vx = this.ball.vel.x;
+    const vz = this.ball.vel.z;
+    const v = Math.hypot(vx, vz);
+    if (v < 0.5 || d < 0.01) return 0;
+    // Мяч должен ЛЕТЕТЬ НА адресата, а не мимо: иначе «время до встречи»
+    // посчиталось бы и для мяча, уходящего в другую сторону
+    if ((dx * vx + dz * vz) / (d * v) < 0.3) return null;
+    const air = bp.y > 0.5 || this.ball.vel.y > 0.5;
+    const t = air ? d / v : passTime(d, v);
+    return Number.isFinite(t) ? t : null;
   }
 
   // Пас-ассист человека: адресат — партнёр в конусе взгляда; направление
