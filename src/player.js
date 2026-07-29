@@ -110,6 +110,11 @@ function getKitTexture(gltf, texturePath, colorHex, look) {
 // Временные вектора для handsWorldPoint — без аллокаций в кадре
 const _handA = new THREE.Vector3();
 const _handB = new THREE.Vector3();
+// …и для замера высоты таза в стойке (пивот ласточки) и точек удара соперников
+const _tmpHip = new THREE.Vector3();
+const _rivalPt = new THREE.Vector3();
+// Остаток ручного силуэта падения — общий объект, чтобы не сорить в кадре
+const _fallSil = { tilt: 0, lift: 0 };
 
 // Временные для слоя «живой корпус» (updatePose) — тоже без аллокаций
 const _poseEuler = new THREE.Euler();
@@ -451,6 +456,14 @@ export class Player {
       const r = this._hipsRest;
       const m = Math.max(Math.abs(r.x), Math.abs(r.y), Math.abs(r.z));
       this._upAxis = m === Math.abs(r.x) ? 'x' : (m === Math.abs(r.y) ? 'y' : 'z');
+      // ВЫСОТА ТАЗА В СТОЙКЕ — пивот ласточки, и она у каждого своя: в масштаб
+      // модели уже вложены личные рост и сложение (modelScale · tall · wide).
+      // Считать её числом нельзя ровно по той же причине, по какой причёска
+      // обязана гасить масштаб арматуры ПОКОЛОННО: у крупного игрока таз выше
+      // на сантиметры, и общая константа посадила бы его в газон.
+      this.model.updateMatrixWorld(true);
+      this._hips.getWorldPosition(_tmpHip);
+      this._standHipY = Math.max(0.5, _tmpHip.y - this.group.position.y);
     }
     this._chestBone = this.model.getObjectByName('mixamorigSpine2')
       || this.model.getObjectByName('mixamorigSpine1') || null;
@@ -1284,6 +1297,8 @@ export class Player {
     // 28.07.2026 — «до конца матча карабкается»). Расстановка после гола,
     // аута и любого свистка идёт именно через reset.
     this._fallPhase = null;
+    this._landT = 0;
+    this._diveLiftEnd = 0;
     this.cancelOneShot();
     this.challengeCd = 0;
     this.tackleT = 0;
@@ -1864,6 +1879,12 @@ export class Player {
   // (gk_idle, руки наготове) — фидбек Олега 18.07.2026 «отбивает ногами».
   _updateAnim(dt, speed) {
     const P = CONFIG.player;
+    // Высота фигуры над газоном СКЛАДЫВАЕТСЯ из двух источников — выпрыга под
+    // замыкание и подъёма таза в ласточке, — поэтому собирается в локальную
+    // переменную и ПРИСВАИВАЕТСЯ один раз. Прибавлять к `group.position.y`
+    // нельзя: сбрасывать её некому, и за секунду лежачей фазы поправка
+    // накопилась бы в метр под газоном (поймано замером сразу после правки).
+    let jumpY = 0;
     // Прыжок под удар головой: несимметричная дуга — резкий толчок вверх
     // (jumpRise) и падение (jumpFall). ВЕРХНЯЯ ТОЧКА ставится ровно на миг
     // контакта: startJump растягивает подъём под прогноз прилёта мяча, а
@@ -1880,8 +1901,8 @@ export class Player {
           ? Math.sin((a / this.jumpRise) * Math.PI * 0.5) * h        // толчок
           : Math.max(0, 1 - ((a - this.jumpRise) / this.jumpFall) ** 2) * h; // падение
       }
-      this.group.position.y = y;
-      if (this.jumpT <= 0) { this.group.position.y = 0; this.jumpHeight = null; }
+      jumpY = y;
+      if (this.jumpT <= 0) { jumpY = 0; this.jumpHeight = null; }
     }
     // Бросок корпусом (ласточка) и подъём: наклон фигуры по взгляду
     // (порядок эйлера YXZ), после броска — лежим и встаём клипом getup.
@@ -1889,6 +1910,7 @@ export class Player {
     // корпус откинут НАЗАД (ноги вперёд), после слайда сидим на газоне
     const DV = P.aerial.dive;
     let tilt = 0;
+    let lift = 0;   // подъём фигуры от газона (ласточка отрывает стопы)
     // Приём: короткий подсед-отклон корпуса — «мягкие ноги» гасят мяч.
     // Клипа у приёма нет (просьба Олега 23.07), но без единого движения
     // корпуса приём читался как удар мяча о столб
@@ -1922,20 +1944,38 @@ export class Player {
       // поворот складывался с первым, и вратарь уходил головой на 1.44 м ПОД
       // ГАЗОН на целую секунду (фидбек Олега 26.07: «проваливается и исчезает»)
       const amp = this.diveTilt != null ? this.diveTilt : DV.tiltMax;
-      tilt = (1 - Math.max(0, this.diveT) / dur) * amp;
+      // Огибающая ласточки — smoothstep, а не линейка: у неё нулевая
+      // производная на обоих концах, и фигура не щёлкает ни на отрыве от
+      // газона, ни в горизонтали (то же правило, что у слоя наклона корпуса)
+      const u = _smooth01(1 - Math.max(0, this.diveT) / dur);
+      tilt = u * amp;
+      // ПИВОТ В ТАЗЕ: без этой поправки поворот вокруг стоп топит фигуру под
+      // газон на 0.86 м (замер, tools/aerial-rig.js → diveTrace)
+      if (amp > 0) { lift = this._diveLift(tilt, u); this._diveLiftEnd = lift; }
       if (this.diveT <= 0) {
         this.downT = rec;
         this.downDur = rec;
         this.downTiltAmp = amp;
         this._gotUp = false;
+        if (amp > 0) {
+          // Полевая ласточка приземляется в ту же цепочку, что и сбитый
+          // игрок, — через фазу `land`, где наклон уходит в ноль ровно так же
+          // быстро, как вступает лежачий клип
+          this._fallPhase = 'land';
+          this._landT = DV.land;
+          this._rollFrom = this.rot;
+          this.playOneShot('fallen', 1, 0, null, DV.land * 0.9);
+        }
       }
     } else if (this.downT > 0) {
       this.downT -= dt;
       const k = Math.max(0, this.downT) / (this.downDur || DV.recover);
       if (this._fallPhase) {
-        // Сбитый игрок: цепочка trip → fallen → getup ведёт себя сама, наклон
-        // группы не нужен вовсе — весь силуэт даёт клип
-        this._updateFall(dt);
+        // Сбитый игрок и приземлившаяся ласточка: цепочку land → down → rise
+        // ведёт `_updateFall`, он же и возвращает остаток ручного силуэта
+        const r = this._updateFall(dt);
+        tilt = r.tilt;
+        lift = r.lift;
         if (this.downT <= 0) this._fallPhase = null;
       } else {
         // Полевая «ласточка» играет СТОЯЧИЙ клип, и весь силуэт падения даёт
@@ -1950,6 +1990,7 @@ export class Player {
       }
     }
     this.group.rotation.x = tilt;
+    this.group.position.y = jumpY + lift;
     if (this.mixer) {
       // Хвост клипа удара обрезан (oneShotUntil): проводка доиграна — ноги
       // сразу возвращаются в бег, эпизод не проседает
@@ -2423,39 +2464,7 @@ export class Player {
     // уходит в удар (aerial.runPower). Мяч ждать себя не заставляет.
     let aerialMove = null;
     if (aerialTarget) {
-      const dax = aerialTarget.x - pos.x;
-      const daz = aerialTarget.z - pos.z;
-      const da = Math.hypot(dax, daz);
-      // ПРИШЁЛ НА ТОЧКУ — НЕ ВКАПЫВАЕМСЯ (правка 28.07.2026).
-      //
-      // Раньше в этом месте движение обнулялось: `{ x: 0, z: 0 }`. Замер по
-      // живой игре: скорость падала с 9.17 до 0.85 м/с за 0.117 с — это
-      // торможение 67 м/с², семь g. Игрок замирал столбом и ждал мяч, и это
-      // ровно вторая половина фидбека: «бьёт по внезапно остановившемуся мячу
-      // в воздухе». Мяч-то летел нормально — стоял ИГРОК, и глаз считывал
-      // остановку как остановку мяча.
-      //
-      // Замыкание — это встреча НА ХОДУ. Точка удара не столб, а линия, через
-      // которую надо пробежать: подойдя вплотную, ноги переходят на ДОБОР
-      // курса (мягкое подруливание вдоль прихода мяча), а не на стоп. Заодно
-      // это и есть просьба «если ловит мяч сходу — то бьёт»: сходу и бьёт,
-      // потому что ход никто не отнимает.
-      if (da > APP.strikeHoldRadius) {
-        aerialMove = { x: dax / da, z: daz / da };
-      } else {
-        const runLen = Math.hypot(this.vel.x, this.vel.z);
-        const keep = APP.strikeGlide;   // доля прежнего курса, которую держим
-        if (runLen > 0.6) {
-          const ux = this.vel.x / runLen;
-          const uz = this.vel.z / runLen;
-          const gx = ux * keep + (da > 0.01 ? (dax / da) * (1 - keep) : 0);
-          const gz = uz * keep + (da > 0.01 ? (daz / da) * (1 - keep) : 0);
-          const gl = Math.hypot(gx, gz) || 1;
-          aerialMove = { x: gx / gl, z: gz / gl };
-        } else {
-          aerialMove = { x: 0, z: 0 };  // и правда стояли — стоим дальше
-        }
-      }
+      aerialMove = this.strikeApproach(aerialTarget.x, aerialTarget.z);
       mvx = aerialMove.x;
       mvz = aerialMove.z;
     }
@@ -3964,10 +3973,38 @@ export class Player {
     // бьются вслепую, в падении, и не получаются всегда (просьба Олега — «игрок
     // может, как и при обычных ударах при прострелах, не попасть по мячу»).
     // Кубик брошен один раз, на входе в замах: тут только исполняем решение.
+    //
+    // ДОТЯНУЛСЯ ЛИ — ВОПРОС ФИЗИЧЕСКИЙ, и меряется он ПО ХОДУ КАДРА (правило с
+    // 29.07.2026). Фидбек Олега: «часто удар фиксируется, когда нападающий
+    // физически до него не дотягивается». Замер на 8 матчах (aerial-rig →
+    // contactStats): из 83 настоящих касаний 34 (41 %) случались, когда точка
+    // удара была дальше 0.40 м от мяча, медиана 0.33, максимум 0.86 — при
+    // радиусе мяча 0.11 м. Порог `missRadius` = 1.1 м и правда не удар, а
+    // «выстрел из воздуха» вблизи.
+    //
+    // Но и просто ужать порог нельзя: за кадр мяч на 20 м/с проходит 0.33 м,
+    // и честное касание легко померить мимо на треть метра — ровно поэтому
+    // порог и был таким щедрым. Считаем как вратарь (`sweptContact` в
+    // goalkeeper.js): точку НАИБОЛЬШЕГО СБЛИЖЕНИЯ бутсы и мяча за кадр. Тогда
+    // радиус становится настоящим размером тела, а не поправкой на дискретность.
     const spMiss = this.strikePointWorld(as.styleName, _handA);
-    if (as.willMiss || (spMiss && spMiss.distanceTo(bp) > SY.missRadius)) {
+    if (as.willMiss || (spMiss && this._strikeGap(spMiss, ball, dt) > SY.contactRadius)) {
       this.aerialStrike = null;
       this.kickCooldown = CONFIG.player.kickCooldown * 0.5; // отмашка ногой — пауза
+      return;
+    }
+
+    // БОРЬБУ ВЫИГРЫВАЕТ ТОТ, КТО ПЕРВЫЙ НА МЯЧЕ (правило с 29.07.2026).
+    // Фидбек Олега: «часто мой нападающий в менее выигрышной позиции забивает…
+    // надо, чтобы замыкал передачу или выносил её тот, кто первый на мяче».
+    // Раньше борьбы не было вовсе: замахи разных игроков живут независимо, и
+    // мячом играл тот, чей кадр контакта пришёл раньше, — а порядок обхода в
+    // Match идёт по командам, то есть у команды 0 было структурное преимущество.
+    // Замер: 10 касаний из 83 делал игрок, к которому мяч был НЕ ближе всего;
+    // в восьми из них ближе стоял соперник.
+    if (this._aerialContestLost(ball, dt, spMiss)) {
+      this.aerialStrike = null;
+      this.kickCooldown = CONFIG.player.kickCooldown * 0.5;
       return;
     }
 
@@ -4050,6 +4087,119 @@ export class Player {
     this.aerialStrike = null;
   }
 
+  // НОГИ ПОД ЗАМЫКАНИЕ: ДОБЕГАЕМ ДО ТОЧКИ КОНТАКТА И НЕ ВКАПЫВАЕМСЯ.
+  //
+  // Раньше вплотную к точке движение обнулялось: `{ x: 0, z: 0 }`. Замер по
+  // живой игре: скорость падала с 9.17 до 0.85 м/с за 0.117 с — торможение
+  // 67 м/с², семь g. Игрок замирал столбом и ждал мяч, и глаз считывал это
+  // как остановку МЯЧА («бьёт по внезапно остановившемуся мячу в воздухе»).
+  //
+  // Замыкание — встреча НА ХОДУ. Точка удара не столб, а линия, через которую
+  // надо пробежать: подойдя вплотную, ноги переходят на ДОБОР курса (мягкое
+  // подруливание вдоль прежнего разбега), а не на стоп.
+  //
+  // Метод общий для человека и AI (правка 29.07.2026). До неё «добор» знала
+  // только человеческая ветка, а компьютер в замахе честно вставал столбом
+  // (`updateFieldPlayer` обнулял движение внутри strikeHoldRadius) — то есть
+  // ровно те 22 фигуры, на которые Олег и смотрит со стороны.
+  strikeApproach(tx, tz) {
+    const APP = CONFIG.player.approach;
+    const pos = this.group.position;
+    const dax = tx - pos.x;
+    const daz = tz - pos.z;
+    const da = Math.hypot(dax, daz);
+    if (da > APP.strikeHoldRadius) return { x: dax / da, z: daz / da };
+    const runLen = Math.hypot(this.vel.x, this.vel.z);
+    if (runLen <= 0.6) return { x: 0, z: 0 };  // и правда стояли — стоим дальше
+    const keep = APP.strikeGlide;   // доля прежнего курса, которую держим
+    const ux = this.vel.x / runLen;
+    const uz = this.vel.z / runLen;
+    const gx = ux * keep + (da > 0.01 ? (dax / da) * (1 - keep) : 0);
+    const gz = uz * keep + (da > 0.01 ? (daz / da) * (1 - keep) : 0);
+    const gl = Math.hypot(gx, gz) || 1;
+    return { x: gx / gl, z: gz / gl };
+  }
+
+  // ВСТРЕЧАЕМ МЯЧ НА ХОДУ, А НЕ ЖДЁМ ЕГО НА ТОЧКЕ (правило с 29.07.2026).
+  //
+  // Просьба Олега: «нападающий добегает до летящего мяча и наносит по нему
+  // удар, а не стоит уже в точке и ждёт, пока он к нему прилетит». Замер на
+  // 8 матчах: 43 замыкания из 83 (52 %) исполнялись на скорости ниже 3 м/с,
+  // то есть по определению самой игры — «стоя» (aerial.standSpeed), и такой
+  // удар вдобавок слабее и шумнее.
+  //
+  // Причина не в ногах, а в ПЛАНИРОВАНИИ: адресат бежал к точке прилёта на
+  // полной, приезжал туда за секунду до мяча и тормозил. Лечится СТОЯНКОЙ:
+  // пока времени вагон, целимся не в саму точку, а в отступ от неё по своему
+  // же курсу подхода, и отступ тает вместе с оставшимся временем. К мячу
+  // игрок приходит ровно вовремя и на ходу — это и есть «тайминг забега».
+  //
+  // Возвращает точку, в которую надо бежать (объект-однодневка не создаём —
+  // пишем в переданный приёмник).
+  meetPoint(out, tx, tz, tLeft) {
+    const S = CONFIG.player.aerial.stage;
+    const pos = this.group.position;
+    out.x = tx;
+    out.z = tz;
+    if (!S || !S.enabled || !(tLeft > 0)) return out;
+    const dx = tx - pos.x;
+    const dz = tz - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 1e-3) return out;
+    const run = this._runSpeedCap();
+    // Сколько метров я успею пройти за оставшееся время, с запасом на разгон
+    const canDo = run * tLeft * S.lead;
+    if (canDo >= d) return out;          // не успеваю — бегу прямо в точку
+    const hold = Math.min(S.maxHold, d - canDo);
+    out.x = tx - (dx / d) * hold;
+    out.z = tz - (dz / d) * hold;
+    return out;
+  }
+
+  // Насколько бутса/лоб РАЗМИНУЛИСЬ с мячом за этот кадр — расстояние в точке
+  // наибольшего сближения, а не в момент опроса. За кадр мяч на 20 м/с проходит
+  // 0.33 м, поэтому мгновенный замер честного касания промахивается на треть
+  // метра, и порог приходится держать нереально широким. Приём тот же, что у
+  // вратаря (`sweptContact`), только в трёх измерениях: точка удара летит вместе
+  // с игроком, мяч — со своей скоростью, минимум ищем по относительному ходу.
+  _strikeGap(sp, ball, dt) {
+    const bp = ball.mesh.position;
+    const rx = bp.x - sp.x;
+    const ry = bp.y - sp.y;
+    const rz = bp.z - sp.z;
+    const vx = ball.vel.x - this.vel.x;
+    const vy = ball.vel.y;
+    const vz = ball.vel.z - this.vel.z;
+    const vv = vx * vx + vy * vy + vz * vz;
+    if (vv < 1e-6) return Math.hypot(rx, ry, rz);
+    // Окно — кадр в обе стороны: контакт мог случиться и чуть раньше опроса
+    let t = -(rx * vx + ry * vy + rz * vz) / vv;
+    if (t > dt) t = dt;
+    else if (t < -dt) t = -dt;
+    return Math.hypot(rx + vx * t, ry + vy * t, rz + vz * t);
+  }
+
+  // Проиграна ли борьба за верховой мяч: чей-то замах достаёт мяч БЛИЖЕ моего.
+  // Уступивший доигрывает замах вхолостую — это и есть «выпрыгнули вдвоём,
+  // сыграл тот, кто успел». Порог `contest.edge` обязателен: без него два
+  // одинаково близких игрока уступали бы друг другу по шуму последнего знака.
+  _aerialContestLost(ball, dt, myPoint) {
+    const C = CONFIG.player.aerial.contest;
+    if (!C || !C.enabled || !myPoint || !this.team || !this.team.match) return false;
+    const mine = this._strikeGap(myPoint, ball, dt);
+    for (const o of this.team.match.allPlayers) {
+      if (o === this || !o.aerialStrike || o.downT > 0) continue;
+      const sp = o.strikePointWorld(o.aerialStrike.styleName, _rivalPt);
+      if (!sp) continue;
+      const d = o._strikeGap(sp, ball, dt);
+      // Уступаем только тому, кто мяч РЕАЛЬНО достаёт: соперник, который ближе
+      // меня, но всё равно мимо, борьбу не выигрывает — мяч тогда не играет
+      // никто, и это уже не «первый на мяче», а дыра в эпизоде
+      if (d + C.edge < mine && d <= CONFIG.player.aerial.sync.contactRadius) return true;
+    }
+    return false;
+  }
+
   // Бросок корпусом к мячу (удар в падении, просьба Олега 18.07.2026):
   // рывок ~2 м + вытянутый корпус (ласточка). Контакт случится — или нет —
   // в обычном цикле замыкания; после броска игрок лежит dive.recover сек.
@@ -4062,6 +4212,13 @@ export class Player {
     this.diveSpeed = DV.lunge;
     this.diveRecover = DV.recover;
     this.diveTilt = DV.tiltMax;  // клипы kick/header стоячие — падение рисуем сами
+    // Ласточка сама поднимает фигуру от газона (пивот в тазе), и дуга выпрыга
+    // под замыкание сложилась бы с этим подъёмом — гасим её
+    this.jumpT = 0;
+    this.jumpHeight = null;
+    this.group.position.y = 0;
+    this._fallPhase = null;
+    this._diveLiftEnd = 0;
     this.diveDir = { x: dx, z: dz };
     this.vel.x = dx * DV.lunge;
     this.vel.z = dz * DV.lunge;
@@ -4180,9 +4337,70 @@ export class Player {
     this.playOneShot('trip', F.dropRate, 0, null, blendTime('fall'));
   }
 
+  // ПОДЪЁМ ФИГУРЫ ОТ ГАЗОНА В ЛАСТОЧКЕ.
+  //
+  // `group.rotation.x` вращает фигуру вокруг НАЧАЛА ГРУППЫ, а оно лежит на
+  // газоне у стоп. Настоящий бросок идёт вокруг ТАЗА, и стопы при этом
+  // отрываются. Разница не косметическая: замер до правки (tools/aerial-rig.js
+  // → diveTrace) дал фигуру под газоном 76 кадров подряд, глубже всего на
+  // 0.86 м — это и есть «закопанный в землю» из фидбека.
+  //
+  // Считается в лоб: чтобы таз оказался на высоте hip, группу надо поднять на
+  // hip − pivot·cos(tilt) (после поворота таз сам опустился до pivot·cos).
+  //
+  // ЦЕЛЕВАЯ ВЫСОТА ТАЗА В ПОЛЁТЕ — НЕ ВЫСОТА ЛЁЖКИ, и это условие корректности,
+  // а не вкус. Первая редакция вела таз к 0.28 м прямо за время полёта, и к
+  // моменту, когда корпус доходил до горизонтали, вынесенная вперёд нога
+  // оказывалась на метр НИЖЕ таза — то есть под газоном (замер: −0.98 м). В
+  // полёте игрок ЛЕТИТ: таз держится почти на своей высоте, а вниз тело идёт
+  // уже на приземлении, и опускает его не эта формула, а гаснущая поправка.
+  _diveLift(tilt, u) {
+    const DV = CONFIG.player.aerial.dive;
+    const pivot = this._standHipY || DV.pivotY;
+    // Таз идёт от стойки к высоте полёта, а по дороге его подбрасывает толчок
+    const hip = pivot + (DV.flyY - pivot) * u + Math.sin(Math.PI * u) * DV.hop;
+    return hip - pivot * Math.cos(tilt);
+  }
+
   // Ведение цепочки падения. Вызывается из _updateAnim, пока downT > 0.
+  // Возвращает остаток РУЧНОГО силуэта { tilt, lift }: у сбитого игрока он
+  // нулевой (весь силуэт даёт клип), у приземляющейся ласточки — гаснущий.
   _updateFall(dt) {
     const F = CONFIG.player.fall;
+    const DV = CONFIG.player.aerial.dive;
+    // ПРИЗЕМЛЕНИЕ ЛАСТОЧКИ. Ручной наклон и лежачий клип меняются местами по
+    // ОДНОЙ огибающей: пока наклон уходит с 80° в ноль, клип `fallen` кладёт
+    // фигуру теми же 80° в костях — тело всё это время остаётся горизонтальным.
+    // Разъехаться половинам нельзя: обгонит наклон — фигура встанет и снова
+    // ляжет, обгонит клип — уйдёт под газон (ровно прежний брак).
+    //
+    // Заодно корпус доворачивается на 90°: `fallen` кладёт тело вдоль своей
+    // оси X (замер по риггу: голова на −0.54 по x, носки на +0.74), а ласточка
+    // летит вдоль взгляда. Доворот превращает это расхождение в естественный
+    // перекат на плечо вместо «перекручивания» поперёк полёта.
+    if (this._fallPhase === 'land') {
+      this._landT -= dt;
+      const u = 1 - Math.max(0, this._landT) / DV.land;
+      const w = 1 - _smooth01(u);
+      const amp = this.downTiltAmp != null ? this.downTiltAmp : DV.tiltMax;
+      this.rot = this._rollFrom + DV.roll * _smooth01(u);
+      // Пишем в группу СРАЗУ: слой движения выставляет rotation.y ДО вызова
+      // _updateAnim, и без этой строки перекат отставал бы на кадр
+      this.group.rotation.y = this.rot;
+      if (this._landT <= 0) {
+        this._fallPhase = 'down';
+        return _fallSil;
+      }
+      _fallSil.tilt = amp * w;
+      // Подъём НЕ пересчитывается по формуле полёта, а гаснет от последнего её
+      // значения. Пересчитывать нельзя: в костях уже блендится `fallen` (таз
+      // 0.22), и формула, считающая таз стоячим, вычла бы лишние полметра и
+      // снова утопила фигуру (замер первой редакции: −1.08 м на приземлении).
+      _fallSil.lift = this._diveLiftEnd * w;
+      return _fallSil;
+    }
+    _fallSil.tilt = 0;
+    _fallSil.lift = 0;
     if (this._fallPhase === 'drop') {
       // Упал: клип падения дошёл до газона — переходим в лёжку
       if (!this.oneShot || this.currentName !== 'trip' ||
@@ -4190,7 +4408,7 @@ export class Player {
         this._fallPhase = 'down';
         this.playOneShot('fallen', 1, 0, null, blendTime('fall'));
       }
-      return;
+      return _fallSil;
     }
     if (this._fallPhase === 'down') {
       // ЛЁЖКА НЕ ЗАЦИКЛИВАЕТСЯ, А ПЕРЕЗАПУСКАЕТСЯ (правка 28.07.2026).
@@ -4222,6 +4440,7 @@ export class Player {
         this.playOneShot('getup', F.getupRate, 0, null, blendTime('getup'));
       }
     }
+    return _fallSil;
   }
 
   // ЗАВЕРШЕНИЕ В ПАДЕНИИ: догоняю передачу, ногой уже не достаю — иду в слайд

@@ -7,6 +7,10 @@
 import { CONFIG } from '../config.js';
 import { arrive, seek, pursuitBall, separation, distToBall, freeSpace, predictLanding, passStrikeKind } from './steering.js';
 
+// Приёмник точки встречи (Player.meetPoint) — один на всех, чтобы не сорить
+// объектами в кадре: игрок в этой ветке ровно один за проход
+const _meet = { x: 0, z: 0 };
+
 export function updateFieldPlayer(p, dt, ball) {
   const AI = CONFIG.ai;
   const team = p.team;
@@ -36,16 +40,13 @@ export function updateFieldPlayer(p, dt, ball) {
   // но и НЕ ЗАМИРАЕМ — ноги добегают до точки контакта. Стойка на месте гасила
   // врывание (в PES мощь кивка даёт именно разбег) и выглядела как ступор
   // посреди эпизода (фидбек Олега 24.07)
+  // Вплотную к точке ноги переходят на ДОБОР КУРСА, а не на стоп: замыкание —
+  // встреча на ходу (Player.strikeApproach, тот же код, что у человека). Раньше
+  // здесь стояло жёсткое обнуление внутри strikeHoldRadius, и AI в замахе
+  // вкапывался столбом — то есть ровно те 22 фигуры, на которые смотрит зритель
   if (p.aerialStrike) {
     const ap = p.aerialStrike.point;
-    let mv = { x: 0, z: 0 };
-    if (ap) {
-      const dx = ap.x - pos.x;
-      const dz = ap.z - pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d > CONFIG.player.approach.strikeHoldRadius) mv = { x: dx / d, z: dz / d };
-    }
-    p.aiUpdate(dt, mv, {});
+    p.aiUpdate(dt, ap ? p.strikeApproach(ap.x, ap.z) : { x: 0, z: 0 }, {});
     return;
   }
 
@@ -136,7 +137,11 @@ export function updateFieldPlayer(p, dt, ball) {
       // быстро — иначе адресат не принимал её и мяч «отскакивал» мимо ног
       ball.vel.length() > 4) {
     aerialPlay(p, ball, diving);
-    p.aiUpdate(dt, { x: 0, z: 0 }, {});
+    // Замах создан — ноги в тот же кадр идут к его точке, а не встают. Стоячее
+    // замыкание в PES слабее и шумнее по построению (aerial.standNoise), и
+    // терять разбег на ровном месте нельзя
+    const ap0 = p.aerialStrike && p.aerialStrike.point;
+    p.aiUpdate(dt, ap0 ? p.strikeApproach(ap0.x, ap0.z) : { x: 0, z: 0 }, {});
     return;
   }
   // Бросок в падении (как у человека): назначенный замыкающий у чужих
@@ -197,11 +202,18 @@ export function updateFieldPlayer(p, dt, ball) {
       // требует настоящего касания корпусом — стоять «примерно там» мало
       // (замер 24.07: мяч проходил в метре от ждущего, и приёма не было)
       let t = team.receiveTarget;
+      let airLeft = 0;
       if (bp.y > CONFIG.player.kickMaxBallY && ball.vel.y < 3) {
         const land = predictLanding(ball, CONFIG.player.aerial.contactY);
-        if (land) t = land;
+        if (land) { t = land; airLeft = land.t || 0; }
       }
       const dT = Math.hypot(t.x - pos.x, t.z - pos.z);
+      // ТАЙМИНГ ЗАБЕГА (правка 29.07.2026). Раньше адресат летел к точке прилёта
+      // на полной, приезжал за секунду до мяча и вставал — 52 % замыканий
+      // исполнялись «стоя» (замер, aerial-rig → contactStats). Пока времени в
+      // запасе много, целимся в ОТСТУП от точки по своему же курсу; отступ тает
+      // вместе с оставшимся временем, и на мяч игрок приходит НА ХОДУ.
+      if (airLeft > 0) t = p.meetPoint(_meet, t.x, t.z, airLeft);
       // Погоня за мячом — только когда мяч УЖЕ НИЗОМ. Пока он в воздухе, ноги
       // стоят на точке прилёта: прежний порог 1.2 м срывал адресата с места
       // ровно на последних метрах (pursuit целится с упреждением ВПЕРЁД мяча),
