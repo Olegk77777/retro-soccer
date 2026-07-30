@@ -107,6 +107,41 @@ function boostGrassContrast(ctx, w, h) {
   ctx.putImageData(img, 0, 0);
 }
 
+// Покос — отдельный лёгкий слой поверх любой карты износа. Прямой вариант
+// рисуется полосами от бровки до бровки; круговой — концентрическими кольцами
+// вокруг центра поля, которые на каждой половине читаются полукругами.
+function paintMowingPattern(ctx, w, h, pattern, mow, scale, fallback = false) {
+  const toneStyle = (tone, index) => {
+    if (fallback) return index % 2 === 0 ? '#4d9038' : '#5aa344';
+    const value = tone * mow;
+    return value < 0
+      ? `rgba(0,0,0,${-value})`
+      : `rgba(255,255,215,${value})`;
+  };
+
+  if (pattern.kind === 'rings') {
+    const bandW = pattern.bandMeters * scale;
+    const maxR = Math.hypot(w / 2, h / 2);
+    const bands = Math.ceil(maxR / bandW);
+    ctx.save();
+    ctx.lineWidth = bandW + 1;
+    for (let i = bands - 1; i >= 0; i--) {
+      ctx.strokeStyle = toneStyle(pattern.tones[i % pattern.tones.length], i);
+      ctx.beginPath();
+      ctx.arc(w / 2, h / 2, (i + 0.5) * bandW, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  const stripeW = w / pattern.tones.length;
+  for (let i = 0; i < pattern.tones.length; i++) {
+    ctx.fillStyle = toneStyle(pattern.tones[i], i);
+    ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
+  }
+}
+
 function createPitchTexture() {
   const F = CONFIG.field;
   const scale = 10; // пикселей на метр
@@ -121,6 +156,9 @@ function createPitchTexture() {
   const cy = h / 2;
   const layers = { clean: null, balanced: null, worn: null };
   let wear = Math.max(0, Math.min(1, CONFIG.atmosphere.pitchWear.default));
+  const patternConfig = CONFIG.atmosphere.pitchTexture;
+  const findPattern = (id) => patternConfig.patterns.find((item) => item.id === id);
+  let pattern = (findPattern(patternConfig.defaultPattern) || patternConfig.patterns[0]).id;
 
   // Каждую исходную карту заранее приводим к одной яркости. Старая плитка
   // темнее полноразмерных карт и требует той же подсветки, что была у неё
@@ -192,19 +230,7 @@ function createPitchTexture() {
       // до 0.62, а размах полос в кадре — с 8.6 % средней яркости до 5.5 %.
       // Под общим множителем оба числа растут заодно, и отношение держится
       // само — при любой будущей правке pitchTexture.contrast.
-      const mow = CONFIG.atmosphere.pitchTexture.mow;
-      const stripeTone = [
-        -0.035, 0.022, -0.024, 0.016, -0.032, 0.012, -0.020,
-        0.018, -0.028, 0.010, -0.018, 0.020, -0.030, 0.014,
-      ];
-      const stripeW = w / stripeTone.length;
-      for (let i = 0; i < stripeTone.length; i++) {
-        const tone = stripeTone[i] * mow;
-        ctx.fillStyle = tone < 0
-          ? `rgba(0,0,0,${-tone})`
-          : `rgba(255,255,215,${tone})`;
-        ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
-      }
+      paintMowingPattern(ctx, w, h, findPattern(pattern), patternConfig.mow, scale);
 
       // Собственный контраст ТРАВЫ — до света мачт и разметки, чтобы тронуть
       // только сам газон (правило с 28.07.2026, фидбек Олега «газон раньше был
@@ -230,12 +256,9 @@ function createPitchTexture() {
       paintPitchLight(ctx, w, h);
     } else {
       // Мгновенный фолбэк на время загрузки PNG и на случай 404.
-      const stripes = 14;
-      const stripeW = w / stripes;
-      for (let i = 0; i < stripes; i++) {
-        ctx.fillStyle = i % 2 === 0 ? '#4d9038' : '#5aa344';
-        ctx.fillRect(i * stripeW, 0, stripeW + 1, h);
-      }
+      ctx.fillStyle = '#559b3e';
+      ctx.fillRect(0, 0, w, h);
+      paintMowingPattern(ctx, w, h, findPattern(pattern), 1, scale, true);
       for (let i = 0; i < 9000; i++) {
         const x = Math.random() * w;
         const y = Math.random() * h;
@@ -277,6 +300,14 @@ function createPitchTexture() {
     markTextureDirty(tex);
   };
   tex.userData.getWear = () => wear;
+  tex.userData.setPattern = (value) => {
+    const next = findPattern(String(value));
+    if (!next || next.id === pattern) return;
+    pattern = next.id;
+    paint();
+    markTextureDirty(tex);
+  };
+  tex.userData.getPattern = () => pattern;
 
   const sources = [
     ['clean', STADIUM_TEXTURES.grass],
@@ -678,6 +709,8 @@ export function buildStadium() {
   scene.add(pitch);
   scene.userData.setPitchWear = (value) => pitchTexture.userData.setWear(value);
   scene.userData.getPitchWear = () => pitchTexture.userData.getWear();
+  scene.userData.setPitchPattern = (value) => pitchTexture.userData.setPattern(value);
+  scene.userData.getPitchPattern = () => pitchTexture.userData.getPattern();
 
   // Газон-отбивка вокруг разметки: большой, чтобы низ кадра при наклоне камеры
   // к ближней бровке всегда был травой, а не чёрной пустотой. Дальний край

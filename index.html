@@ -418,6 +418,12 @@
     #settings-fold:active { background: rgba(255,255,255,0.18); }
     #settings .row { margin: 3px 0; }
     #settings .key { color: #fff; font-weight: bold; }
+    #settings select {
+      width: min(270px, 100%); margin-left: 6px; padding: 4px 8px;
+      background: #111521; color: #eee;
+      border: 1px solid rgba(255,255,255,0.45);
+      font-family: var(--tv-font); font-size: 12px; letter-spacing: 1px;
+    }
     #settings-close {
       position: absolute; top: 10px; right: 14px;
       background: none; border: none; color: #eee; font-size: 20px;
@@ -629,7 +635,7 @@
     <h2>НАСТРОЙКИ</h2>
 
     <h3 data-open="1">ИЗОБРАЖЕНИЕ</h3>
-    <div class="row" style="color:rgba(255,255,255,0.5)">Картинка настраивается на КОРПУСЕ телевизора, а не здесь: ручки <span class="key">КАНАЛ</span>, <span class="key">ЯРКОСТЬ</span>, <span class="key">КОНТРАСТ</span>, <span class="key">ЦВЕТ</span> и клавиши <span class="key">ЧЁТКОСТЬ</span> / <span class="key">ГАЗОН</span>. Ручку можно крутить мышью, пальцем или колесом; двойной щелчок по ручке возвращает её в середину. Все положения запоминаются.</div>
+    <div class="row" style="color:rgba(255,255,255,0.5)">Основная картинка настраивается на КОРПУСЕ телевизора: ручки <span class="key">КАНАЛ</span>, <span class="key">ЯРКОСТЬ</span>, <span class="key">КОНТРАСТ</span>, <span class="key">ЦВЕТ</span> и клавиши <span class="key">ЧЁТКОСТЬ</span> / <span class="key">ГАЗОН</span>. Рисунок покоса выбирается ниже, в разделе <span class="key">СТАДИОН</span>. Ручку можно крутить мышью, пальцем или колесом; двойной щелчок по ручке возвращает её в середину. Все положения запоминаются.</div>
 
     <h3 data-open="1">ТЕЛЕВИЗОР (панель справа)</h3>
     <div class="row"><span class="key">КАНАЛ</span> — переключает ТРАКТ «телеканала», а не степень испорченности картинки: <span class="key">ТВ-эфир 98</span> (камертон проекта — трансляция конца 90-х), <span class="key">Антенна</span> (мягче, теплее, шумнее), <span class="key">VHS-запись</span> (цвет уплыл, срывы строк), <span class="key">Чистый RGB</span> (самый резкий). Ручка щёлкает по положениям и идёт по кругу</div>
@@ -663,6 +669,11 @@
     <div class="row" style="color:rgba(255,255,255,0.5)">Шире ищет адресата по направлению и подтягивает силу паса к дистанции до него. Пас без партнёра в конусе летит ровно как нарисован; сильная передержка всё равно уводит мяч дальше.</div>
 
     <h3 data-open="1">СТАДИОН</h3>
+    <div class="row">
+      <label for="set-pitch-pattern">Рисунок газона:</label>
+      <select id="set-pitch-pattern" aria-label="Рисунок газона"></select>
+    </div>
+    <div class="row" style="color:rgba(255,255,255,0.5)"><span class="key">КЛАССИКА</span> — прежние частые прямые полосы и вариант по умолчанию. <span class="key">ШИРОКИЕ</span> — десять широких прямых проходов. <span class="key">80-Е</span> — вложенные полукруги вокруг центра поля, как на референсе. Износ 0–100% переключается отдельно клавишей <span class="key">ГАЗОН</span> на корпусе.</div>
     <div class="row">
       Звук трибун:
       <input id="set-crowd" type="range" min="0" max="100" step="5" style="vertical-align:middle;width:180px">

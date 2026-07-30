@@ -141,6 +141,32 @@ keyPitch.addEventListener('click', () => {
   applyPitchWear(WEARS[(wearIdx + 1) % WEARS.length], true);
 });
 
+// --- Рисунок покоса: отдельная настройка, не связанная с износом ---
+// Варианты и подписи живут в CONFIG вместе с самим рисунком: добавить третий
+// можно без дублирования идентификаторов между сценой и меню.
+const pitchPatternSelect = document.getElementById('set-pitch-pattern');
+const PITCH_PATTERNS = CONFIG.atmosphere.pitchTexture.patterns;
+for (const pattern of PITCH_PATTERNS) {
+  const option = document.createElement('option');
+  option.value = pattern.id;
+  option.textContent = pattern.label;
+  pitchPatternSelect.appendChild(option);
+}
+
+function applyPitchPattern(value, save = false) {
+  const pattern = PITCH_PATTERNS.find((item) => item.id === value)
+    || PITCH_PATTERNS.find((item) => item.id === CONFIG.atmosphere.pitchTexture.defaultPattern)
+    || PITCH_PATTERNS[0];
+  pitchPatternSelect.value = pattern.id;
+  scene.userData.setPitchPattern(pattern.id);
+  if (save) remember('f98.pitchPattern', pattern.id);
+}
+
+applyPitchPattern(localStorage.getItem('f98.pitchPattern'));
+pitchPatternSelect.addEventListener('change', () => {
+  applyPitchPattern(pitchPatternSelect.value, true);
+});
+
 // --- Ручки картинки: множители ПОВЕРХ пресета ---
 // Пресет задаёт характер канала, ручка правит его под свою комнату — ровно
 // как на настоящем телевизоре. Смена канала ручки не сбрасывает.
