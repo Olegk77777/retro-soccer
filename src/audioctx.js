@@ -9,15 +9,31 @@
 // «спит», и всё, что мы в него отправим, не прозвучит. Поэтому здесь же
 // живёт разблокировка первым жестом и очередь тех, кто хочет завестись
 // сразу после неё (зал подхватывает петли, интро добирает свисток).
+//
+// ЖЕСТ НУЖЕН КАЖДЫЙ ЗАПУСК, И ЗАПОМНИТЬ ЕГО НЕЛЬЗЯ (правило с 30.07.2026).
+// Разрешение на звук не хранится ни в localStorage, ни в профиле сайта: оно
+// живёт ровно один документ, и после F5 всё начинается заново. Поэтому игра
+// стартует с вопроса «включить звук?» (main.js) — это не украшение, а
+// единственный способ получить жест ДО первого кадра. Раньше первым жестом
+// оказывалось нажатие ПАС на розыгрыше, и стадион молчал всю заставку.
 
 let ctx = null;
 let unlocked = false;
+let denied = false;        // игрок выбрал «БЕЗ ЗВУКА» в стартовом вопросе
 const waiting = [];
 
 export function audioCtx() {
   if (!ctx) {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) ctx = new AC();
+    // iOS 16.4+: без этой строки WebAudio живёт в категории «ambient», а её
+    // глушит боковой переключатель звонка и режим «Не беспокоить». Звук при
+    // этом честно играет — просто не идёт в динамик, и снаружи это выглядит
+    // ровно как «браузер заблокировал звук». playback — категория плеера,
+    // ей переключатель не указ. Свойства нет в старых Safari — молча мимо.
+    try {
+      if (ctx && navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (e) { /* браузер без audioSession */ }
   }
   return ctx;
 }
@@ -29,27 +45,100 @@ export function audioLive() {
   return c && c.state === 'running' ? c : null;
 }
 
+// Звук уже разрешён и хотя бы раз реально играл.
+export function audioUnlocked() {
+  return unlocked && !!audioLive();
+}
+
 // Позвать fn, когда звук разрешат. Если он уже разрешён — сразу.
 export function onAudioUnlock(fn) {
   if (unlocked && audioLive()) fn();
   else waiting.push(fn);
 }
 
-function unlock() {
-  const c = audioCtx();
-  if (!c) return;
-  if (c.state === 'suspended') c.resume();
-  // resume асинхронный: проверяем состояние уже после его обещания, иначе
-  // очередь сработает вхолостую на первом же касании
-  Promise.resolve(c.state === 'running' ? null : c.resume()).then(() => {
-    if (c.state !== 'running' || unlocked) return;
+// ТОЛЧОК ТИШИНОЙ. Safari считает контекст по-настоящему запущенным только
+// после того, как в него что-то реально сыграли: `resume()` возвращает
+// «running», а первый настоящий звук всё равно теряется. Буфер в один сэмпл
+// стоит ноль и снимает этот класс проблем целиком.
+function kick(c) {
+  try {
+    const src = c.createBufferSource();
+    src.buffer = c.createBuffer(1, 1, c.sampleRate);
+    src.connect(c.destination);
+    src.start(0);
+  } catch (e) { /* контекст не в том состоянии — разберётся следующий жест */ }
+}
+
+// Общий финал разблокировки: очередь зовём РОВНО ОДИН раз и только когда
+// контекст действительно ожил, иначе подписчики (петли зала) сработают
+// вхолостую и второго шанса у них не будет.
+function finishUnlock(c) {
+  // Отказ мог прийти ПОКА resume летел: жест и запрет случаются в одном
+  // кадре (Esc на стартовом вопросе — это keydown, то есть тот же жест,
+  // который будит контекст). Проверяем запрет здесь, в самом конце цепочки,
+  // иначе звук успевал ожить уже после нажатия «БЕЗ ЗВУКА».
+  if (denied) {
+    if (c && c.state === 'running') c.suspend().catch(() => {});
+    return false;
+  }
+  if (!c || c.state !== 'running') return false;
+  if (!unlocked) {
     unlocked = true;
+    kick(c);
     for (const fn of waiting.splice(0)) {
       try { fn(); } catch (e) { console.warn('[audio] подписчик разблокировки упал:', e); }
     }
-  }).catch(() => { /* браузер ещё не считает жест достаточным — ждём следующего */ });
+  }
+  return true;
+}
+
+function unlock() {
+  if (denied) return;
+  const c = audioCtx();
+  if (!c) return;
+  // resume асинхронный: проверяем состояние уже после его обещания, иначе
+  // очередь сработает вхолостую на первом же касании
+  Promise.resolve(c.state === 'running' ? null : c.resume())
+    .then(() => finishUnlock(c))
+    .catch(() => { /* браузер ещё не считает жест достаточным — ждём следующего */ });
+}
+
+// ПРИНУДИТЕЛЬНОЕ ВКЛЮЧЕНИЕ. Зовётся ИЗ ОБРАБОТЧИКА нажатия (кнопка «ДА» в
+// стартовом вопросе): браузер разрешает завести звук только внутри жеста,
+// и никакой setTimeout между ними стоять не должен — жест «просрочивается».
+// Возвращает обещание с ответом «звук пошёл или нет», чтобы вопрос мог
+// показать честную неудачу, а не молча закрыться.
+export function forceAudio() {
+  denied = false;
+  const c = audioCtx();
+  if (!c) return Promise.resolve(false);
+  return Promise.resolve(c.state === 'running' ? null : c.resume())
+    .then(() => finishUnlock(c))
+    .catch(() => false);
+}
+
+// ОТКАЗ ОТ ЗВУКА («БЕЗ ЗВУКА» в стартовом вопросе). Одной громкости зала тут
+// не хватило бы: свисток арбитра и шипение файеров ползунку НЕ подчиняются
+// намеренно (это поле, а не трибуна), и в тихой комнате первый же свисток
+// выдал бы игру. Поэтому глушим контекст целиком и запрещаем разблокировку
+// по жестам — иначе первое же нажатие в игре завело бы звук обратно.
+export function denyAudio() {
+  denied = true;
+  const c = ctx;
+  if (c && c.state === 'running') c.suspend().catch(() => {});
 }
 
 for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
   window.addEventListener(ev, unlock, { passive: true });
 }
+
+// iOS уводит контекст в 'interrupted' на звонке, будильнике и переключении
+// приложения — и обратно сам не возвращает. Слушатели жестов выше это
+// вылечат при первом касании, но зал не должен молчать до него: вкладка
+// снова видна — пробуем вернуться сами. Без прежнего разрешения это не
+// сработает и ничего не сломает, потому что resume просто отклонится.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !unlocked || denied) return;
+  const c = ctx;
+  if (c && c.state !== 'running') c.resume().catch(() => {});
+});

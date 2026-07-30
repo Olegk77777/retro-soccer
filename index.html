@@ -549,6 +549,61 @@
     }
     #power-fill { height: 100%; width: 0%; background: #e8d44d; }
     #power-fill.over { background: #e04a30; } /* красная зона: передержка */
+
+    /* ================= СТАРТОВЫЙ ВОПРОС ПРО ЗВУК =================
+       Браузер разрешает звук только после нажатия, и разрешение живёт РОВНО
+       ОДИН документ — после перезагрузки страницы всё заново. Пока вопроса
+       не было, первым жестом оказывалось нажатие ПАС на розыгрыше, и вся
+       заставка шла в тишине (фидбек Олега 30.07.2026). Теперь игра стартует
+       с этой плашки: пока она висит, матч заморожен, а ответ «ДА» заводит
+       звук прямо в обработчике нажатия.
+
+       Графика — та же телеграфика эфира: плоские скошенные блоки, узкий
+       гротеск, один золотой акцент. Живёт НА СТЕКЛЕ телевизора, поэтому
+       размеры в процентах от экрана, а не во vw/vh (как у #settings). */
+    #sound-gate {
+      position: fixed; inset: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: center;
+      /* Затемнение неровное: к центру светлее, как свет кинескопа изнутри */
+      background:
+        radial-gradient(70% 70% at 50% 45%, rgba(4,6,14,0.72), rgba(0,0,0,0.9) 100%);
+      font-family: var(--tv-font);
+      -webkit-tap-highlight-color: transparent;
+    }
+    #sound-gate.hide { display: none; }
+    .sg-card { text-align: center; padding: 0 16px; }
+    .sg-title {
+      display: inline-block; transform: skewX(var(--tv-skew));
+      background: var(--tv-slab); color: #fff;
+      font-size: clamp(20px, 3.4vw, 38px); font-weight: 700; letter-spacing: 7px;
+      padding: 5px 20px 3px;
+    }
+    .sg-sub {
+      margin-top: 12px; color: rgba(255,255,255,0.78);
+      font-size: clamp(11px, 1.5vw, 15px); letter-spacing: 3px;
+      text-shadow: 1px 1px 0 #000;
+    }
+    .sg-row {
+      margin-top: 20px; display: flex; gap: 12px;
+      align-items: stretch; justify-content: center; flex-wrap: wrap;
+    }
+    .sg-btn {
+      transform: skewX(var(--tv-skew));
+      font-family: var(--tv-font); font-size: clamp(13px, 1.9vw, 19px);
+      font-weight: 700; letter-spacing: 4px;
+      color: #fff; background: rgba(6, 8, 16, 0.9);
+      border: 1px solid rgba(255,255,255,0.5);
+      padding: 9px 20px 7px; cursor: pointer;
+    }
+    .sg-btn.sg-main {
+      color: #0b0c10; background: var(--tv-gold);
+      border-color: var(--tv-gold);
+    }
+    .sg-btn:active { transform: skewX(var(--tv-skew)) translateY(1px); }
+    .sg-note {
+      margin-top: 16px; color: rgba(255,255,255,0.5);
+      font-size: clamp(10px, 1.3vw, 13px); letter-spacing: 3px;
+    }
   </style>
 </head>
 <body>
@@ -614,6 +669,7 @@
       <span id="set-crowd-val"></span>
     </div>
     <div class="row" style="color:rgba(255,255,255,0.5)">Зал звучит записями, а не шумом: ровный гул весь матч, взвинченный ропот при атаке у ворот, рёв после гола, «ах» на сейве, аплодисменты и свист. Фанатский сектор заводит дудки и барабан <span class="key">волнами</span> — в спокойные минуты, как настоящий вираж. Всё идёт через тракт телевизора: моно, узкая полоса, компрессия. Свисток арбитра этой ручке не подчиняется — он слышен всегда.</div>
+    <div class="row" style="color:rgba(255,255,255,0.5)">Игра стартует с вопроса <span class="key">ВКЛЮЧИТЬ ЗВУК?</span> — иначе браузер (особенно Safari на iPad) звук не отдаёт: ему нужно нажатие. Пока вопрос на экране, матч заморожен, стадион уже шумит с первого кадра заставки. С клавиатуры: <span class="key">Enter</span> — со звуком, <span class="key">Esc</span> — без. Ответил «БЕЗ ЗВУКА» и передумал — просто подними эту ручку, звук вернётся.</div>
     <div class="row">
       Пиротехника на трибунах:
       <input id="set-pyro" type="range" min="0" max="150" step="50" style="vertical-align:middle;width:180px">
@@ -713,6 +769,23 @@
   <div id="power"><div id="power-fill"></div></div>
   <div id="lineups"><div id="lineups-text"></div></div>
   <button id="fs-exit" title="Свернуть (Esc)" aria-label="Свернуть">⤡</button>
+
+  <!-- Вопрос про звук: первое, что видит игрок. Ответ «ДА» — это тот самый
+       жест, без которого браузер (особенно Safari на iPad) не отдаёт звук.
+       Пока плашка висит, игровое время стоит: заставка не проскочит, пока
+       читают вопрос. Механика — src/main.js. -->
+  <div id="sound-gate">
+    <div class="sg-card">
+      <div class="sg-title">ВКЛЮЧИТЬ ЗВУК?</div>
+      <div class="sg-sub">ПЛАНШЕТ ОТДАЁТ ЗВУК ТОЛЬКО ПОСЛЕ НАЖАТИЯ</div>
+      <div class="sg-row">
+        <button id="sg-yes" class="sg-btn sg-main">ДА, СО ЗВУКОМ</button>
+        <button id="sg-no" class="sg-btn">БЕЗ ЗВУКА</button>
+      </div>
+      <div class="sg-note">ГРОМКОСТЬ ТРИБУН — В НАСТРОЙКАХ</div>
+    </div>
+  </div>
+
   <div id="tv-glass"></div>
  </div><!-- /#tv-screen -->
 

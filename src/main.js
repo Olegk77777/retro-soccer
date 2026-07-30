@@ -13,6 +13,7 @@ import { clothTime } from './cloth.js';
 import { updateRim } from './rimlight.js';
 import { updateCrowd } from './sfx.js';
 import { setCrowdVolume } from './crowd.js';
+import { forceAudio, denyAudio } from './audioctx.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -340,6 +341,10 @@ tempoSlider.addEventListener('input', () => {
 const crowdSlider = document.getElementById('set-crowd');
 const crowdVal = document.getElementById('set-crowd-val');
 const CROWD_LABEL = { 0: 'выкл', 30: 'тише', 55: 'фоном', 80: 'как в эфире', 100: 'громко' };
+// Штатная громкость из CONFIG — снимаем ДО того, как её перекроет сохранённое
+// значение: к ней возвращается ответ «ДА, СО ЗВУКОМ» в стартовом вопросе, если
+// в прошлый раз зал был выведен в ноль.
+const CROWD_DEFAULT = Math.round(CONFIG.audio.master * 100);
 // ВНИМАНИЕ: у этой настройки нижняя граница — НОЛЬ, поэтому обычная проверка
 // `Number(getItem(...)) >= min` не годится: у отсутствующего ключа getItem
 // возвращает null, а `Number(null)` — это 0, и первый же запуск на чистом
@@ -349,15 +354,94 @@ const savedCrowd = localStorage.getItem('f98.crowdVol');
 if (savedCrowd !== null && Number(savedCrowd) >= 0 && Number(savedCrowd) <= 100) {
   CONFIG.audio.master = Number(savedCrowd) / 100;
 }
-crowdSlider.value = Math.round(CONFIG.audio.master * 100);
-setCrowdVolume(CONFIG.audio.master);   // микшер мог собраться раньше — не полагаемся на порядок
-const crowdLabel = () => CROWD_LABEL[crowdSlider.value] || `${crowdSlider.value}%`;
-crowdVal.textContent = crowdLabel();
+
+// Одна точка на все пути: ползунок, ответ на стартовый вопрос, восстановление
+// сохранённого значения. Иначе ползунок в меню показывал бы одно, а зал играл
+// другое — ровно так расходятся настройки, у которых два входа.
+function applyCrowdVolume(pct, save = false) {
+  const v = Math.max(0, Math.min(100, Math.round(pct)));
+  crowdSlider.value = v;
+  setCrowdVolume(v / 100);   // микшер мог собраться раньше — не полагаемся на порядок
+  crowdVal.textContent = CROWD_LABEL[v] || `${v}%`;
+  if (save) remember('f98.crowdVol', v);
+}
+
+applyCrowdVolume(CONFIG.audio.master * 100);
 crowdSlider.addEventListener('input', () => {
-  setCrowdVolume(Number(crowdSlider.value) / 100);
-  crowdVal.textContent = crowdLabel();
-  remember('f98.crowdVol', crowdSlider.value);
+  applyCrowdVolume(Number(crowdSlider.value), true);
+  // Двинул громкость вверх — значит звук всё-таки нужен, даже если на старте
+  // выбрал «БЕЗ ЗВУКА». Иначе получается ловушка: ползунок стоит на «громко»,
+  // а стадион молчит, потому что контекст заглушен отказом. Мы внутри жеста
+  // (input у слайдера), поэтому браузер разблокировку разрешит.
+  if (Number(crowdSlider.value) > 0) forceAudio();
 });
+
+// --- Стартовый вопрос про звук ---
+// Разрешение на звук живёт РОВНО ОДИН документ: после F5 браузер снова ждёт
+// жеста, и запомнить ответ в localStorage нельзя — жест нужен каждый запуск.
+// До этой плашки первым жестом оказывалось нажатие ПАС на розыгрыше, и всю
+// ТВ-заставку стадион молчал (фидбек Олега 30.07.2026). Пока вопрос висит,
+// ИГРОВОЕ время стоит (frame() отдаёт матчу нулевой dt), а стадион и стекло
+// кинескопа живут — то же деление кадра надвое, что у темпа игры.
+const soundGate = document.getElementById('sound-gate');
+let gateOpen = !!soundGate;
+
+function closeGate() {
+  if (!gateOpen) return;
+  gateOpen = false;
+  soundGate.classList.add('hide');
+}
+
+if (soundGate) {
+  // Тап по плашке не должен взводить игровой жест: слушатели управления сидят
+  // на window, и без остановки всплытия ответ на вопрос заодно копил бы замах
+  // (та же грабля, что с ручками телевизора и кнопкой ⤡).
+  for (const ev of ['pointerdown', 'pointerup', 'touchstart', 'touchend']) {
+    soundGate.addEventListener(ev, (e) => e.stopPropagation(), { passive: true });
+  }
+  document.getElementById('sg-yes').addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Зал мог остаться выведенным в ноль с прошлого запуска, а «ДА» означает
+    // «хочу звук» — возвращаем штатную громкость, иначе ответ ничего не даст
+    if (CONFIG.audio.master <= 0.001) applyCrowdVolume(CROWD_DEFAULT, true);
+    // Зовём СИНХРОННО, прямо в обработчике нажатия: любой setTimeout между
+    // жестом и resume — и браузер считает жест просроченным
+    forceAudio().then((ok) => {
+      if (ok) return;
+      // Бывает и такое (жёсткая политика, беззвучный режим, старый Safari).
+      // Молчать нельзя: игрок ответил «да» и вправе знать, что не вышло, —
+      // следующее касание экрана всё равно попробует ещё раз (слушатели
+      // жестов в audioctx.js живут всё время).
+      console.warn('[audio] браузер не отдал звук даже по нажатию');
+      const hint = document.getElementById('hint');
+      if (hint) {
+        hint.classList.remove('dim');
+        hint.textContent = 'ЗВУК НЕ ВКЛЮЧИЛСЯ — КОСНИСЬ ЭКРАНА ЕЩЁ РАЗ';
+      }
+    });
+    closeGate();
+  });
+  document.getElementById('sg-no').addEventListener('click', (e) => {
+    e.stopPropagation();
+    denyAudio();                      // глушим контекст целиком: и зал, и свисток
+    applyCrowdVolume(0, true);        // и в меню видно, что зал выведен — ползунок вернёт
+    closeGate();
+  });
+  // С клавиатуры: Enter/Пробел — со звуком, Esc — без. keydown тоже считается
+  // жестом пользователя, поэтому разблокировка отсюда работает так же.
+  //
+  // Слушатель в фазе ПЕРЕХВАТА и глушит клавишу целиком: слушатели управления
+  // (src/input.js) сидят на window и зарегистрированы раньше нашего, поэтому
+  // обычный слушатель их уже не остановит — нажатое во время вопроса копилось
+  // бы в буфере намерений и разыграло мяч сразу после ответа.
+  window.addEventListener('keydown', (e) => {
+    if (!gateOpen) return;
+    e.stopPropagation();
+    e.preventDefault();
+    if (e.key === 'Enter' || e.key === ' ') document.getElementById('sg-yes').click();
+    else if (e.key === 'Escape') document.getElementById('sg-no').click();
+  }, true);
+}
 
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
@@ -485,7 +569,11 @@ function frame() {
   // кинескопа: трибуна, файеры, мошкара, ветер в футболках, доводка камеры,
   // послесвечение ТВ-прохода. Их темп к футболу отношения не имеет, и
   // замедлять дым вместе с игрой значило бы объявлять слоу-мо всему кадру.
-  const gdt = dt * CONFIG.gameSpeed;
+  // Стартовый вопрос про звук замораживает ровно ИГРОВОЕ время: заставка не
+  // уйдёт, пока читают вопрос (розыгрыш AI ждёт всего 1.6 с), а трибуна, дым
+  // и кинескоп продолжают жить — ноль здесь работает как крайнее значение
+  // темпа игры, а не как пауза всему кадру.
+  const gdt = gateOpen ? 0 : dt * CONFIG.gameSpeed;
   // Часы ветра в футболках — ОДИН объект на весь матч. Все 22 материала
   // формы держат на него ссылку, поэтому это присваивание заменяет
   // двадцать два обновления юниформа.

@@ -12,7 +12,7 @@
 // контекст спит — тогда playWhistle честно возвращает false, а вызывающий
 // может повторить свисток позже (интро добирает его в момент розыгрыша).
 
-import { audioCtx, audioLive } from './audioctx.js';
+import { audioLive } from './audioctx.js';
 import {
   loadCrowd, crowdReady, setCrowdIntensity as sampleIntensity,
   crowdGoal, crowdGasp as sampleGasp, crowdApplause as sampleApplause,
@@ -214,12 +214,13 @@ export function flareHiss(count = 1, seconds = 12) {
 
 // Свисток длиной duration сек. Возвращает true, если реально зазвучал.
 export function playWhistle(duration = 0.8) {
-  const c = audioCtx();
+  // Спрашиваем ГОТОВЫЙ контекст, а не будим его сами. Свой resume делал
+  // свисток единственным звуком, который обходил и политику автоплея, и
+  // отказ игрока от звука: «БЕЗ ЗВУКА» глушит контекст целиком, а свисток
+  // тут же будил его и свистел один в тишине. Звука нет — честно false,
+  // вызывающий повторит (интро добирает свисток в момент розыгрыша).
+  const c = audioLive();
   if (!c) return false;
-  if (c.state === 'suspended') {
-    c.resume(); // асинхронно; если жеста ещё не было — останется спящим
-    if (c.state !== 'running') return false;
-  }
   const t0 = c.currentTime + 0.02;
   const t1 = t0 + duration;
 
