@@ -130,10 +130,25 @@ async function loadPack() {
   return team;
 }
 
+// Отладочные ключи в адресе — для поиска причины артефактов методом
+// исключения. Классический случай: тёмный пунктир по стыку деталей может быть
+// (а) разрывом оболочки от вершинного шейдера ткани, (б) затеканием соседней
+// зоны атласа при минификации, (в) отсечением задних граней на скользящем
+// угле. Три версии — три переключателя, каждый отменяет ровно одну.
+//   ?nocloth  — выключить ветер в ткани
+//   ?nomip    — выключить мипы у атласа формы
+//   ?double   — рисовать материалы с двух сторон
+const DBG = new URLSearchParams(location.search);
+
 function buildMaterials(root, kitPath, L) {
   const out = {};
   const faceTex = faceTexture(L || {});
   const kitTex = kitTextureWithNumber(kitPath, L || {});
+  if (DBG.has('nomip')) {
+    kitTex.generateMipmaps = false;
+    kitTex.minFilter = THREE.NearestFilter;
+    kitTex.needsUpdate = true;
+  }
   root.traverse((o) => {
     if (!o.isMesh) return;
     o.frustumCulled = false;
@@ -149,6 +164,7 @@ function buildMaterials(root, kitPath, L) {
       mat = new THREE.MeshLambertMaterial({ color: c, emissive: c.clone().multiplyScalar(0.45) });
     }
     mat.name = n;
+    if (DBG.has('double')) mat.side = THREE.DoubleSide;
     if (n === 'kit') {
       bakeClothMask(o.geometry);
       out.cloth = makeClothMaterial(mat);
@@ -253,7 +269,7 @@ async function main() {
     document.getElementById('spdv').textContent = sp.toFixed(1);
     clothTime.value += dt;
     vel.set(0, 0, sp);               // бежим вперёд, в +Z как в игре
-    if (rig && rig.cloth) updateCloth(rig.cloth, rig.kitMesh, vel, +tIn.value);
+    if (rig && rig.cloth && !DBG.has('nocloth')) updateCloth(rig.cloth, rig.kitMesh, vel, +tIn.value);
     if (hair) hair.update(dt);
     if (document.getElementById('spin').checked) spinAng += dt * 0.6;
     model.rotation.y = spinAng;
