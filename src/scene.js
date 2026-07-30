@@ -12,6 +12,7 @@ import {
 } from './atmosphere.js';
 import { Flares } from './flares.js';
 import { Confetti } from './confetti.js';
+import { CornerFlags } from './corners.js';
 import { initRim, addRim } from './rimlight.js';
 
 const STADIUM_TEXTURES = Object.freeze({
@@ -724,6 +725,8 @@ export function buildStadium() {
   scene.add(apron);
 
   scene.userData.goals = new GoalSystem(scene);
+  // Угловые флажки: четыре в углах поля, живут на ветру и гнутся от игроков
+  scene.userData.corners = new CornerFlags(scene);
   buildBoards(scene);
   const stands = buildStands(scene);
   buildFloodlights(scene);

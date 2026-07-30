@@ -12,10 +12,77 @@ const AXIS = [
   new THREE.Vector3(0, 0, 1),
 ];
 
+/**
+ * Текстура НИТЕЙ. Настоящая сетка ворот — ромбическая решётка с ячейкой не
+ * крупнее 120 мм (стандарт ФИФА). Рисовать её линиями по узлам симуляции
+ * нельзя: честная ячейка потребовала бы вчетверо больше узлов, а тонкие
+ * диагонали в 720p дали бы мерцающую кашу. Поэтому решётка — ТЕКСТУРА, а
+ * мипмапы сами превращают её на дальнем плане в равномерный тюль, как в
+ * телекартинке 98-го.
+ *
+ * Тайл повторяется по полотну, поэтому обе диагонали обязаны проходить ровно
+ * через углы: тогда соседние тайлы продолжают нить без излома. Ячейка ромба
+ * получается со стороной tile/√2 — отсюда и множитель при переводе в метры.
+ */
+let netAlphaMap = null;
+function netThreadTexture() {
+  if (netAlphaMap) return netAlphaMap;
+  const N = CONFIG.goal.net;
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000';                    // дырка ячейки: alphaMap читает ЯРКОСТЬ
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = Math.max(1.2, size * N.thread * Math.SQRT1_2);
+  ctx.lineCap = 'square';
+  // По три линии на каждое направление: средняя идёт через углы тайла, крайние
+  // закрывают противоположные углы — без них в стыке появлялся разрыв нити.
+  for (const shift of [-size, 0, size]) {
+    ctx.beginPath();
+    ctx.moveTo(-1, shift - 1);
+    ctx.lineTo(size + 1, shift + size + 1);
+    ctx.moveTo(-1, shift + size + 1);
+    ctx.lineTo(size + 1, shift - 1);
+    ctx.stroke();
+  }
+  netAlphaMap = new THREE.CanvasTexture(c);
+  netAlphaMap.wrapS = THREE.RepeatWrapping;
+  netAlphaMap.wrapT = THREE.RepeatWrapping;
+  netAlphaMap.minFilter = THREE.LinearMipmapLinearFilter;
+  netAlphaMap.magFilter = THREE.LinearFilter;
+  netAlphaMap.generateMipmaps = true;
+  netAlphaMap.anisotropy = 4;
+  return netAlphaMap;
+}
+
+let netMaterial = null;
+function getNetMaterial() {
+  if (netMaterial) return netMaterial;
+  const N = CONFIG.goal.net;
+  // Один материал на все восемь полотен: у three.js ключ кэша программ — это
+  // материал, и восемь одинаковых дали бы восемь программ на ровном месте.
+  // depthWrite: false — сквозь сетку обязан просвечивать мяч в воротах.
+  netMaterial = new THREE.MeshBasicMaterial({
+    color: N.color,
+    alphaMap: netThreadTexture(),
+    transparent: true,
+    opacity: N.opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  return netMaterial;
+}
+
 // Сетка хранит один пружинный сдвиг на узел вдоль нормали панели. Узлы связаны
 // с четырьмя соседями: при попадании импульс расходится волной по полотну.
+//
+// Узлы — это ФИЗИКА, а не рисунок: видимую решётку даёт текстура нитей, и
+// поэтому шаг узлов подбирается по гладкости кармана, а не по размеру ячейки.
 class NetPanel {
-  constructor(scene, cols, rows, pointAt, outwardNormal) {
+  constructor(scene, cols, rows, pointAt, outwardNormal, sag = 0) {
     this.cols = Math.max(2, cols);
     this.rows = Math.max(2, rows);
     this.normal = outwardNormal.clone();
@@ -24,40 +91,58 @@ class NetPanel {
     this.offset = new Float32Array(this.count);
     this.velocity = new Float32Array(this.count);
     this.nextVelocity = new Float32Array(this.count);
+    this.asleep = false;   // спящее полотно не считается и не грузится в GPU
+    this.dirty = true;
+
+    const uvs = new Float32Array(this.count * 2);
+    // Размер полотна в МЕТРАХ — из него считается, сколько ячеек ложится по
+    // каждой стороне. Иначе узкая боковина и широкая задняя стенка получили бы
+    // ячейки разного размера, и ворота читались бы двумя разными сетками.
+    const p00 = pointAt(0, 0);
+    const spanU = p00.distanceTo(pointAt(1, 0));
+    const spanV = p00.distanceTo(pointAt(0, 1));
+    const tile = CONFIG.goal.net.cell * Math.SQRT2; // сторона ромба → шаг тайла
 
     for (let row = 0; row < this.rows; row++) {
       for (let col = 0; col < this.cols; col++) {
         const i = row * this.cols + col;
-        const p = pointAt(col / (this.cols - 1), row / (this.rows - 1));
-        this.rest[i * 3] = p.x;
-        this.rest[i * 3 + 1] = p.y;
-        this.rest[i * 3 + 2] = p.z;
+        const u = col / (this.cols - 1);
+        const v = row / (this.rows - 1);
+        const p = pointAt(u, v);
+        // ПРОВИС. Полотно висит на каркасе и втягивается внутрь коробки:
+        // максимум в середине, ноль по краям (там оно привязано к трубам).
+        // Смещение только визуальное — столкновения считает плоскость панели.
+        const droop = sag * Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
+        this.rest[i * 3] = p.x - this.normal.x * droop;
+        this.rest[i * 3 + 1] = p.y - this.normal.y * droop;
+        this.rest[i * 3 + 2] = p.z - this.normal.z * droop;
+        uvs[i * 2] = (u * spanU) / tile;
+        uvs[i * 2 + 1] = (v * spanV) / tile;
       }
     }
 
-    this.edges = [];
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = 0; col < this.cols; col++) {
-        const i = row * this.cols + col;
-        if (col + 1 < this.cols) this.edges.push(i, i + 1);
-        if (row + 1 < this.rows) this.edges.push(i, i + this.cols);
+    const index = [];
+    for (let row = 0; row + 1 < this.rows; row++) {
+      for (let col = 0; col + 1 < this.cols; col++) {
+        const a = row * this.cols + col;
+        const b = a + 1;
+        const c = a + this.cols;
+        const d = c + 1;
+        index.push(a, c, b, b, c, d);
       }
     }
 
-    this.positions = new Float32Array(this.edges.length * 3);
+    this.positions = new Float32Array(this.count * 3);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    this.lines = new THREE.LineSegments(
-      geometry,
-      new THREE.LineBasicMaterial({
-        color: 0xf4f4ee,
-        transparent: true,
-        opacity: 0.58,
-        depthWrite: false,
-      }),
-    );
-    this.lines.frustumCulled = false;
-    scene.add(this.lines);
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(index);
+    this.mesh = new THREE.Mesh(geometry, getNetMaterial());
+    this.mesh.frustumCulled = false;
+    // Сетка прозрачная и стоит на фоне трибуны: пусть рисуется после щитов
+    // и до мяча в воротах — так карман не «съедает» мяч по краю.
+    this.mesh.renderOrder = 2;
+    scene.add(this.mesh);
     this.syncGeometry();
   }
 
@@ -65,13 +150,22 @@ class NetPanel {
     return col === 0 || row === 0 || col === this.cols - 1 || row === this.rows - 1;
   }
 
-  excite(point, outwardSpeed) {
+  // Любое воздействие будит полотно: спящее не тратит ни цикла, ни загрузки
+  // буфера в видеопамять. Восемь полотен живут в кадре всегда, а работают
+  // считаные секунды за матч — без сна это чистый налог.
+  wake() {
+    this.asleep = false;
+    this.idle = 0;
+  }
+
+  excite(point, outwardSpeed, gain = 1, radius = CONFIG.goal.net.impactRadius) {
     const N = CONFIG.goal.net;
-    const r2 = N.impactRadius * N.impactRadius;
+    this.wake();
+    const r2 = radius * radius;
     const impactSpeed = Math.min(Math.abs(outwardSpeed), N.impactMaxSpeed);
     // Нелинейная кривая: слабый мяч лишь качает сетку, а мощный удар создаёт
     // глубокий мешок и гораздо более сильную волну по соседним ячейкам.
-    const impulse = Math.sign(outwardSpeed) * N.impactTransfer * N.impactReferenceSpeed *
+    const impulse = Math.sign(outwardSpeed) * gain * N.impactTransfer * N.impactReferenceSpeed *
       Math.pow(impactSpeed / N.impactReferenceSpeed, N.impactExponent);
     let nearest = -1;
     let nearestD2 = Infinity;
@@ -99,9 +193,11 @@ class NetPanel {
 
   // Пока мяч физически продавливает полотно, ближайшие узлы следуют за ним.
   // Это и создаёт видимый локальный «мешок», а не едва заметную общую дрожь.
-  press(point, depth, dt) {
+  // Радиус — параметр: у мяча карман узкий, у вбежавшего игрока широкий.
+  press(point, depth, dt, radius = CONFIG.goal.net.impactRadius) {
     const N = CONFIG.goal.net;
-    const r2 = N.impactRadius * N.impactRadius;
+    this.wake();
+    const r2 = radius * radius;
     const follow = 1 - Math.exp(-N.followRate * dt);
     // Физический ход мяча меньше экранного хода узлов: с высоты ТВ-камеры
     // честные 30–70 см превращаются в один пиксель и выглядят как статика.
@@ -125,10 +221,11 @@ class NetPanel {
         this.offset[i] += (target - this.offset[i]) * follow;
       }
     }
-    this.syncGeometry();
+    this.dirty = true;
   }
 
   update(dt) {
+    if (this.asleep) return;
     const N = CONFIG.goal.net;
     const nextVelocity = this.nextVelocity;
     nextVelocity.set(this.velocity);
@@ -148,6 +245,7 @@ class NetPanel {
       }
     }
 
+    let energy = 0;
     for (let row = 0; row < this.rows; row++) {
       for (let col = 0; col < this.cols; col++) {
         const i = row * this.cols + col;
@@ -162,29 +260,43 @@ class NetPanel {
           -N.visualMaxStretch,
           N.visualMaxStretch,
         );
+        const e = Math.abs(this.offset[i]) + Math.abs(this.velocity[i]) * 0.05;
+        if (e > energy) energy = e;
       }
     }
+    this.dirty = true;
     this.syncGeometry();
+
+    // Успокоилось — полотно засыпает ровно в позе покоя. Порог берём заметно
+    // ниже пикселя на игровом плане (1 мм), чтобы засыпание не было видно.
+    if (energy < 0.001) {
+      this.offset.fill(0);
+      this.velocity.fill(0);
+      this.syncGeometry();
+      this.asleep = true;
+    }
   }
 
   reset() {
     this.offset.fill(0);
     this.velocity.fill(0);
+    this.dirty = true;
     this.syncGeometry();
+    this.asleep = true;
   }
 
   syncGeometry() {
+    if (!this.dirty) return;
     const n = this.normal;
-    for (let e = 0; e < this.edges.length; e++) {
-      const i = this.edges[e];
-      const src = i * 3;
-      const dst = e * 3;
+    for (let i = 0; i < this.count; i++) {
+      const j = i * 3;
       const d = this.offset[i];
-      this.positions[dst] = this.rest[src] + n.x * d;
-      this.positions[dst + 1] = this.rest[src + 1] + n.y * d;
-      this.positions[dst + 2] = this.rest[src + 2] + n.z * d;
+      this.positions[j] = this.rest[j] + n.x * d;
+      this.positions[j + 1] = this.rest[j + 1] + n.y * d;
+      this.positions[j + 2] = this.rest[j + 2] + n.z * d;
     }
-    this.lines.geometry.attributes.position.needsUpdate = true;
+    this.mesh.geometry.attributes.position.needsUpdate = true;
+    this.dirty = false;
   }
 }
 
@@ -301,57 +413,142 @@ export class GoalSystem {
       const seam = CONFIG.ball.radius * 2 + 0.05;
       const back = new NetPanel(
         scene,
-        Math.ceil((outerHalf * 2) / G.net.cellSize) + 1,
-        Math.ceil(barAxisY / G.net.cellSize) + 1,
+        Math.ceil((outerHalf * 2) / G.net.sim) + 1,
+        Math.ceil(barAxisY / G.net.sim) + 1,
         (u, v) => new THREE.Vector3(backX, v * barAxisY, -outerHalf + u * outerHalf * 2),
         new THREE.Vector3(dir, 0, 0),
+        G.net.sagBack,
       );
       this.panels.push(back);
+      // pad — запас шва (см. выше). Мячу он нужен, а вот телу игрока его дают
+      // нулевым: иначе бегущего ЗА полотном, вдоль внешней кромки, барьер
+      // хватал бы за воздух в 37 см от края сетки.
       this.netPlanes.push({
         axis: 0, value: backX, outward: new THREE.Vector3(dir, 0, 0), panel: back,
-        inside: (p) => p.y >= -seam && p.y <= barAxisY + seam &&
-          Math.abs(p.z) <= outerHalf + seam,
+        inside: (p, pad = seam) => p.y >= -pad && p.y <= barAxisY + pad &&
+          Math.abs(p.z) <= outerHalf + pad,
       });
 
       const roof = new NetPanel(
         scene,
-        Math.ceil(G.depth / G.net.cellSize) + 1,
-        Math.ceil((outerHalf * 2) / G.net.cellSize) + 1,
+        Math.ceil(G.depth / G.net.sim) + 1,
+        Math.ceil((outerHalf * 2) / G.net.sim) + 1,
         (u, v) => new THREE.Vector3(lineX + dir * G.depth * u, barAxisY, -outerHalf + v * outerHalf * 2),
         new THREE.Vector3(0, 1, 0),
+        G.net.sagRoof,
       );
       this.panels.push(roof);
       this.netPlanes.push({
         axis: 1, value: barAxisY, outward: new THREE.Vector3(0, 1, 0), panel: roof,
-        inside: (p) => dir * (p.x - lineX) >= -seam && dir * (p.x - lineX) <= G.depth + seam &&
-          Math.abs(p.z) <= outerHalf + seam,
+        inside: (p, pad = seam) => dir * (p.x - lineX) >= -pad &&
+          dir * (p.x - lineX) <= G.depth + pad && Math.abs(p.z) <= outerHalf + pad,
       });
 
       for (const side of [-1, 1]) {
         const sideZ = side * outerHalf;
         const panel = new NetPanel(
           scene,
-          Math.ceil(G.depth / G.net.cellSize) + 1,
-          Math.ceil(barAxisY / G.net.cellSize) + 1,
+          Math.ceil(G.depth / G.net.sim) + 1,
+          Math.ceil(barAxisY / G.net.sim) + 1,
           (u, v) => new THREE.Vector3(lineX + dir * G.depth * u, v * barAxisY, sideZ),
           new THREE.Vector3(0, 0, side),
+          G.net.sagSide,
         );
         this.panels.push(panel);
         this.netPlanes.push({
           axis: 2, value: sideZ, outward: new THREE.Vector3(0, 0, side), panel,
-          inside: (p) => dir * (p.x - lineX) >= -seam && dir * (p.x - lineX) <= G.depth + seam &&
-            p.y >= -seam && p.y <= barAxisY + seam,
+          inside: (p, pad = seam) => dir * (p.x - lineX) >= -pad &&
+            dir * (p.x - lineX) <= G.depth + pad && p.y >= -pad && p.y <= barAxisY + pad,
         });
       }
     }
   }
 
-  update(dt) {
+  update(dt, players = null) {
+    if (players) this.updateBodies(players, dt);
     for (const panel of this.panels) panel.update(dt);
   }
 
   reset() {
     for (const panel of this.panels) panel.reset();
+    this.bodyTouch = new WeakMap();
+  }
+
+  /**
+   * ТЕЛО В СЕТКЕ (правило с 30.07.2026). До этого игроки проходили сквозь
+   * полотно как призраки: вбежавший за мячом нападающий вылетал за ворота
+   * насквозь, а упавший вратарь лежал наполовину снаружи. Сетка — натянутое
+   * полотно: она человека ДЕРЖИТ, а он её ТЯНЕТ, и оба это показывают.
+   *
+   * Барьер ДВУСТОРОННИЙ и определяет сторону по знаку: в какую сторону от
+   * полотна центр тела, туда и выталкивает. Иначе игрок, обегающий ворота
+   * сзади, влетал бы внутрь коробки, а выйти уже не мог.
+   *
+   * Податливость обязательна (bodyGive): жёсткая стенка на месте сетки
+   * выглядела бы стеклом и, главное, ломала бы вымеренную геометрию броска
+   * вратаря — он ложится в полотно и должен его РАСТЯНУТЬ, а не отскочить.
+   */
+  updateBodies(players, dt) {
+    const N = CONFIG.goal.net;
+    const R = N.bodyRadius;
+    const G = CONFIG.goal;
+    const line = CONFIG.field.length / 2;
+    if (!this.bodyTouch) this.bodyTouch = new WeakMap();
+
+    for (const player of players) {
+      const pos = player.group.position;
+      // Грубый отсев: сетка живёт от лицевой линии и на глубину ворот.
+      // Двадцать полевых игроков в центре поля не стоят ни одной проверки.
+      if (Math.abs(pos.x) < line - R) { this.bodyTouch.delete(player); continue; }
+      let touched = null;
+
+      for (const plane of this.netPlanes) {
+        // Крышу пропускаем: до 2.68 м не достаёт ни один игрок, даже в прыжке,
+        // и вертикальная проверка «цилиндром» для неё бессмысленна.
+        if (plane.axis === 1) continue;
+        const axis = plane.axis;
+        const outSign = plane.outward.getComponent(axis);
+        const signed = (pos.getComponent(axis) - plane.value) * outSign;
+        if (Math.abs(signed) >= R) continue;
+        const pushSign = signed >= 0 ? 1 : -1;   // куда выталкивать: где центр тела
+
+        const point = pos.clone();
+        point.setComponent(axis, plane.value);
+        // Точка прогиба — по КОРПУСУ, а не по ногам: полотно тянет грудь и
+        // плечи. У лежащего вратаря группа опущена, и точка опускается с ней.
+        point.y = THREE.MathUtils.clamp(pos.y + 0.95, 0.35, G.height + G.postRadius * 2 - 0.25);
+        if (!plane.inside(point, 0)) continue;
+
+        const pen = R - Math.abs(signed);
+        const panel = plane.panel;
+        touched = panel;
+        // Первое касание — короткий рывок волны по полотну. Дальше только
+        // прогиб: человек не бьёт по сетке, он в неё упирается.
+        if (this.bodyTouch.get(player) !== panel) {
+          const speed = player.vel ? player.vel.getComponent(axis) * outSign : 0;
+          panel.excite(point, speed, N.bodyExcite, N.bodyPress);
+        }
+        panel.press(point, pen * N.bodyDepth * -pushSign, dt, N.bodyPress);
+
+        // Полотно тянется на bodyGive и на этом ДЕРЖИТ. Коррекция полная, а не
+        // долей за кадр: мягкость даёт сама податливость, а «доля за кадр» на
+        // скорости бега просто не успевает (замер — игрок уходил за ворота на
+        // 13.6 м). Мягко и надёжно — разные вещи, и здесь нужна вторая.
+        const over = pen - N.bodyGive;
+        if (over > 0) {
+          pos.setComponent(axis, pos.getComponent(axis) + outSign * pushSign * over);
+        }
+        // Скорость «в полотно» отдаётся назад малой долей: капрон под нагрузкой
+        // работает как слабая пружина — влетевшего он останавливает и слегка
+        // отталкивает, но батутом не становится.
+        if (player.vel) {
+          const v = player.vel.getComponent(axis);
+          if (v * outSign * pushSign < 0) player.vel.setComponent(axis, -v * N.bodyBounce);
+        }
+      }
+      if (touched) this.bodyTouch.set(player, touched);
+      else this.bodyTouch.delete(player);
+    }
   }
 
   findFrameHit(p, v, maxTime, ballRadius) {

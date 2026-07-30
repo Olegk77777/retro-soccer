@@ -612,12 +612,20 @@ function frame() {
   // В празднование мяч уже в сетке — его физику тоже не трогаем.
   const replaying = !!(match && (match.state === 'replay' || match.state === 'celebration'));
   const event = replaying ? null : ball.update(gdt);
-  if (!replaying) goals.update(gdt);
+  // Сетка знает и про мяч, и про ТЕЛА: игроки её тянут, она их держит.
+  // Игроки уже сходили свой шаг в match.update, поэтому барьер правит
+  // конечную позицию кадра — до отрисовки и до постановки теней.
+  if (!replaying) goals.update(gdt, match ? match.allPlayers : null);
   // Атмосфера: веер теней ставится ПОСЛЕ движения игроков, вспышки живут сами
   if (scene.userData.shadows) scene.userData.shadows.update();
   if (scene.userData.flashes) scene.userData.flashes.update(dt);
   if (scene.userData.flares) scene.userData.flares.update(dt);
   if (scene.userData.midges) scene.userData.midges.update(dt);
+  // Флажки полощет ВЕТЕР, а ветер — это стадион, а не футбол: время реальное,
+  // как у дыма и волны в футболках. Толчки от игроков приходят событиями.
+  if (scene.userData.corners) {
+    scene.userData.corners.update(dt, match ? match.allPlayers : null, ball);
+  }
   if (scene.userData.wave) scene.userData.wave.update(dt);
   if (scene.userData.confetti) scene.userData.confetti.update(dt);
   // Вираж поёт по РЕАЛЬНОМУ времени: темп игры к дудкам и барабану

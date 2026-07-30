@@ -289,8 +289,10 @@ export class Flares {
       }
     }
 
-    // 2) Дым: подъём, снос ветром, рост и растворение
-    const W = F.wind;
+    // 2) Дым: подъём, снос ветром, рост и растворение.
+    // Ветер один на весь стадион (CONFIG.atmosphere.wind): тот же вектор
+    // относит полотнища угловых флажков — иначе дым и флаг покажут разное.
+    const W = CONFIG.atmosphere.wind;
     for (const p of this.puffs) {
       if (p.life <= 0) continue;
       p.life -= dt;
@@ -364,8 +366,8 @@ export class Flares {
     h.x = f.x + f.inX * out;
     h.z = f.z + f.inZ * out;
     // Ползёт к полю, слегка вдоль — ветер тот же, что несёт дым наверху
-    h.vx = f.inX * F.hazeDrift + F.wind.x * F.hazeWind;
-    h.vz = f.inZ * F.hazeDrift + F.wind.z * F.hazeWind;
+    h.vx = f.inX * F.hazeDrift + CONFIG.atmosphere.wind.x * F.hazeWind;
+    h.vz = f.inZ * F.hazeDrift + CONFIG.atmosphere.wind.z * F.hazeWind;
     h.rot = Math.random() * Math.PI * 2;
     h.spin = (Math.random() - 0.5) * F.hazeSpin;
   }
