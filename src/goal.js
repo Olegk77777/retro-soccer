@@ -58,6 +58,20 @@ function netThreadTexture() {
   return netAlphaMap;
 }
 
+/**
+ * РАЗМЕР ВОВЛЕЧЁННОГО КУСКА ПОЛОТНА РАСТЁТ С СИЛОЙ УДАРА (правило с
+ * 31.07.2026). Одно фиксированное число не различает тычок и пушку вовсе:
+ * лёгкое касание в жизни качает ладонь сетки, а удар с тридцати метров в
+ * секунду уносит за мячом чуть ли не половину полотнища и натягивает его до
+ * закреплённых краёв. Зависимость линейная по скорости и обрезана опорной:
+ * выше 18 м/с полотно и так вовлечено целиком, дальше расти некуда.
+ */
+function impactRadiusFor(speed) {
+  const N = CONFIG.goal.net;
+  const k = Math.min(1, Math.abs(speed) / N.impactReferenceSpeed);
+  return N.impactRadiusSoft + (N.impactRadiusHard - N.impactRadiusSoft) * k;
+}
+
 let netMaterial = null;
 function getNetMaterial() {
   if (netMaterial) return netMaterial;
@@ -158,13 +172,15 @@ class NetPanel {
     this.idle = 0;
   }
 
-  excite(point, outwardSpeed, gain = 1, radius = CONFIG.goal.net.impactRadius) {
+  excite(point, outwardSpeed, gain = 1, radius = null) {
     const N = CONFIG.goal.net;
     this.wake();
-    const r2 = radius * radius;
+    const r = radius === null ? impactRadiusFor(outwardSpeed) : radius;
+    const r2 = r * r;
     const impactSpeed = Math.min(Math.abs(outwardSpeed), N.impactMaxSpeed);
-    // Нелинейная кривая: слабый мяч лишь качает сетку, а мощный удар создаёт
-    // глубокий мешок и гораздо более сильную волну по соседним ячейкам.
+    // Кривая почти линейная: лёгкое касание ОБЯЗАНО качнуть полотно, иначе
+    // сетка выглядит бетонной. Разницу между тычком и пушкой делает не столько
+    // сила импульса, сколько РАЗМЕР вовлечённого куска (impactRadiusFor).
     const impulse = Math.sign(outwardSpeed) * gain * N.impactTransfer * N.impactReferenceSpeed *
       Math.pow(impactSpeed / N.impactReferenceSpeed, N.impactExponent);
     let nearest = -1;
@@ -193,8 +209,9 @@ class NetPanel {
 
   // Пока мяч физически продавливает полотно, ближайшие узлы следуют за ним.
   // Это и создаёт видимый локальный «мешок», а не едва заметную общую дрожь.
-  // Радиус — параметр: у мяча карман узкий, у вбежавшего игрока широкий.
-  press(point, depth, dt, radius = CONFIG.goal.net.impactRadius) {
+  // Радиус — параметр: у слабого касания узкая ладонь, у пушки — полполотна,
+  // у вбежавшего игрока свой (bodyPress).
+  press(point, depth, dt, radius = CONFIG.goal.net.impactRadiusSoft) {
     const N = CONFIG.goal.net;
     this.wake();
     const r2 = radius * radius;
@@ -237,9 +254,15 @@ class NetPanel {
           this.offset[i - 1] + this.offset[i + 1] +
           this.offset[i - this.cols] + this.offset[i + this.cols];
         const laplacian = neighbours - this.offset[i] * 4;
+        // НАТЯЖЕНИЕ: чем сильнее растянут узел, тем жёстче связи и тем быстрее
+        // по полотну идёт волна — так ведёт себя настоящий капрон под
+        // нагрузкой. Без этого пушка отличалась от тычка только глубиной ямки,
+        // а «звона» натянутой сетки в кадре не было вовсе. Потолок обязателен:
+        // схема явная, и неограниченная жёсткость её развалит.
+        const tension = Math.min(N.tightenMax, 1 + N.tighten * Math.abs(this.offset[i]));
         const accel =
-          laplacian * N.spring -
-          this.offset[i] * N.restore -
+          laplacian * N.spring * tension -
+          this.offset[i] * N.restore * tension -
           this.velocity[i] * N.damping;
         nextVelocity[i] = this.velocity[i] + accel * dt;
       }
@@ -725,7 +748,10 @@ export class GoalSystem {
       const planePoint = p.clone();
       planePoint.setComponent(axis, contact.plane.value);
       const panelDepth = newPenetration * contact.panel.normal.dot(contact.pushDir);
-      contact.panel.press(planePoint, panelDepth, step);
+      // Радиус кармана берётся по скорости ВХОДА, а не по текущей: мяч в
+      // полотне уже почти стоит, и «по текущей» пушка сжималась бы в тычок
+      // ровно в тот момент, когда карман должен быть самым широким.
+      contact.panel.press(planePoint, panelDepth, step, impactRadiusFor(contact.speed));
 
       contact.age += step;
       used += step;
@@ -767,6 +793,7 @@ export class GoalSystem {
       plane: best,
       pushDir: best.outward.clone(),
       age: contact.age,
+      speed: contact.speed,
       excited: contact.excited,
     };
     return true;
@@ -797,7 +824,7 @@ export class GoalSystem {
       const extra = Math.max(0, pen - N.physicalMaxStretch);
       const accel = -N.ballSpring * pen - N.hardStopSpring * extra - N.ballDamping * vn;
       ball.vel.addScaledVector(plane.outward, accel * step);
-      plane.panel.press(planePoint, pen, step);
+      plane.panel.press(planePoint, pen, step, impactRadiusFor(contact.speed));
     }
   }
 
@@ -838,6 +865,8 @@ export class GoalSystem {
           plane: hit.plane,
           pushDir: hit.normal.clone().negate(),
           age: 0,
+          speed: Math.abs(outwardImpact), // сила удара живёт весь контакт
+
           excited: new Set([hit.panel]), // какие панели уже дёрнуты этим контактом
         };
         // Отладочный или испорченный импульс не должен протащить мяч дальше,
