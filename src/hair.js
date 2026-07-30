@@ -280,8 +280,20 @@ const _mRel = new THREE.Matrix4();
  * Возвращает null, если стиль «лысый» или кости нет.
  */
 export class HairRig {
-  constructor(model, look) {
+  /**
+   * @param headScale {x,y,z} — во столько раз личный морф раздул череп по
+   *   осям кости (см. src/headshape.js). Шапка ОБЯЗАНА повторить эти
+   *   множители: она построена по СТАТИЧНОМУ профилю черепа, а зазор у линии
+   *   роста волос всего 1.2 мм у стрижки `thin` — расширенный морфом череп
+   *   проткнул бы её насквозь, и вышла бы «повязка на голове» (фидбек
+   *   27.07.2026). Работает это только потому, что морфы формы черепа —
+   *   ЧИСТЫЕ масштабы вокруг высоты кости, а локальный ноль шапки лежит
+   *   ровно на ней: значит достаточно перемножить, без пересборки геометрии
+   *   и без раздутия кэша стрижек.
+   */
+  constructor(model, look, headScale) {
     const st = STYLES[(look && look.hair) || 'short'];
+    const hs = headScale || { x: 1, y: 1, z: 1 };
     this.bone = model.getObjectByName('mixamorigHead');
     this.tail = null;
     if (!st || !this.bone) return;
@@ -313,7 +325,7 @@ export class HairRig {
     const key = `${look && look.hair}|${st.lift}`;
     if (!geoCache.has(key)) geoCache.set(key, capGeometry(st));
     const cap = new THREE.Mesh(geoCache.get(key), mat);
-    cap.scale.set(1 / sx, 1 / sy, 1 / sz);
+    cap.scale.set(hs.x / sx, hs.y / sy, hs.z / sz);
     cap.frustumCulled = false;
     this.bone.add(cap);
     this.cap = cap;
@@ -323,8 +335,9 @@ export class HairRig {
       if (!geoCache.has(tk)) geoCache.set(tk, tailGeometry(st.tail));
       const pivot = new THREE.Object3D();
       // Минус: подвес хвоста на ЗАТЫЛКЕ, а +Z кости смотрит в лицо.
-      pivot.position.set(0, (st.tail.z - HEAD_BONE_Z) / sy, -st.tail.y / sz);
-      pivot.scale.set(1 / sx, 1 / sy, 1 / sz);
+      pivot.position.set(0, hs.y * (st.tail.z - HEAD_BONE_Z) / sy,
+                         -hs.z * st.tail.y / sz);
+      pivot.scale.set(hs.x / sx, hs.y / sy, hs.z / sz);
       const mesh = new THREE.Mesh(geoCache.get(tk), mat);
       mesh.frustumCulled = false;
       pivot.add(mesh);

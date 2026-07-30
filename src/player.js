@@ -6,6 +6,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { CONFIG } from './config.js';
 import { buildDerivedClips } from './anim.js';
+import { buildHeadMorphs } from './headshape.js';
+import { applyHeadShape } from './headshape.js';
 import { PoseBlend, blendTime } from './pose.js';
 import { faceTexture } from './face.js';
 import { HairRig } from './hair.js';
@@ -25,7 +27,10 @@ let modelPromise = null;
 function loadPlayerModel() {
   if (!modelPromise) {
     modelPromise = new GLTFLoader().loadAsync('./models/player.glb')
-      .then((gltf) => buildDerivedClips(gltf));
+      // Морфы формы черепа строятся ОДИН раз на общий gltf и ДО клонов:
+      // атрибуты живут в геометрии (одни на всех), а веса — в меше, и
+      // Mesh.copy копирует их только если они уже есть у источника.
+      .then((gltf) => buildHeadMorphs(buildDerivedClips(gltf)));
   }
   return modelPromise;
 }
@@ -364,10 +369,16 @@ export class Player {
       o.material = mat;
     });
 
+    // Личная форма черепа. Возвращает множители, во столько раз череп
+    // раздался по осям кости головы, — их ОБЯЗАНА взять шапка волос, иначе
+    // расширенный череп проткнёт её насквозь (зазор у линии роста волос у
+    // стрижки `thin` всего 1.2 мм).
+    const headScale = applyHeadShape(this.model, L);
+
     this.group.add(this.model);
     // Причёску и перчатки сажаем ПОСЛЕ подключения модели: если тут что-то
     // сломается, игрок останется с моделью и анимациями, а не свалится на капсулу
-    this.attachHair();
+    this.attachHair(headScale);
     this.attachGloves();
     this.body.visible = false;   // капсула была фолбэком — прячем
     this.nose.visible = false;
@@ -486,9 +497,9 @@ export class Player {
   // Причёска — отдельный модуль (src/hair.js). Сажаем ПОСЛЕ подключения
   // модели: если стрижка сломается, игрок останется с моделью и анимациями,
   // а не свалится на капсулу.
-  attachHair() {
+  attachHair(headScale) {
     try {
-      this.hair = new HairRig(this.model, this.look);
+      this.hair = new HairRig(this.model, this.look, headScale);
     } catch (e) {
       console.error('Причёска не собралась:', e);
       this.hair = null;

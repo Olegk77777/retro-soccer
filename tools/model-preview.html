@@ -68,6 +68,7 @@ import { HairRig } from '../src/hair.js';
 import { kitTextureWithNumber } from '../src/kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth, clothTime } from '../src/cloth.js';
 import { buildDerivedClips } from '../src/anim.js';
+import { buildHeadMorphs, applyHeadShape } from '../src/headshape.js';
 
 const qs = new URLSearchParams(location.search);
 const err = (e) => { document.getElementById('err').textContent += `\n${e && e.stack || e}`; };
@@ -184,6 +185,7 @@ async function main() {
   // лежат в glb. Без этого вызова просмотрщик показывал только сырой пак и
   // проверить в нём walk/jog/sprint или kick_run_l было нельзя.
   try { buildDerivedClips(gltf); } catch (e) { console.error('производные клипы:', e); }
+  try { buildHeadMorphs(gltf); } catch (e) { console.error('морфы черепа:', e); }
 
   const who = document.getElementById('who');
   squad.forEach((s, i) => who.append(new Option(`${s.number} ${s.name}`, i)));
@@ -218,8 +220,11 @@ async function main() {
     showTex();
     for (const ms of [120, 400, 900, 2000]) setTimeout(showTex, ms);
     scene.add(model);
-    hair = new HairRig(model, look);
-    window.__dbg = { model, hair, rig, look };   // для проверки из консоли
+    // Форма черепа назначается ПОСЛЕ материалов: искать голову приходится по
+    // имени материала, а buildMaterials их пересоздаёт.
+    const headScale = applyHeadShape(model, look);
+    hair = new HairRig(model, look, headScale);
+    window.__dbg = { model, hair, rig, look, headScale };   // для консоли
     mixer = new THREE.AnimationMixer(model);
     setClip();
   };
