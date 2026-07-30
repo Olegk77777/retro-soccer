@@ -1,38 +1,34 @@
-// Синтезированный свисток арбитра (WebAudio, без файлов): классическая
-// «горошина» — два прямоугольных генератора ~2,3 кГц с трелью 36 Гц через
-// полосовой фильтр. Живые сэмплы и комментатор придут в Фазе 4 (Howler);
-// этот модуль — их дешёвый ретро-предшественник.
+// Звук матча: единая точка для match.js.
+//
+// Что здесь синтезируется, а что играют записи (правило с 30.07.2026):
+//   свисток арбитра и шипение файеров — СИНТЕЗ. Это простые физические
+//     звуки (тон с трелью, узкополосный шум), их синтез неотличим от
+//     записи, зато он бесплатен, мгновенен и не требует ни одного файла;
+//   зал — ЗАПИСИ (src/crowd.js, банк audio/crowd/). Синтезированный гул
+//     остался здесь ФОЛБЭКОМ на случай, когда файлы не доехали: игра без
+//     трибун звучит как радиоприёмник, и лучше грубый шум, чем тишина.
 //
 // Политика автоплея (iOS/Chrome): до первого касания или клавиши звуковой
-// контекст «спит» — тогда playWhistle честно возвращает false, а вызывающий
+// контекст спит — тогда playWhistle честно возвращает false, а вызывающий
 // может повторить свисток позже (интро добирает его в момент розыгрыша).
 
-let ctx = null;
+import { audioCtx, audioLive } from './audioctx.js';
+import {
+  loadCrowd, crowdReady, setCrowdIntensity as sampleIntensity,
+  crowdGoal, crowdGasp as sampleGasp, crowdApplause as sampleApplause,
+  crowdJeer as sampleJeer, updateCrowd as sampleUpdate,
+} from './crowd.js';
 
-function getCtx() {
-  if (!ctx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) ctx = new AC();
-  }
-  return ctx;
-}
+// Банк зала начинает грузиться сразу с игрой: жеста для этого не нужно,
+// а к первому свистку гул уже должен быть на месте
+loadCrowd();
 
-// Разблокировка звука первым жестом пользователя — слушатели живут всегда:
-// система дешёвая, а свистки после первого же тапа начинают звучать
-for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
-  window.addEventListener(ev, () => {
-    const c = getCtx();
-    if (c && c.state === 'suspended') c.resume();
-  }, { passive: true });
-}
-
-// ===== Гул трибун (синтез, без единого mp3) =====
-// Стадион звучит как отфильтрованный шум: ровный гул + всплески на моментах.
-// Синтез, а не сэмплы: файлов качать не надо, зацикливать нечего, и звук
-// живой — громкость и тембр ведёт сама игра. Комментатор (ElevenLabs) придёт
-// отдельно, он про голос, а не про фон.
+// ===== Гул трибун: ФОЛБЭК на синтезе =====
+// Работает, только пока записи не доехали. Розовый шум под полосовым
+// фильтром: голосов в нём нет, но «зал» вместо тишины он держит.
 
 let crowd = null;
+let fadedOut = false;
 
 // Розовый шум (спад ~3 дБ/октаву) — ближе к голосу толпы, чем белый
 function makeNoiseBuffer(c, seconds = 4) {
@@ -58,8 +54,8 @@ function makeNoiseBuffer(c, seconds = 4) {
 
 // Заводится сама при первом же звуке: до жеста пользователя браузер молчит
 function ensureCrowd() {
-  const c = getCtx();
-  if (!c || c.state !== 'running') return null;
+  const c = audioLive();
+  if (!c) return null;
   if (crowd) return crowd;
 
   const src = c.createBufferSource();
@@ -97,8 +93,22 @@ function ensureCrowd() {
   return crowd;
 }
 
+// Записи доехали посреди матча — синтетический гул обязан уйти, иначе
+// зал зазвучит дважды: шумом и голосами разом
+function retireSynth() {
+  if (!crowd || fadedOut) return;
+  fadedOut = true;
+  const t = crowd.ctx.currentTime;
+  crowd.gain.gain.cancelScheduledValues(t);
+  crowd.gain.gain.setValueAtTime(crowd.gain.gain.value, t);
+  crowd.gain.gain.setTargetAtTime(0.0001, t, 0.8);
+}
+
+// ===== Публичное управление залом =====
+
 // Напряжение эпизода 0..1: атака у ворот — зал гудит громче и «ближе»
 export function setCrowdIntensity(x) {
+  if (crowdReady()) { retireSynth(); sampleIntensity(x); return; }
   const cr = ensureCrowd();
   if (!cr) return;
   const k = Math.max(0, Math.min(1, x));
@@ -110,6 +120,12 @@ export function setCrowdIntensity(x) {
 // Взрыв трибун: гол (strength 1), опасный момент (0.4–0.6).
 // Резкая атака и долгий спад — так и ревёт стадион.
 export function crowdCheer(strength = 1) {
+  if (crowdReady()) {
+    retireSynth();
+    if (strength >= 0.8) crowdGoal();
+    else sampleGasp(strength / 0.8);
+    return;
+  }
   const cr = ensureCrowd();
   if (!cr) return;
   const s = Math.max(0.2, Math.min(1, strength));
@@ -125,14 +141,42 @@ export function crowdCheer(strength = 1) {
   cr.lp.frequency.setTargetAtTime(760, t + 1.2, 2.2);
 }
 
+// Опасный момент: сейв вратаря, штанга, мяч мимо в сантиметрах.
+// Без записей зал просто коротко подаёт голос — «ах» синтезом не сделать.
+export function crowdGasp(strength = 1) {
+  if (crowdReady()) { retireSynth(); return sampleGasp(strength); }
+  crowdCheer(0.45 * strength);
+  return false;
+}
+
+// Аплодисменты: выход команд, красивая комбинация, финальный свисток.
+export function crowdApplause(strength = 1) {
+  if (crowdReady()) { retireSynth(); return sampleApplause(strength); }
+  return false;
+}
+
+// Свист трибун: грубый подкат, снос сзади.
+export function crowdJeer(strength = 1) {
+  if (crowdReady()) { retireSynth(); return sampleJeer(strength); }
+  return false;
+}
+
+// Волны фанатского сектора — по РЕАЛЬНОМУ времени, как трибуна, дым и
+// сам телевизор: темп игры к пению виража отношения не имеет
+export function updateCrowd(dt) {
+  if (crowdReady()) sampleUpdate(dt);
+}
+
+// ===== Файеры =====
+
 // Шипение файеров на трибуне: пиротехника горит с характерным «пшшш».
-// Синтез тот же, что у толпы, — розовый шум, но полоса высокая и узкая:
+// Синтез тот же, что был у толпы, — розовый шум, но полоса высокая и узкая:
 // шипение живёт в 2–5 кГц, ниже начинается гул зала и мешает ему.
 // Звук ДАЛЁКИЙ (сектор в сотне метров), поэтому громкость скромная, а
 // нарастание медленное: пачка файеров разгорается пару секунд.
 export function flareHiss(count = 1, seconds = 12) {
-  const c = getCtx();
-  if (!c || c.state !== 'running') return false;
+  const c = audioLive();
+  if (!c) return false;
   const n = Math.max(1, Math.min(10, count));
   const t0 = c.currentTime + 0.05;
 
@@ -166,9 +210,11 @@ export function flareHiss(count = 1, seconds = 12) {
   return true;
 }
 
+// ===== Свисток =====
+
 // Свисток длиной duration сек. Возвращает true, если реально зазвучал.
 export function playWhistle(duration = 0.8) {
-  const c = getCtx();
+  const c = audioCtx();
   if (!c) return false;
   if (c.state === 'suspended') {
     c.resume(); // асинхронно; если жеста ещё не было — останется спящим

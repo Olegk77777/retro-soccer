@@ -14,6 +14,7 @@ import { kitTextureWithNumber } from './kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
 import { addRim } from './rimlight.js';
 import { predictLanding, pursuitBall, loftPower } from './ai/steering.js';
+import { crowdJeer } from './sfx.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
 // Исходные материалы НЕ трогаем — каждый клон собирает свои (цвет команды).
@@ -4903,9 +4904,11 @@ export class Player {
           o.controlling = false;
           o.playOneShot('trip', TK.tripRate, 0, null, blendTime('fall'));
         } else {
-          // Грубо: ноги вперёд в игрока (или сзади) — снос. Свисток — Фаза 5
+          // Грубо: ноги вперёд в игрока (или сзади) — снос. Свисток — Фаза 5,
+          // а вот трибуна реагирует уже сейчас: свист и улюлюканье
           o.startFall(TK.victimDown);
           this.tackleFoul = true;
+          crowdJeer();
         }
         break;
       }

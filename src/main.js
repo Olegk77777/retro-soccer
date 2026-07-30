@@ -11,6 +11,8 @@ import { CRTPipeline } from './crt.js';
 import { Knob, screenRect, invalidateScreenRect } from './tvset.js';
 import { clothTime } from './cloth.js';
 import { updateRim } from './rimlight.js';
+import { updateCrowd } from './sfx.js';
+import { setCrowdVolume } from './crowd.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -332,6 +334,31 @@ tempoSlider.addEventListener('input', () => {
   remember('f98.gameSpeed2', tempoSlider.value);
 });
 
+// Громкость стадиона: гул трибун, дудки виража, рёв после гола.
+// Свисток арбитра ей НЕ подчиняется намеренно — это судья на поле, а не
+// трибуна, и в эфире он слышен всегда, как бы ни был выведен зал.
+const crowdSlider = document.getElementById('set-crowd');
+const crowdVal = document.getElementById('set-crowd-val');
+const CROWD_LABEL = { 0: 'выкл', 30: 'тише', 55: 'фоном', 80: 'как в эфире', 100: 'громко' };
+// ВНИМАНИЕ: у этой настройки нижняя граница — НОЛЬ, поэтому обычная проверка
+// `Number(getItem(...)) >= min` не годится: у отсутствующего ключа getItem
+// возвращает null, а `Number(null)` — это 0, и первый же запуск на чистом
+// браузере включал бы «выкл». У темпа и помощи такой ловушки нет: там нижняя
+// граница выше нуля, и ноль честно не проходит проверку
+const savedCrowd = localStorage.getItem('f98.crowdVol');
+if (savedCrowd !== null && Number(savedCrowd) >= 0 && Number(savedCrowd) <= 100) {
+  CONFIG.audio.master = Number(savedCrowd) / 100;
+}
+crowdSlider.value = Math.round(CONFIG.audio.master * 100);
+setCrowdVolume(CONFIG.audio.master);   // микшер мог собраться раньше — не полагаемся на порядок
+const crowdLabel = () => CROWD_LABEL[crowdSlider.value] || `${crowdSlider.value}%`;
+crowdVal.textContent = crowdLabel();
+crowdSlider.addEventListener('input', () => {
+  setCrowdVolume(Number(crowdSlider.value) / 100);
+  crowdVal.textContent = crowdLabel();
+  remember('f98.crowdVol', crowdSlider.value);
+});
+
 // Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
 // запоминается в localStorage — на iPad настройка переживает перезапуск
 const assistSlider = document.getElementById('set-assist');
@@ -479,6 +506,9 @@ function frame() {
   if (scene.userData.midges) scene.userData.midges.update(dt);
   if (scene.userData.wave) scene.userData.wave.update(dt);
   if (scene.userData.confetti) scene.userData.confetti.update(dt);
+  // Вираж поёт по РЕАЛЬНОМУ времени: темп игры к дудкам и барабану
+  // отношения не имеет — это та же трибуна, что и волна с дымом
+  updateCrowd(dt);
   if (event === 'goal' && match) match.onGoal();
 
   // Шкала замаха видна, пока держится любая кнопка действия.

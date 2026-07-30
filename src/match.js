@@ -12,7 +12,10 @@ import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace, passPower, passStrikeKind, passTime } from './ai/steering.js';
 import { solveSpacePass } from './ai/passing.js';
-import { playWhistle, setCrowdIntensity, crowdCheer, flareHiss } from './sfx.js';
+import {
+  playWhistle, setCrowdIntensity, crowdCheer, flareHiss,
+  crowdGasp, crowdApplause,
+} from './sfx.js';
 import { Replay } from './replay.js';
 import { Officials } from './officials.js';
 import { Celebration } from './celebration.js';
@@ -124,6 +127,11 @@ export class Match {
       pass: [0, 0], passOk: [0, 0], shot: [0, 0], cross: [0, 0],
       save: [0, 0], hold: [0, 0], parry: [0, 0], loose: [0, 0],
     };
+    // Сколько сейвов зал уже отреагировал «ахом». Считаем ПО СТАТИСТИКЕ, а не
+    // хуками в goalkeeper.js: счётчики и так растут ровно в момент касания
+    // вратаря, а слой AI знать про звук не должен
+    this._savesHeard = 0;
+    this._gaspCd = 0;         // сек до следующего разрешённого «аха»
     this.state = 'kickoff';   // kickoff | play | goalpause | fulltime
     this.stateTimer = 0;
     this.kickoffTeam = 0;
@@ -349,6 +357,10 @@ export class Match {
     // Это самый узнаваемый кадр вечернего эфира 90-х — трибуна в дыму,
     // который сносит через лучи прожекторов.
     this.litFlares('intro');
+    // ...и встречает аплодисментами. Звук может не пройти (до первого жеста
+    // браузер молчит) — тогда заставка просто выйдет тихой, добирать его,
+    // как свисток, незачем: аплодисменты посреди игры выглядели бы глупо
+    crowdApplause();
     // Титр «кто с кем и где» выезжает поверх заставки, как в начале эфира
     if (this.hud.matchcard) this.hud.matchcard.classList.add('show');
     this.controlledMarker.visible = false; // звезда не мельтешит в кино-кадре
@@ -732,7 +744,23 @@ export class Match {
       const bx = Math.abs(this.ball.mesh.position.x) / (F.length / 2);
       const near = Math.max(0, (bx - CONFIG.match.crowdFrom) / (1 - CONFIG.match.crowdFrom));
       const tempo = Math.min(1, this.ball.vel.length() / 26);
-      setCrowdIntensity(Math.min(1, near * 0.85 + tempo * 0.3));
+      const heat = Math.min(1, near * 0.85 + tempo * 0.3);
+      setCrowdIntensity(heat);
+
+      // Сейв — это момент, на котором зал ахает. Ловим по счётчикам:
+      // они растут в goalkeeper.js ровно в кадре контакта с мячом.
+      // Пойманный намертво мяч (hold) в счёт не идёт — там выдох, а не ах
+      const s = this.stats;
+      const saves = s.save[0] + s.save[1] + s.parry[0] + s.parry[1];
+      this._gaspCd -= dt;
+      if (saves > this._savesHeard) {
+        this._savesHeard = saves;
+        const A = CONFIG.audio.events;
+        if (heat >= A.gaspFrom && this._gaspCd <= 0) {
+          this._gaspCd = A.gaspCd;
+          crowdGasp(Math.min(1, 0.6 + heat * 0.5));   // острее момент — громче ах
+        }
+      }
     }
 
     // Кольцевая запись для повтора: пишем позы уже ПОСЛЕ движения всех тел,
@@ -1883,6 +1911,8 @@ export class Match {
     this.stateTimer = 0;
     this.restart = null; // свисток мог застать стандарт — бросаем его
     this._releaseKeeperHolds();
+    playWhistle(1.6);        // финальный свисток длинный — так и свистят конец
+    crowdApplause(1);
     this.hud.flash.textContent = `МАТЧ ОКОНЧЕН ${this.score[0]}:${this.score[1]}`;
     this.hud.flash.classList.add('show');
     this.flashTimer = CONFIG.match.fulltimePause;
