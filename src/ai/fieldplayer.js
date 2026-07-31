@@ -18,6 +18,9 @@ export function updateFieldPlayer(p, dt, ball) {
   const pos = p.group.position;
   if (!p.ai) p.ai = { decideCd: 0, dribDir: null };
   if (p.ai.decideCd > 0) p.ai.decideCd -= dt;
+  // Обязательство «пока веду» и память о намерении (липкое намерение, 31.07)
+  if (p.ai.carryT > 0) p.ai.carryT -= dt;
+  if (p.ai.intent) p.ai.intent.t -= dt;
 
   const bp = ball.mesh.position;
   const myBallDist = distToBall(p, ball);
@@ -205,6 +208,13 @@ export function updateFieldPlayer(p, dt, ball) {
     sprint = (p.ai.dribFree || 0) > AI.dribbleSprintFree;
   } else {
     p.ai.dribDir = null;
+    // Мяч ушёл — память о виде решения и намерение обнуляются. Иначе игрок,
+    // взявший мяч через минуту, сравнит новое решение с решением ИЗ ПРОШЛОГО
+    // ЭПИЗОДА и запишет ложное метание, а липкое намерение (волна 2) попробует
+    // додержать пас на партнёра, которого рядом уже нет
+    p.ai.lastKind = null;
+    p.ai.intent = null;
+    p.ai.carryT = 0;
     if (team.receiver === p && team.receiveTarget) {
       // Приём паса: бегу к точке адреса, у самой точки — навстречу мячу.
       // Верховой мяч (навес) — строго к точке прилёта: врывание на прилёт,
@@ -534,6 +544,16 @@ function pressBall(p, dt, ball, match) {
 }
 
 // С мячом: такт решений (не каждый кадр) — удар, пас или продолжаем вести
+// ПРЯМАЯ МЕРА МЕТАНИЯ. Один такт решений — один вид действия; если на соседних
+// тактах вид сменился, значит игрок передумал. Считаем только СМЕНЫ подряд у
+// одного игрока с мячом: это ровно то, что зритель читает как «мечется».
+// Разовая смена нормальна (обстановка меняется), а вот два-три перещёлка в
+// секунду — уже сумбур, и до 31.07.2026 их было нечем поймать
+function markDecision(p, team, kind) {
+  if (p.ai.lastKind && p.ai.lastKind !== kind) team.bump('flips');
+  p.ai.lastKind = kind;
+}
+
 function withBall(p, ball) {
   const AI = CONFIG.ai;
   const P = CONFIG.player;
@@ -555,9 +575,15 @@ function withBall(p, ball) {
     }
   }
 
+  // ТЕМП ФАЗЫ (31.07.2026). До этой правки игра всегда шла на максимальной
+  // доступной скорости: ни одной ветки, которая сознательно сбавляет. Ритм
+  // «медленно-медленно-быстро» — то, чем осмысленная атака отличается от
+  // беготни, и стоит он ровно двух чисел: как часто игрок пересматривает
+  // решение и как охотно расстаётся с мячом
+  const cfg = team.phaseCfg();
   const canKick = p.kickCooldown <= 0 && distToBall(p, ball) < P.kickRadius && bp.y < P.kickMaxBallY;
   if (canKick && p.ai.decideCd <= 0) {
-    p.ai.decideCd = AI.decideInterval;
+    p.ai.decideCd = AI.decideInterval * cfg.tickK;
     // РЕШЕНИЕ БИТЬ — не «попал в радиус», а качество момента. Прежний код
     // стрелял при первой же возможности с 28 м, и замер дал 7 ударов за матч,
     // из них НИ ОДНОГО ближе 11 м: атака гибла на дальнем ударе, а вратарь
@@ -596,6 +622,11 @@ function withBall(p, ball) {
         quality = Math.max(quality, blocked ? AI.shootKillFloor : 1);
       }
       if (Math.random() < quality) {
+        // Удар, ПОДГОТОВЛЕННЫЙ серией: тот же удар после трёх передач подряд
+        // и после отбитого наугад мяча — два разных события, а счётчик shot
+        // их не различает. Без этого «атаки стали осмысленнее» недоказуемо
+        if (team.seqPasses >= 3) team.bump('shotAfter3');
+        markDecision(p, team, 'shoot');
         aiShoot(p, ball, goalX, distGoal, pressed);
         p.ai.dribDir = null;
         return { x: 0, z: 0 };
@@ -609,10 +640,24 @@ function withBall(p, ball) {
     // и не проходил через модель вовсе, хотя даёт 2.5 гола на 100 против 6.4
     // у прострела. Теперь подаём, только если передачи лучше нет
     if (aiCross(p, ball, oppD, pass)) {
+      markDecision(p, team, 'cross');
       p.ai.dribDir = null;
       return { x: 0, z: 0 };
     }
-    if (pass && (oppD < AI.passPressure || Math.random() < AI.passUrge)) {
+    // ЛИПКОЕ НАМЕРЕНИЕ (31.07.2026). Раньше здесь бросалась монета passUrge —
+    // НА КАЖДОМ такте, то есть 4–5 раз в секунду, и между тактами не помнилось
+    // ничего. Игрок в одной и той же обстановке решал вести, через 0.2 с —
+    // отдавать, ещё через 0.2 с — снова вести. Это и есть «мечется»: замер до
+    // правки дал 23–24 перерешения за матч на команду при средней серии
+    // владения в 1.37 передачи.
+    // Теперь решение «пока веду» — это ОБЯЗАТЕЛЬСТВО на carryHold секунд:
+    // выпала «веду» — держим и не перерешаем. Прессинг обязательство снимает
+    // (деваться некуда — отдавай), и это правильно: терпеть под давлением
+    // умеют, а вот вести на месте под опекой — нет
+    const carrying = p.ai.carryT > 0 && oppD >= AI.passPressure;
+    if (pass && !carrying &&
+        (oppD < AI.passPressure || Math.random() < AI.passUrge * cfg.urgeK)) {
+      markDecision(p, team, 'pass');
       p.aiKick(ball, pass.dir, pass.power, pass.lift, 0, passStrikeKind(pass));
       team.commitPass(pass, p); // короткий пас под прессингом → стеночка
       p.ai.dribDir = null;
@@ -623,7 +668,15 @@ function withBall(p, ball) {
     // в статистике, — последним доводом, когда ни бить, ни отдать некуда.
     // Решение узкое: защитник перекрыл курс, до своих ворот далеко (потеря
     // мяча в своей трети стоит гола), и передачи лучше passOver не нашлось.
-    if (aiFeint(p, ball, opp, oppD, pass)) return { x: 0, z: 0 };
+    if (aiFeint(p, ball, opp, oppD, pass)) {
+      markDecision(p, team, 'feint');
+      return { x: 0, z: 0 };
+    }
+    // Ни бить, ни отдать, ни финтить — ведём. Это тоже решение, и именно
+    // чередование «веду / отдаю / веду» на соседних тактах и есть метание.
+    // Взводим обязательство: следующие carryHold секунд монета не бросается
+    if (!carrying) p.ai.carryT = AI.carryHold;
+    markDecision(p, team, 'dribble');
   }
 
   // Ведение к воротам, чуть к центру; соперник рядом — скользим в сторону.
@@ -632,8 +685,16 @@ function withBall(p, ball) {
   // геометрия прострела (fCutback 1.6, второе оружие игры) была недостижима:
   // мяч в угол штрафной никто не доводил ни разу за матч
   const CB = CONFIG.ai.attack.cross;
-  const wide = Math.abs(pos.z) > CB.flankZ &&
-    team.side * pos.x > CONFIG.field.length / 2 - CB.finalThird;
+  // ГИСТЕРЕЗИС «ШИРОКОГО» (31.07.2026). Флаг стоял на двух голых порогах, и
+  // на самой границе (|z| около 15 м) цель ведения покадрово прыгала между
+  // «угол штрафной» и «центр ворот» — то есть между двумя точками в 20 м друг
+  // от друга. Вингер на этой границе живёт БОЛЬШУЮ ЧАСТЬ эпизода, и со стороны
+  // это выглядело как «не может решить, куда бежать». Вход в режим — по
+  // flankZ, выход — по более узкому flankZExit
+  const inFinalThirdW = team.side * pos.x > CONFIG.field.length / 2 - CB.finalThird;
+  const wide = inFinalThirdW &&
+    Math.abs(pos.z) > (p.ai.wide ? CB.flankZExit : CB.flankZ);
+  p.ai.wide = wide;
   let dx;
   let dz;
   if (wide) {
@@ -684,7 +745,12 @@ function aiFeint(p, ball, opp, oppD, pass) {
   const F = CONFIG.ai.feint;
   if (!F || !F.enabled || F.rate <= 0) return false;
   if (!opp || oppD > F.range) return false;
-  if (pass && pass.score >= F.passOver) return false;
+  // Сравнивать надо с ЛУЧШИМ счётом паса (`_passBest`), а не со счётом того
+  // варианта, который вытянул softmax: софтмакс нарочно отдаёт лучшему лишь
+  // ~2/3 случаев, и в оставшейся трети сюда приезжал заведомо более слабый
+  // вариант — то есть порог «есть передача лучше финта» проверялся против
+  // случайного числа. `_passBest` для этого и заведён (team.js, choosePass)
+  if ((p.team._passBest || 0) >= F.passOver) return false;
   const team = p.team;
   const pos = p.group.position;
   if (Math.hypot(pos.x - team.ownGoalX, pos.z) < F.ownSafe) return false;
@@ -733,8 +799,11 @@ function aiCross(p, ball, oppD, pass = null) {
   const inFinalThird = team.side * pos.x > F.length / 2 - AC.finalThird;
   if (!inFlank || !inFinalThird || oppD > AC.blockedDist) return false;
   // Передача ценнее подачи — отдаём её. Навес остаётся тем, чем он является в
-  // статистике: последним доводом, когда прохода и паса нет
-  if (pass && pass.score >= AC.overPass) return false;
+  // статистике: последним доводом, когда прохода и паса нет.
+  // Тот же баг, что был у финта: порог сравнивался со СЛУЧАЙНО вытянутым
+  // softmax-вариантом вместо лучшего, и навес то отменялся, то нет при одной
+  // и той же обстановке — прямой источник дёрганости в финальной трети
+  if ((team._passBest || 0) >= AC.overPass) return false;
 
   // Адресат: свой в штрафной соперника с максимально свободной зоной
   const boxX = F.length / 2 - 16.5;

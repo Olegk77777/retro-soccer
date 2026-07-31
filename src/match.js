@@ -12,6 +12,7 @@ import { updateFieldPlayer } from './ai/fieldplayer.js';
 import { updateKeeper } from './ai/goalkeeper.js';
 import { distToBall, freeSpace, passPower, passStrikeKind, passTime } from './ai/steering.js';
 import { solveSpacePass } from './ai/passing.js';
+import { pickCornerRoutine, spotToWorld } from './setpieces.js';
 import {
   playWhistle, setCrowdIntensity, crowdCheer, flareHiss,
   crowdGasp, crowdApplause,
@@ -136,6 +137,26 @@ export class Match {
       // считаем каждую: стеночка и забег за спину (run), игра третьего
       // (third), подключение фулбека (overlap), приход в ноги (short)
       run: [0, 0], third: [0, 0], overlap: [0, 0], short: [0, 0],
+      // ОСМЫСЛЕННОСТЬ АТАКИ (31.07.2026). Жалоба «играет сумбурно» была
+      // неизмерима ровно так же, как до этого «нет комбинаций»: счёт голов
+      // сумбур не ловит вовсе (замер до правок дал 1.5 гола за матч при
+      // 74 рывках и точности паса 38 %). Считаем СЕРИЯМИ ВЛАДЕНИЯ — это и
+      // есть единица осмысленной атаки:
+      //   seq        — серий владения (началось владение мячом)
+      //   seqPass    — сумма передач по сериям (среднее = передач в серии)
+      //   seqTime    — сумма длительностей серий, десятые доли секунды
+      //   seqProg    — сумма продвижения серий вперёд, метры
+      //   seqLong    — серий из 4+ передач (в АПЛ таких 11 %)
+      //   shotAfter3 — ударов, подготовленных серией из 3+ передач
+      //   switchPass — переводов фланга (пас поперёк дальше switchMinZ)
+      //   flips      — сколько раз владелец сменил ВИД решения на соседних
+      //                тактах: прямая мера метания
+      seq: [0, 0], seqPass: [0, 0], seqTime: [0, 0], seqProg: [0, 0],
+      seqLong: [0, 0], shotAfter3: [0, 0], switchPass: [0, 0], flips: [0, 0],
+      // Стеночка отдельно от забегания за спину: они делят один слот `runner`,
+      // и пока обе бумпили общий ключ `run`, было не видно, что стеночка
+      // вытеснила забегание почти начисто
+      oneTwo: [0, 0], passKept: [0, 0],
     };
     // Сколько сейвов зал уже отреагировал «ахом». Считаем ПО СТАТИСТИКЕ, а не
     // хуками в goalkeeper.js: счётчики и так растут ровно в момент касания
@@ -702,7 +723,7 @@ export class Match {
     const aiBall = paused ? this._centerBall : this.ball;
 
     // Мёртвый мяч стандарта арбитражу владения не принадлежит никому
-    if (!paused && this.state !== 'restart') this.updateToucher();
+    if (!paused && this.state !== 'restart') this.updateToucher(dt);
     this.validateControlledApproach();
 
     for (const team of this.teams) team.update(dt, aiBall);
@@ -811,7 +832,7 @@ export class Match {
   // Кто у мяча: ближайший из 22 в радиусе контроля. Только он «владеет» —
   // липкое ведение и дриблинг остальных отключаются (иначе мяч рвали бы
   // на части все, кто рядом). Отборы по-настоящему — Фаза 3.
-  updateToucher() {
+  updateToucher(dt = 0) {
     const B = CONFIG.ball;
     const P = CONFIG.player;
     const bp = this.ball.mesh.position;
@@ -891,7 +912,44 @@ export class Match {
     }
     this.toucher = best;
     for (const p of this._all) p.isToucher = p === best;
-    if (best) this.possession = best.team;
+    // ВЛАДЕНИЕ — ЭТО МНЕНИЕ ТРЕНЕРА, А НЕ РАДИУС (правило с 31.07.2026).
+    // Самая дорогая находка сессии про сумбур, и нашлась она только замером.
+    // `toucher` — физический арбитраж: ближайший к низкому мячу в пределах
+    // controlRadius (1.35 м). Для ведения и отбора это верно. Но `possession`
+    // писалась ТОЙ ЖЕ строкой — и потому переходила к сопернику, стоило мячу
+    // просто ПРОКАТИТЬСЯ мимо его ног. Замер на одном матче: 73 смены владения
+    // за 6 минут, то есть каждые 2.5 секунды, при том что настоящих перехватов
+    // передач всего 17 %. А на каждой смене «тренер» переворачивает ВСЮ
+    // команду: снимает раннера, оверлаппера, обманщика и приход в ноги
+    // (`if (!this.attacking)` в Team.update), и одиннадцать домашних точек
+    // разом переезжают из атакующей формы в оборонительную. Ровно это зритель
+    // и читает как «сумбур»: фигуры дёргаются туда-сюда без видимой причины.
+    //
+    // Лечение — НЕ трогать физику, а дать владению гистерезис: соперник
+    // получает мяч, когда он его РЕАЛЬНО ЗАБРАЛ, то есть либо продержал рядом
+    // possessionHold секунд, либо мяч при нём успокоился до possessionSlow.
+    // Мимолётное сближение с катящимся мячом владения не даёт.
+    if (best) {
+      const AIp = CONFIG.ai;
+      if (best.team === this.possession) {
+        this._possT = 0;
+        this._possClaim = null;
+      } else {
+        if (this._possClaim !== best.team) {
+          this._possClaim = best.team;
+          this._possT = 0;
+        }
+        this._possT += dt;
+        const slow = Math.hypot(this.ball.vel.x, this.ball.vel.z) < AIp.possessionSlow;
+        // Вратарь с мячом в руках — владелец немедленно и без разговоров
+        const inHands = best.isKeeper && best.ai && best.ai.holding;
+        if (slow || inHands || this._possT >= AIp.possessionHold) {
+          this.possession = best.team;
+          this._possT = 0;
+          this._possClaim = null;
+        }
+      }
+    }
     if (touch) {
       this.lastTouch = touch;
       // Журнал последних касаний. Нужен для автора гола: в момент, когда мяч
@@ -1242,6 +1300,19 @@ export class Match {
       t.boxRuns.clear();
       t.airGuards.clear();
       t.airGuardT = 0;
+      t._setPieceT = 0;
+    }
+
+    // РОЗЫГРЫШ УГЛОВОГО ПО СХЕМЕ (31.07.2026). Схема выбирается ЗДЕСЬ, а не в
+    // момент удара: тела обязаны занять точки, пока мяч мёртв, — именно эта
+    // пауза и делает угловой похожим на угловой, а не на «навес откуда-то».
+    // Схему помним в самом стандарте: подающий возьмёт из неё адрес, чтобы
+    // мяч летел туда, куда команда встала, а не в самую свободную точку
+    if (type === 'corner') {
+      const routine = pickCornerRoutine();
+      this.restart.routine = routine;
+      team.armCornerAttack(this.restart, routine);
+      this.otherTeam(team).armCornerDefend(this.restart);
     }
     if (this.controlled) {
       this.controlled.pendingStrike = null;
@@ -1520,6 +1591,7 @@ export class Match {
   // удар от ворот — короткий розыгрыш или вынос на фланг
   executeAIRestart(r) {
     const F = CONFIG.field;
+    const AI = CONFIG.ai;
     const team = r.team;
     const taker = r.taker;
 
@@ -1573,17 +1645,31 @@ export class Match {
       const RC = CONFIG.restart.corner;
       const pos = taker.group.position;
       const boxX = F.length / 2 - 16.5;
-      // Адресат — свой в штрафной с самой свободной зоной (как AI-навес)
+      // АДРЕС ПОДАЧИ БЕРЁТСЯ ИЗ СХЕМЫ (31.07.2026). Раньше подающий сам искал
+      // «своего в штрафной с самой свободной зоной» — то есть команда вставала
+      // как придётся, а мяч летел куда придётся, и совпадало это случайно.
+      // Теперь схема выбрана в beginRestart, тела уже стоят по ней, и подача
+      // идёт РОВНО ТУДА, где кто-то есть. Это и есть разница между розыгрышем
+      // и навесом наугад
       let target = null;
-      let bestSpace = -1;
-      for (const m of team.players) {
-        if (m === taker || m.isKeeper) continue;
-        const mp = m.group.position;
-        if (team.side * mp.x < boxX - 3 || Math.abs(mp.z) > 20.16) continue;
-        const space = freeSpace(mp.x, mp.z, team.opponents);
-        if (space > bestSpace) {
-          bestSpace = space;
-          target = { x: mp.x + m.vel.x * 0.5, z: mp.z + m.vel.z * 0.5 };
+      let lift = null;
+      if (r.routine && r.routine.aim) {
+        const w = spotToWorld(r.routine.aim, team.side, r.z, F.length / 2);
+        target = { x: w.x, z: w.z };
+        lift = r.routine.lift;
+      }
+      if (!target) {
+        // Фолбэк прежним поведением: схем нет (битый JSON) — ищем свободного
+        let bestSpace = -1;
+        for (const m of team.players) {
+          if (m === taker || m.isKeeper) continue;
+          const mp = m.group.position;
+          if (team.side * mp.x < boxX - 3 || Math.abs(mp.z) > 20.16) continue;
+          const space = freeSpace(mp.x, mp.z, team.opponents);
+          if (space > bestSpace) {
+            bestSpace = space;
+            target = { x: mp.x + m.vel.x * 0.5, z: mp.z + m.vel.z * 0.5 };
+          }
         }
       }
       if (!target) {
@@ -1592,6 +1678,25 @@ export class Match {
       const dx = target.x - pos.x;
       const dz = target.z - pos.z;
       const dist = Math.hypot(dx, dz) || 1;
+      // КОРОТКИЙ РОЗЫГРЫШ — это наземная передача, а не навес. Схема помечает
+      // его нулевым подъёмом, и тогда угловой становится обычным фланговым
+      // эпизодом: адресат принимает мяч и идёт под прострел, а прострел даёт
+      // 6.4 гола на 100 против 2.5 у навеса
+      if (lift === 0) {
+        const power = Math.max(AI.passSpeedMin,
+          Math.min(AI.passSpeedMax, passPower(dist, AI.passArriveNormal)));
+        taker.aiKick(this.ball, { x: dx / dist, z: dz / dist }, power, 0.4, 0, 'setpiece');
+        // Адресатом считаем того, кто стоит на точке схемы: он уже туда идёт
+        const rec = this.nearestToPoint(
+          team.fieldPlayers.filter((m) => m !== taker), target.x, target.z);
+        if (rec) {
+          team.receiver = rec;
+          team.receiveTarget = { x: target.x, z: target.z };
+          team.receiveTimer = CONFIG.ai.receiveGiveUp;
+        }
+        this._finishRestart();
+        return;
+      }
       const theta = (RC.angle * Math.PI) / 180;
       let power = Math.sqrt((-CONFIG.ball.gravity * dist) / (2 * Math.tan(theta))) * RC.powerFudge;
       power = Math.max(RC.powerMin, Math.min(RC.powerMax, power));

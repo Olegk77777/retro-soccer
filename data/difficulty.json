@@ -17,6 +17,12 @@
         "ai.decideInterval": 0.22,
         "ai.coachTick": 0.2,
 
+        "ai.phase.enabled": true,
+        "ai.phase.hold": 0.9,
+        "ai.attack.offBall.maxInSpace": 2,
+        "ai.attack.offBall.maxToFeet": 1,
+        "ai.carryHold": 0.5,
+
         "ai.passUrge": 0.52,
         "ai.passModel.safety": 1.45,
         "ai.passModel.temperature": 0.3,
@@ -164,6 +170,12 @@
       "overrides": {
         "ai.decideInterval": 0.2,
         "ai.coachTick": 0.16,
+
+        "ai.phase.enabled": true,
+        "ai.phase.hold": 0.7,
+        "ai.attack.offBall.maxInSpace": 3,
+        "ai.attack.offBall.maxToFeet": 1,
+        "ai.carryHold": 0.45,
 
         "ai.passUrge": 0.6,
         "ai.passModel.safety": 1.3,

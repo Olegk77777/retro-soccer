@@ -8,6 +8,7 @@ import {
   distToBall, freeSpace, isPassSafe, predictLanding,
   xThreat, passPower, passTime, ROLL_LAMBDA,
 } from './steering.js';
+import { setPieces, spotToWorld } from '../setpieces.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -91,6 +92,24 @@ export class Team {
     }
     this.bestSpot = null;
     this._spotTimer = 0;
+
+    // СЕРИЯ ВЛАДЕНИЯ (31.07.2026) — единица измерения осмысленной атаки.
+    // Ведётся КАЖДЫЙ КАДР по match.possession, а не по this.attacking:
+    // последнее обновляется лишь на такте тренера (до 250 мс запаздывания),
+    // и серия начиналась бы уже после первой передачи
+    this.seqLive = false;     // идёт ли серия прямо сейчас
+    this.seqPasses = 0;       // передач в текущей серии
+    this.seqT = 0;            // сек с начала серии
+    this.seqStartX = 0;       // x мяча в начале серии (продвижение = |x − startX|)
+
+    // ФАЗА ВЛАДЕНИЯ (31.07.2026) — скелет осмысленной атаки. Хранится СТРОКОЙ,
+    // как ТВ-пресеты и уровни сложности: Number(null) === 0, и уровень с
+    // индексом 0 неотличим от «ключа нет» — эта грабля в проекте стреляла дважды
+    this.phase = 'PROGRESS';  // BUILD | PROGRESS | CREATE | COUNTER | DIRECT | CALM
+    this.phaseT = 0;          // сек в текущей фазе
+    this.phaseLock = 0;       // сек до разрешённой смены (обязательство)
+    this.counterT = 0;        // окно контратаки
+    this._justWon = false;    // мяч отобран в этом кадре (ставит updateSequence)
   }
 
   // Счётчик статистики матча: команда сама не знает своего индекса,
@@ -125,6 +144,8 @@ export class Team {
   update(dt, ball) {
     const AI = CONFIG.ai;
 
+    this.updateSequence(dt, ball);
+
     // Приём паса: живёт, пока мяч летит адресату. Снимаем, когда адресат
     // принял, соперник перехватил или время вышло. Важно: НЕ снимаем от
     // касания пасующего — сразу после удара он ещё пару кадров «ближайший».
@@ -140,9 +161,6 @@ export class Team {
         (!inFlight && this.match.possession === this.match.otherTeam(this)) ||
         this.match.toucher === this.receiver;
       if (done) {
-        // Пас дошёл, если адресат реально взял мяч — это и есть точность передач
-        if (this._passLive && this._passLive === this.receiver &&
-            this.match.toucher === this.receiver) this.bump('passOk');
         this._passLive = null;
         this.receiver = null;
         this.receiveTarget = null;
@@ -171,10 +189,15 @@ export class Team {
     // Выход на ЧУЖУЮ подачу живёт то же окно, что сама подача. Снимаем и по
     // приземлению мяча: дальше это обычный подбор, и держать защитника на
     // старой точке прилёта — значит уводить его от эпизода
+    // Розыгрыш стандарта живёт своим таймером и НЕ подчиняется правилу «мяч
+    // опустился — эпизод окончен»: на угловом мяч лежит на газоне, и это
+    // правило стёрло бы расстановку в первом же кадре
+    if (this._setPieceT > 0) this._setPieceT -= dt;
+    const inSetPiece = this._setPieceT > 0;
     if (this.airGuardT > 0) {
       this.airGuardT -= dt;
       const bpG = ball.mesh.position;
-      if (this.airGuardT <= 0 || (bpG.y < 0.5 && ball.vel.y <= 0)) {
+      if (this.airGuardT <= 0 || (!inSetPiece && bpG.y < 0.5 && ball.vel.y <= 0)) {
         this.airGuardT = 0;
         this.airGuards.clear();
       }
@@ -254,24 +277,50 @@ export class Team {
     // Владение — по последнему касанию (считает Match)
     this.attacking = this.match.possession === this;
 
+    // Фаза решается ДО назначений: споты, рывки, оверлап и врывания обязаны
+    // читать уже новую фазу в этом же такте, иначе они отстают на четверть
+    // секунды и на переходе «продвижение → завершение» команда полтакта
+    // занимает штрафную по правилам середины поля
+    this.updatePhase(ball);
+
     if (this.attacking) {
       // Лучший спот открывания (Бакленд, пересчёт раз в updateSec)
       if (this._spotTimer <= 0) {
         this._spotTimer = CONFIG.ai.attack.spot.updateSec;
         this.updateBestSpot(ball);
       }
+      // БЮДЖЕТ РЫВКОВ (ресёрч 15 §5.3, оживлён 31.07.2026). Поля maxInSpace,
+      // maxToFeet и commit лежали в конфиге с 26.07 и НЕ ЧИТАЛИСЬ НИ РАЗУ —
+      // grep по src/ давал ноль совпадений вне config.js. Единственным
+      // ограничителем был личный кулдаун игрока, поэтому одновременных рывков
+      // выходило 5–7 при заявленном потолке 3, и замер это подтвердил:
+      // 74 рывка и 25 приходов в ноги за 6-минутный матч на «Профессионале» —
+      // одно движение без мяча каждые 3.6 секунды. Это и есть «все бегут —
+      // никто не открыт»: в кадре ТВ-плана 320×240 зритель не успевает прочесть
+      // ни одного замысла, потому что их пять одновременно
+      const OB = CONFIG.ai.attack.offBall;
+      const budget = this.runBudget();
+      // Потолок задаёт ФАЗА: при розыгрыше от своих ворот бежать вперёд некуда
+      // и незачем (там нужны короткие адресаты, а не глубина), в завершении —
+      // наоборот, чем больше тел врывается, тем лучше
+      const cfg = this.phaseCfg();
+      const maxInSpace = Math.min(OB.maxInSpace, cfg.maxInSpace);
       // Пора ли кому-то рвануть за спину защите
-      if (!this.runner && this._runCheckTimer <= 0) {
+      if (!this.runner && this._runCheckTimer <= 0 && budget.inSpace < maxInSpace) {
         this._runCheckTimer = CONFIG.ai.attack.runs.checkSec;
         this.tryStartRun(ball);
       }
-      // Мяч у широкого игрока — крайний защитник подключается по бровке
-      if (!this.overlapper) this.tryOverlap();
+      // Мяч у широкого игрока — крайний защитник подключается по бровке.
+      // В розыгрыше и в успокоении фулбека вперёд не пускаем: именно его
+      // подключение и стоит гола на контратаке
+      if (!this.overlapper && cfg.overlapOk && budget.inSpace < maxInSpace) this.tryOverlap();
       // Владельца прессингуют, безопасного паса нет — партнёр показывается
-      // накоротке (главный источник передач под давлением)
-      this.tryComingShort(ball);
-      // Настоящий рывок уже назначен — кто-то обязан увести его опекуна
-      if (!this.decoy) this.tryDecoy(ball);
+      // накоротке (главный источник передач под давлением). У прихода в ноги
+      // СВОЙ бюджет: реальный сплит рывков — 72 % в пространство, 28 % в ноги
+      if (budget.toFeet < OB.maxToFeet) this.tryComingShort(ball);
+      // Настоящий рывок уже назначен — кто-то обязан увести его опекуна.
+      // Обманщик считается рывком в пространство и тратит тот же бюджет
+      if (!this.decoy && budget.inSpace < maxInSpace) this.tryDecoy(ball);
     }
 
     // Поддержка атаки: ближний к «точке открывания» полузащитник/нападающий
@@ -288,6 +337,270 @@ export class Team {
     this.updateBoxRuns(ball);
   }
 
+  // ===== ФАЗЫ ВЛАДЕНИЯ (31.07.2026) =====
+  // Жалоба заказчика «даже на Профессионале ИИ играет сумбурно, без осмысленных
+  // атак» была не про силу ИИ, а про ОТСУТСТВИЕ ЗАМЫСЛА. В коде существовало
+  // ровно одно состояние атаки — булев `attacking`, — и девять независимых
+  // механик (забег, оверлап, игра третьего, обманщик, приход в ноги, четыре
+  // точки в штрафной), каждая со своим триггером и таймером. Они не знали друг
+  // о друге НИЧЕГО, и команда не знала, что она сейчас делает: разыгрывает от
+  // своих ворот, продвигает мяч или уже завершает. Отсюда и картинка: игра
+  // одинаковая на всех участках поля и на любой секунде владения.
+  //
+  // Фаза — это НЕ новая ветка логики. Она МОДУЛИРУЕТ уже написанные формулы:
+  // риск паса, порог отсева, температуру софтмакса, множители семейств, темп
+  // и бюджет рывков. Поэтому PROGRESS — это тождество (все коэффициенты 1.0),
+  // и с ним игра ведёт себя ровно так, как вела до правки. Проверка приёмки
+  // прямая: `ai.phase.enabled = false` обязано давать прежние числа.
+  //
+  // Числа фаз — из реального футбола (см. 21-Тактика): 89 % серий владения
+  // укладываются в 1–5 передач, средняя серия АПЛ живёт 9.6–10.4 с и
+  // продвигает мяч на 12.1–12.6 м; контратака как фаза живёт 5–10 секунд,
+  // дальше она либо становится позиционной атакой, либо кончается.
+  updatePhase(ball) {
+    const P = CONFIG.ai.phase;
+    const won = this._justWon;
+    this._justWon = false;
+    if (!P.enabled) {
+      this.phase = 'PROGRESS';
+      return;
+    }
+    if (!this.attacking) {
+      // Без мяча фазы нет. Держим PROGRESS (тождество), чтобы обороняющаяся
+      // команда жила ровно по прежним числам
+      this.setPhase('PROGRESS', 0);
+      this.counterT = 0;
+      return;
+    }
+
+    // МОМЕНТ ОТБОРА. Соперник впереди мяча ещё не построился — это контратака,
+    // и она перебивает любые зоны: бежать надо сейчас, а не когда мяч дойдёт
+    // до чужой трети
+    if (won && this.oppBehindBall(ball) < P.counter.maxBehind) {
+      this.setPhase('COUNTER', P.hold);
+      this.counterT = P.counter.window;
+      return;
+    }
+    // Контратака живёт своим окном и КОЛИЧЕСТВОМ ПЕРЕДАЧ: после четвёртой это
+    // уже не контратака, а позиционная атака, как её ни называй
+    if (this.phase === 'COUNTER') {
+      if (this.counterT > 0 && this.seqPasses < P.counter.maxPasses) return;
+      this.counterT = 0;
+    }
+
+    if (this.phaseLock > 0) return;   // обязательство: фазу не пересматриваем
+
+    // Атака в финальной трети заглохла и передачи лучше порога нет — надо не
+    // лезть напролом, а ОТКАТИТЬ и перестроиться. Без этой фазы владелец под
+    // опекой обязан был либо терять мяч, либо бить с плохой позиции
+    if (this.phase === 'CREATE' && this.phaseT > P.calm.stall &&
+        (this._passBest || 0) < P.calm.passFloor) {
+      this.setPhase('CALM', P.calm.ttl);
+      return;
+    }
+    if (this.phase === 'CALM' && this.phaseT < P.calm.ttl) return;
+
+    // Розыгрыш от своих ворот под прессингом, короткого паса нет — длинный
+    // вперёд. Это осознанный выбор, а не отчаяние: прямая игра — такой же
+    // способ развития атаки, как позиционная
+    const zone = this.zonePhase(ball);
+    if (zone === 'BUILD' && (this._passBest || 0) < P.direct.passFloor) {
+      this.setPhase('DIRECT', P.direct.ttl);
+      return;
+    }
+    if (this.phase === 'DIRECT' && this.phaseT < P.direct.ttl) return;
+
+    this.setPhase(zone, P.hold);
+  }
+
+  // Зона мяча с ГИСТЕРЕЗИСОМ: граница трети, пройденная туда-сюда, не должна
+  // перещёлкивать фазу. Тот же приём, что у флага «широкий» и у опеки
+  zonePhase(ball) {
+    const P = CONFIG.ai.phase;
+    const F = CONFIG.field;
+    // 0 = наша лицевая, 105 = чужая
+    const depth = this.side * ball.mesh.position.x + F.length / 2;
+    const h = P.zoneHyst;
+    const buildTo = this.phase === 'BUILD' ? P.buildTo + h : P.buildTo - h;
+    const createFrom = this.phase === 'CREATE' ? P.createFrom - h : P.createFrom + h;
+    if (depth < buildTo) return 'BUILD';
+    if (depth > createFrom) return 'CREATE';
+    return 'PROGRESS';
+  }
+
+  setPhase(id, lock) {
+    if (this.phase !== id) {
+      this.phase = id;
+      this.phaseT = 0;
+    }
+    this.phaseLock = Math.max(this.phaseLock, lock);
+  }
+
+  // Коэффициенты текущей фазы. Один вход для всех потребителей — и он же
+  // выключатель ablation: `ai.phase.enabled = false` возвращает тождество
+  phaseCfg() {
+    const P = CONFIG.ai.phase;
+    if (!P.enabled) return P.levels.PROGRESS;
+    return P.levels[this.phase] || P.levels.PROGRESS;
+  }
+
+  // Сколько соперников успело вернуться за линию мяча. Это и есть мера
+  // «построился ли блок»: контратака имеет смысл, только пока их мало
+  oppBehindBall(ball) {
+    const bx = ball.mesh.position.x;
+    let n = 0;
+    for (const o of this.opponents) {
+      if (o.isKeeper) continue;
+      if (this.side * (o.group.position.x - bx) > 0) n++;
+    }
+    return n;
+  }
+
+  // ===== РОЗЫГРЫШ УГЛОВОГО (31.07.2026) =====
+  // Расстановка АТАКУЮЩЕЙ команды по выбранной схеме. Точки кладём в ту же
+  // карту `boxRuns`, которой пользуется подача с игры, — исполнение в
+  // fieldplayer.js уже написано (arrive + спринт), новой ветки движения не
+  // нужно ни одной. Исполнитель углового в раздачу не входит: он у флажка.
+  //
+  // Раздаём ВЕНГЕРСКИ-ПРОСТО: точка достаётся тому, кто до неё ближе, и по
+  // порядку важности ролей в схеме. Точной оптимизации тут не нужно — важно,
+  // чтобы на ближней штанге стоял ОДИН, а не трое, и чтобы дальняя не осталась
+  // пустой: именно это, а не миллиметры, отличает розыгрыш от толпы
+  armCornerAttack(restart, routine) {
+    const F = CONFIG.field;
+    this.boxRuns.clear();
+    if (!routine || !routine.spots || !routine.spots.length) return;
+    const pool = this.fieldPlayers.filter((p) => p !== restart.taker);
+    for (const spot of routine.spots) {
+      if (!pool.length) break;
+      const w = spotToWorld(spot, this.side, restart.z, F.length / 2);
+      let bi = 0;
+      let bd = Infinity;
+      pool.forEach((p, i) => {
+        const pp = p.group.position;
+        let d = Math.hypot(pp.x - w.x, pp.z - w.z);
+        // Нападающие идут в штрафную, защитники остаются сзади: без этого
+        // на дальнюю штангу приезжал центральный защитник, а форвард шёл
+        // сторожить свою половину — розыгрыш выглядел бы случайным
+        d += (p.homeIdx <= 4 ? 22 : 0);
+        if (d < bd) { bd = d; bi = i; }
+      });
+      this.boxRuns.set(pool[bi], w);
+      pool.splice(bi, 1);
+    }
+    this._setPieceT = CONFIG.ai.setPiece.ttl;
+  }
+
+  // Расстановка ОБОРОНЯЮЩЕЙСЯ команды. Точки — в `airGuards`, ту же карту
+  // использует выход на подачу с игры, и ветка движения там тоже готова.
+  // Точки нарочно НЕ покрывают всю штрафную: смешанная оборона — это двое
+  // зонально плюс штанга, остальное доигрывает обычная персональная опека.
+  // Накрой всё зонально — и подача перестанет иметь смысл в принципе
+  armCornerDefend(restart) {
+    const F = CONFIG.field;
+    const D = setPieces().corner.defend;
+    this.airGuards.clear();
+    if (!D || !D.spots || !D.spots.length) return;
+    // Обороняющаяся команда защищает СВОИ ворота, а координаты схемы заданы
+    // от атакуемой лицевой. Сторона у нас −side, поэтому знак берём свой
+    const pool = this.fieldPlayers.slice();
+    for (const spot of D.spots) {
+      if (!pool.length) break;
+      const w = spotToWorld(spot, -this.side, restart.z, F.length / 2);
+      let bi = 0;
+      let bd = Infinity;
+      pool.forEach((p, i) => {
+        const pp = p.group.position;
+        let d = Math.hypot(pp.x - w.x, pp.z - w.z);
+        // Здесь наоборот: на штанги и в зону идут ЗАЩИТНИКИ
+        d += (p.homeIdx >= 9 ? 22 : 0);
+        if (d < bd) { bd = d; bi = i; }
+      });
+      this.airGuards.set(pool[bi], w);
+      pool.splice(bi, 1);
+    }
+    this.airGuardT = CONFIG.ai.setPiece.ttl;
+    this._setPieceT = CONFIG.ai.setPiece.ttl;
+  }
+
+  // Сколько движений без мяча идёт ПРЯМО СЕЙЧАС. Считается по живым слотам,
+  // а не по счётчику запусков: рывок, который уже кончился, бюджет не занимает.
+  // Игра третьего считается в бюджете и ЗАРЯДОМ (_thirdArm) — иначе между
+  // взводом связки и первым касанием адресата слот выглядит свободным, и
+  // тренер успевает назначить поверх неё ещё один забег
+  runBudget() {
+    let inSpace = 0;
+    if (this.runner) inSpace++;
+    if (this.overlapper) inSpace++;
+    if (this.thirdMan || this._thirdArm) inSpace++;
+    if (this.decoy) inSpace++;
+    return { inSpace, toFeet: this.shortRunner ? 1 : 0 };
+  }
+
+  // СЕРИЯ ВЛАДЕНИЯ. Открывается, как только мяч стал нашим, и закрывается на
+  // потере — тогда же её итоги уходят в статистику. Это не украшение отчёта:
+  // счёт голов «сумбур» не ловит (замер 31.07: 1.5 гола за матч и на сборке
+  // до правок, и после), а вот «сколько передач живёт наша атака и на сколько
+  // метров она продвигает мяч» — ловит сразу. Эталоны реального футбола:
+  // 89 % серий укладываются в 1–5 передач, средняя серия АПЛ живёт 9.6–10.4 с
+  // и продвигает мяч на 12.1–12.6 м вперёд (Opta Analyst 2024/25 и 2025/26).
+  updateSequence(dt, ball) {
+    // Таймеры фазы идут КАЖДЫЙ КАДР, а решение о смене принимается на такте
+    // тренера: обязательство, которое тает раз в четверть секунды, — это не
+    // обязательство
+    this.phaseT += dt;
+    if (this.phaseLock > 0) this.phaseLock -= dt;
+    if (this.counterT > 0) this.counterT -= dt;
+
+    // ИСХОД ПЕРЕДАЧИ СЧИТАЕТСЯ ПО ПЕРВОМУ КАСАНИЮ ПОСЛЕ НЕЁ, а не через слот
+    // приёма (правка 31.07.2026). Прежняя запись закрывала передачу только
+    // когда снимался `this.receiver` — а его ПЕРЕЗАПИСЫВАЕТ следующий пас в
+    // серии. Пока серии жили по 1.4 передачи, это почти не мешало; как только
+    // они стали настоящими (3.3 передачи), большинство передач перекрывалось
+    // следующей и не засчитывалось вовсе, и «точность» рухнула с 38 до 25 %
+    // на игре, которая стала ЛУЧШЕ. Метрика, ломающаяся ровно тогда, когда
+    // улучшается измеряемое, хуже отсутствия метрики
+    // Закрывает передачу КАСАНИЕ СВОЕГО или СМЕНА ВЛАДЕНИЯ — но не касание
+    // соперника само по себе. Причина та же, по которой владению дали
+    // гистерезис: `toucher` — это ближайший к мячу в 1.35 м, и катящийся мимо
+    // защитника пас на миг «принадлежит» ему, хотя спокойно доезжает до своего
+    const w = this._passWait;
+    if (w) {
+      w.t -= dt;
+      const t = this.match.toucher;
+      if (t && t !== w.from && t.team === this) {
+        if (t === w.mate) this.bump('passOk');
+        this.bump('passKept');
+        this._passWait = null;
+      } else if (this.match.possession !== this || w.t <= 0) {
+        this._passWait = null;   // мяч потерян, ушёл в аут или никем не найден
+      }
+    }
+
+    const mine = this.match.possession === this;
+    const bx = ball.mesh.position.x;
+    if (mine && !this.seqLive) {
+      this.seqLive = true;
+      this._justWon = true;
+      this.seqPasses = 0;
+      this.seqT = 0;
+      this.seqStartX = bx;
+      this.bump('seq');
+    } else if (mine) {
+      this.seqT += dt;
+    } else if (this.seqLive) {
+      this.seqLive = false;
+      // Десятые доли секунды — чтобы сумма осталась целым числом и не копила
+      // ошибку сложения дробей за 8 матчей автосимуляции
+      this.bump('seqTime', Math.round(this.seqT * 10));
+      // Продвижение считается ПО ХОДУ АТАКИ (side), поэтому откат назад
+      // честно уходит в минус: серия, вернувшая мяч своему вратарю, не
+      // должна выглядеть такой же полезной, как доведшая его до штрафной
+      this.bump('seqProg', Math.round(this.side * (bx - this.seqStartX)));
+      if (this.seqPasses >= 4) this.bump('seqLong');
+    }
+  }
+
   // ЗАНЯТИЕ ШТРАФНОЙ (ресёрч 15, раздел 5.2). Атака дошла до финальной трети —
   // четверо занимают ЧЕТЫРЕ РАЗНЫЕ точки: ближняя штанга, «золотая зона»
   // между вратарской и точкой пенальти, дальняя штанга и ТРЕЙЛЕР у линии
@@ -300,6 +613,10 @@ export class Team {
     // Подача уже в полёте: рывки НЕ отменяем — штанги и подбор держатся до
     // прилёта (иначе врывания умирали в момент удара по мячу, грабля 18.07)
     if (this.crossAir > 0) return;
+    // Расстановка по схеме розыгрыша (угловой) — тоже. Она живёт в этой же
+    // карте, и общий пересчёт стёр бы её в первом же кадре: мяч на угловом
+    // лежит далеко от штрафной, а значит ни один из триггеров ниже не пройдёт
+    if (this._setPieceT > 0) return;
     const prev = new Map(this.boxRuns);
     this.boxRuns.clear();
     if (!this.attacking) return;
@@ -725,6 +1042,8 @@ export class Team {
     this.runner = runner;
     this.runnerTarget = { x: tx, z: tz };
     this.runnerTimer = R.durationSec;
+    // Кулдаун: без него один и тот же нападающий рвал за спину раз в полсекунды
+    runner.runCd = CONFIG.ai.attack.offBall.cooldown;
     this.bump('run');
   }
 
@@ -789,6 +1108,17 @@ export class Team {
   tryFollowRun(passer, passDist) {
     const C = CONFIG.ai.combo.oneTwo;
     if (this.runner || !passer || passer.isKeeper) return;
+    // БЮДЖЕТ И КУЛДАУН (31.07.2026). Замер вскрыл, что ВСЕ 79 «рывков» за матч
+    // на «Профессионале» — это стеночка, а не забегание за спину: она бралась
+    // с каждого короткого паса под прессингом (chance 0.95), занимала ОБЩИЙ
+    // слот runner и тем самым глушила tryStartRun начисто. То есть главная
+    // атакующая механика игры — рывок за спину линии — не запускалась почти
+    // никогда, а вместо неё шёл нескончаемый «отдал и побежал», один каждые
+    // 4.5 секунды. Ни то ни другое зритель прочесть не успевал
+    if (passer.runCd > 0) return;
+    const cfg = this.phaseCfg();
+    if (this.runBudget().inSpace >= Math.min(CONFIG.ai.attack.offBall.maxInSpace,
+      cfg.maxInSpace)) return;
     if (passDist > C.maxPassDist) return;       // стеночка живёт на коротком пасе
     const pp = passer.group.position;
     if (this.side * pp.x < C.minX) return;      // не из своей глубины
@@ -808,7 +1138,11 @@ export class Team {
     this.runner = passer;
     this.runnerTarget = { x: tx, z: Math.max(-24, Math.min(24, pp.z * 0.85)) };
     this.runnerTimer = C.ttl;
-    this.bump('run');
+    passer.runCd = CONFIG.ai.attack.offBall.cooldown;
+    // Считаем ОТДЕЛЬНО от забегания за спину: пока стеночка бумпила общий
+    // счётчик `run`, отчёт показывал «79 рывков за матч» и выглядел здоровым,
+    // хотя забеганий за спину среди них не было почти ни одного
+    this.bump('oneTwo');
   }
 
   // Ручная СТЕНОЧКА (Q/LB + ПАС, фидбек Олега 22.07.2026): игрок сам заказал
@@ -861,6 +1195,10 @@ export class Team {
     this.overlapper = fb;
     this.overlapTarget = { x: tx, z: tz };
     this.overlapTimer = C.durationSec;
+    // Личный кулдаун ставился в приходе в ноги, ложном рывке и игре третьего,
+    // а в подключении фулбека и забеге за спину — НЕТ. Один и тот же крайний
+    // защитник мог подключаться подряд весь матч
+    fb.runCd = CONFIG.ai.attack.offBall.cooldown;
     this.bump('overlap');
   }
 
@@ -909,8 +1247,12 @@ export class Team {
   updateMarks(ball) {
     const D = CONFIG.ai.defence;
     const F = CONFIG.field;
+    // Прежний разбор снимаем ДО очистки: при досрочном выходе (мы в атаке, мяч
+    // ещё далеко) карта обязана обнулиться вместе с самой опекой, иначе через
+    // минуту защитник получит фору за подопечного из прошлого эпизода
+    this._markPrev = new Map(this.marks);
     this.marks.clear();
-    if (this.attacking) return;
+    if (this.attacking) { this._markPrev.clear(); return; }
     const bp = ball.mesh.position;
     const ballDepth = this.side * bp.x + F.length / 2;
     if (ballDepth > D.markThird) return;
@@ -924,6 +1266,15 @@ export class Team {
     // Защитники (индексы 1–4), не занятые прессингом/страховкой/человеком
     const free = this.players.slice(1, 5).filter((p) =>
       p !== this.chaser && p !== this.coverer && p !== this.match.controlled);
+    // ГИСТЕРЕЗИС ОПЕКИ (31.07.2026). Карта разбора пересобиралась С НУЛЯ на
+    // каждом такте тренера (4–6 раз в секунду), и два защитника с почти равной
+    // дистанцией до соперника менялись подопечными столько же раз в секунду.
+    // На экране это читается как «оборона суетится»: фигуры дёргаются между
+    // двумя целями, ни одна из них по-настоящему не закрыта. Приём тот же, что
+    // уже написан ниже в trackRunners: прежнему опекуну даётся фора в метрах.
+    // Заводить таймер не нужно — фора в дистанции сама по себе делает смену
+    // подопечного событием, а не дрожанием
+    const prev = this._markPrev;
     for (const t of threats) {
       if (!free.length) break;
       const tp = t.group.position;
@@ -931,7 +1282,8 @@ export class Team {
       let bd = Infinity;
       free.forEach((d, i) => {
         const dp = d.group.position;
-        const dd = Math.hypot(dp.x - tp.x, dp.z - tp.z);
+        let dd = Math.hypot(dp.x - tp.x, dp.z - tp.z);
+        if (prev.get(d) === t) dd -= D.markHold;
         if (dd < bd) {
           bd = dd;
           bi = i;
@@ -1050,7 +1402,13 @@ export class Team {
       -F.length / 2 + 4,
       Math.min(F.length / 2 - 4, bp.x + this.side * AI.supportDist),
     );
-    const z = Math.abs(bp.z) > 8 ? -Math.sign(bp.z) * 8 : Math.sign(bp.z || 1) * -12;
+    // Сторона держится, пока мяч не ушёл ЗАМЕТНО за ось: прежняя запись
+    // переключала цель с −8 на +12 (двадцать метров) каждый раз, как мяч
+    // пересекал |z| = 8, а мяч там и живёт большую часть эпизода
+    if (Math.abs(bp.z) > 8) this._supportSide = -Math.sign(bp.z);
+    else if (Math.abs(bp.z) < 4) this._supportSide = Math.sign(bp.z || 1) * -1;
+    const side = this._supportSide || 1;
+    const z = side * (Math.abs(bp.z) > 8 ? 8 : 12);
     return { x, z };
   }
 
@@ -1151,6 +1509,7 @@ export class Team {
       nearestOpp = Math.min(nearestOpp, Math.hypot(op.x - fp.x, op.z - fp.z));
     }
     const underPressure = nearestOpp < AI.passPressure;
+    const cfg = this.phaseCfg();   // коэффициенты фазы владения
     const xtFrom = xThreat(fp.x, fp.z, this.side);
     // Владелец уже в финальной трети — порог риска мягче (см. finalThirdK)
     const inFinalThird = this.side * fp.x > F.length / 2 - 32;
@@ -1269,9 +1628,22 @@ export class Team {
           ? (runSpeed > 3 ? PM.qFeetToRunner : 1)
           : (c.kind === 'space' ? PM.qSpace : PM.qRunBonus);
 
+        // ПЕРЕВОД ФЛАНГА — геометрия считается ЗДЕСЬ, потому что она нужна и
+        // ценности V (свой пол), и семейству F. Дешёвая проверка стоит первой,
+        // дорогая (freeSpace по одиннадцати соперникам) — за ней
+        const isSwitchZ = Math.abs(tz - fp.z) > PM.switchMinZ && tz * fp.z < 0 &&
+          this.side * (tx - fp.x) > -6;
+        const isSwitch = isSwitchZ && freeSpace(tx, tz, opponents) > PM.switchFree;
+
         // --- V: прирост ценности позиции ---
         const dxt = xThreat(tx, tz, this.side) - xtFrom;
-        const v = Math.max(PM.valueMin, Math.min(PM.valueMax, 1 + PM.valueK * dxt));
+        // Перевод фланга — единственная передача, которой пол ценности МЕШАЕТ:
+        // по xT он всегда около нуля (мяч не приблизился к воротам), то есть
+        // упирается в valueMin и обнуляет собственный бонус семейства. Смысл
+        // перевода не в текущем приросте, а в том, что после него блок не
+        // успевает перестроиться — это плата за следующий пас, а не за этот
+        const vMin = isSwitchZ ? PM.valueMinSwitch : PM.valueMin;
+        const v = Math.max(vMin, Math.min(PM.valueMax, 1 + PM.valueK * dxt));
 
         // --- F: семейство передачи ---
         let f = PM.fNormal;
@@ -1290,15 +1662,50 @@ export class Team {
         const fromDeepWide = this.side * fp.x > F.length / 2 - 20 && Math.abs(fp.z) > 10;
         const isCutback = fromDeepWide && inFinish &&
           this.side * (fp.x - tx) > 0 && Math.abs(tz) < Math.abs(fp.z) - 4;
+        // Перевод стоит В КОНЦЕ лестницы семейств нарочно: он не конкурирует
+        // ни с прострелом, ни с разрезом, ни с доставкой в штрафную — если
+        // есть хоть одно из них, переводить незачем
         if (isCutback) f = PM.fCutback;
         else if (behindLine && c.kind !== 'feet') f = PM.fThrough;
         else if (inFinish && this.side * (tx - fp.x) > 0) f = PM.fIntoBox;
+        else if (isSwitch) f = PM.fSwitch;
         else if (this.side * (tx - fp.x) > 6) f = PM.fProgress;
         if (mate.isKeeper) f *= PM.fKeeper;
         if (mate === this.runner || mate === this.thirdMan) f *= PM.fRunner;
         if (mate === this.overlapper) f *= PM.fOverlap;
 
-        const score = Math.pow(p, PM.safety) * q * v * f;
+        // ФАЗА — МНОЖИТЕЛЬ ПОВЕРХ семейства, а не подмена. Уровень сложности
+        // уже задаёт базу (`difficulty.json` перекрывает fThrough/fIntoBox/
+        // fCutback), и если бы фаза их ПОДМЕНЯЛА, получилось бы два писателя
+        // одного числа — грабля, на которой проект уже обжигался с ползунком
+        // помощи и с ручками грейдинга. Так уровень задаёт СИЛУ, фаза — ФОРМУ,
+        // и они не дерутся. У PROGRESS все множители 1.0, то есть это точное
+        // тождество сегодняшнему поведению
+        if (isCutback) f *= cfg.fCutbackK;
+        else if (behindLine && c.kind !== 'feet') f *= cfg.fThroughK;
+        else if (inFinish) f *= cfg.fIntoBoxK;
+        else if (isSwitch) f *= cfg.fSwitchK;
+        // Пас НАЗАД — отдельный рычаг фазы. В розыгрыше откат назад это
+        // нормальный инструмент (перевести игру, вытянуть блок), а на
+        // контратаке он её убивает
+        if (this.side * (tx - fp.x) < -3) f *= cfg.fBackK;
+
+        // Степень при P — это и есть «насколько команда сейчас осторожна».
+        // Фаза множит её: при розыгрыше от своих ворот потеря стоит гола,
+        // на контратаке — наоборот, риск и есть смысл момента
+        let score = Math.pow(p, PM.safety * cfg.safetyK) * q * v * f;
+        // ИНЕРЦИЯ АДРЕСАТА (31.07.2026). Softmax честно отдаёт лучшему варианту
+        // около двух третей случаев — но два-три близких по счёту адресата на
+        // пяти тактах подряд дают почти гарантированную чехарду: «смотрю на
+        // левого — на правого — снова на левого». Прежде выбранному партнёру
+        // даётся фора в счёте, и решение живёт, пока не появится ЗАМЕТНО
+        // лучшее. Тот же приём уже применён к догоняющему (chaseHold), к
+        // поддерживающему (switchHysteresis), к точкам в штрафной (stickBonus)
+        // и к трекингу забегающих (track.hold) — у владельца мяча его не было
+        const it = from.ai && from.ai.intent;
+        if (it && it.t > 0 && it.mate === mate && it.kind === c.kind) {
+          score *= 1 + AI.intentInertia;
+        }
         options.push({
           score,
           mate,
@@ -1321,7 +1728,7 @@ export class Team {
 
     if (!options.length) return null;
     const minScore = PM.minScore * (underPressure ? PM.pressScoreK : 1) *
-      (inFinalThird ? PM.finalThirdK : 1);
+      (inFinalThird ? PM.finalThirdK : 1) * cfg.minScoreK;
     const live = options.filter((o) => o.score >= minScore);
     if (!live.length) return null;
 
@@ -1330,16 +1737,24 @@ export class Team {
     let top = -Infinity;
     for (const o of live) top = Math.max(top, o.score);
     let sum = 0;
+    // Температура тоже от фазы: при розыгрыше выбор почти детерминирован
+    // (безопасный пас один и тот же), в завершении наоборот шире — там
+    // предсказуемость наказывается сразу
+    const temp = PM.temperature * cfg.tempK;
     for (const o of live) {
-      o._w = Math.exp((o.score - top) / PM.temperature);
+      o._w = Math.exp((o.score - top) / temp);
       sum += o._w;
     }
     let r = Math.random() * sum;
+    let picked = live[live.length - 1];
     for (const o of live) {
       r -= o._w;
-      if (r <= 0) return o;
+      if (r <= 0) { picked = o; break; }
     }
-    return live[live.length - 1];
+    // Запоминаем намерение: следующий такт даст этому адресату фору. Пишем
+    // ТОЛЬКО для AI-веток — у человека адресата выбирает он сам
+    if (from.ai) from.ai.intent = { mate: picked.mate, kind: picked.kind, t: AI.intentCommit };
+    return picked;
   }
 
   // Вероятность, что наземный пас дойдёт: произведение (1 − p_перехвата) по
@@ -1399,6 +1814,19 @@ export class Team {
     this.receiveTarget = pass.target;
     this.receiveTimer = CONFIG.ai.receiveGiveUp;
     this.bump('pass');
+    // Ждём, кто первым тронет мяч: он и решит судьбу передачи
+    if (from) this._passWait = { mate: pass.mate, from, t: CONFIG.ai.receiveGiveUp };
+    // Передача в серии + перевод фланга. Перевод считаем ПО ЗАМЫСЛУ, а не по
+    // факту приёма: важно, сколько раз команда решила сменить фланг
+    this.seqPasses++;
+    this.bump('seqPass');
+    if (from) {
+      const fz = from.group.position.z;
+      const dz = Math.abs(pass.target.z - fz);
+      if (dz > CONFIG.ai.passModel.switchMinZ && pass.target.z * fz < 0) {
+        this.bump('switchPass');
+      }
+    }
     this._passLive = pass.mate; // ждём, дойдёт ли (для статистики точности)
     // Верховой пас летит по баллистике и садится ЗАМЕТНО ДАЛЬШЕ наземной цели,
     // под которую считалась сила. Адресат обязан бежать в реальную точку

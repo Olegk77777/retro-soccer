@@ -24,8 +24,13 @@ const DEFAULT_FRAME = 1 / 60;
 // Ключи Match.stats, которые ведёт сам движок (Team.bump)
 // Ключи снимаются ПОИМЁННО, поэтому новый счётчик в match.stats обязан
 // появиться и здесь — иначе отчёт падает на `undefined[0]` уже в агрегации
+// ВНИМАНИЕ: новый ключ обязан появляться в match.stats и здесь СИНХРОННО —
+// иначе агрегация падает на undefined[0] (записанная грабля проекта)
 const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', 'loose',
-  'feint', 'feintFail', 'run', 'third', 'overlap', 'short'];
+  'feint', 'feintFail', 'run', 'third', 'overlap', 'short',
+  // Осмысленность атаки: серии владения и метание (31.07.2026)
+  'seq', 'seqPass', 'seqTime', 'seqProg', 'seqLong', 'shotAfter3', 'switchPass', 'flips',
+  'oneTwo', 'passKept'];
 
 function zero2() {
   return [0, 0];
@@ -306,6 +311,13 @@ function summarize(perMatch, probe, ms) {
       const ok = sum2(perMatch.map((r) => r.stats), 'passOk');
       return [p[0] ? Math.round((ok[0] / p[0]) * 100) : 0, p[1] ? Math.round((ok[1] / p[1]) * 100) : 0];
     })(),
+    // Две разные точности: «дошёл ровно адресату» и «остался у своих»
+    passKeptAcc: (() => {
+      const p = sum2(perMatch.map((r) => r.stats), 'pass');
+      const ok = sum2(perMatch.map((r) => r.stats), 'passKept');
+      return [p[0] ? Math.round((ok[0] / p[0]) * 100) : 0,
+        p[1] ? Math.round((ok[1] / p[1]) * 100) : 0];
+    })(),
     crosses: st('cross'),
     saves: st('save'),
     holds: st('hold'),
@@ -320,6 +332,7 @@ function summarize(perMatch, probe, ms) {
     // подключения фулбека, приходы в ноги. Без этих чисел жалоба «у AI нет
     // комбинаций» неизмерима — связки взводились, но не считались нигде
     runs: st('run'),
+    oneTwos: st('oneTwo'),
     thirds: st('third'),
     overlaps: st('overlap'),
     shorts: st('short'),
@@ -328,6 +341,35 @@ function summarize(perMatch, probe, ms) {
     finalThirdPct: pr('thirdFrames').map((v) => Math.round((v / live) * 1000) / 10),
     possessionPct: pr('possFrames').map((v) => Math.round((v / live) * 1000) / 10),
     states: probe.states,
+    // ОСМЫСЛЕННОСТЬ АТАКИ (31.07.2026). Серия владения — единица осмысленной
+    // атаки, и меряется она НЕ голами: голы шумят на ±0.6 при восьми матчах,
+    // а вот «сколько передач живёт наша атака» держится ровно между выборками.
+    // Эталоны реального футбола для сравнения: серия АПЛ живёт 9.6–10.4 с,
+    // продвигает мяч на 12.1–12.6 м, «прямолинейность» (продвижение ÷ время)
+    // 1.4 м/с у Манчестер Сити и 2.1 м/с у Ноттингем Форест
+    seqs: st('seq'),
+    seqPassAvg: (() => {
+      const s = sum2(perMatch.map((r) => r.stats), 'seq');
+      const p = sum2(perMatch.map((r) => r.stats), 'seqPass');
+      return [s[0] ? Math.round((p[0] / s[0]) * 100) / 100 : 0,
+        s[1] ? Math.round((p[1] / s[1]) * 100) / 100 : 0];
+    })(),
+    seqTimeAvg: (() => {
+      const s = sum2(perMatch.map((r) => r.stats), 'seq');
+      const t = sum2(perMatch.map((r) => r.stats), 'seqTime');
+      return [s[0] ? Math.round((t[0] / s[0])) / 10 : 0,
+        s[1] ? Math.round((t[1] / s[1])) / 10 : 0];
+    })(),
+    seqProgAvg: (() => {
+      const s = sum2(perMatch.map((r) => r.stats), 'seq');
+      const g = sum2(perMatch.map((r) => r.stats), 'seqProg');
+      return [s[0] ? Math.round((g[0] / s[0]) * 10) / 10 : 0,
+        s[1] ? Math.round((g[1] / s[1]) * 10) / 10 : 0];
+    })(),
+    seqLong: st('seqLong'),
+    shotAfter3: st('shotAfter3'),
+    switches: st('switchPass'),
+    flips: st('flips'),
     seconds: Math.round(ms / 100) / 10,
   };
 }
@@ -338,11 +380,14 @@ function format(r) {
     `=== АВТОСИМУЛЯЦИЯ: ${r.matches} матч(ей) за ${r.seconds} с ===`,
     `счета: ${r.scores.join(', ')}   голов за матч: ${Math.round(r.goalsPerMatch * 100) / 100}`,
     `удары: ${p(r.shots)}  из штрафной: ${p(r.shotsBox)}  из убойной зоны: ${p(r.shotsKill)}  медиана дистанции: ${r.shotMedianDist} м`,
-    `пасы: ${p(r.passes)}  точность %: ${r.passAcc.join(' / ')}  навесы: ${p(r.crosses)}`,
+    `пасы: ${p(r.passes)}  точно адресату %: ${r.passAcc.join(' / ')}  осталось у своих %: ${r.passKeptAcc.join(' / ')}  навесы: ${p(r.crosses)}`,
     `сейвы: ${p(r.saves)}  намертво: ${p(r.holds)}  отбой: ${p(r.parries)}  в опасную зону: ${p(r.loose)}`,
     `подкаты: ${p(r.tackles)}  финты: ${p(r.feints)}  из них провалено: ${p(r.feintFails)}`,
-    `комбинации — забеги: ${p(r.runs)}  игра третьего: ${p(r.thirds)}  подключения: ${p(r.overlaps)}  приход в ноги: ${p(r.shorts)}`,
+    `комбинации — забеги за спину: ${p(r.runs)}  стеночки: ${p(r.oneTwos)}  игра третьего: ${p(r.thirds)}  подключения: ${p(r.overlaps)}  приход в ноги: ${p(r.shorts)}`,
     `владение %: ${r.possessionPct.join(' / ')}  финальная треть %: ${r.finalThirdPct.join(' / ')}  мяч под контролем в чужой штрафной %: ${r.boxTouchPct.join(' / ')}`,
+    `--- осмысленность ---`,
+    `серий владения: ${p(r.seqs)}  передач в серии: ${r.seqPassAvg.join(' / ')}  длительность серии с: ${r.seqTimeAvg.join(' / ')}  продвижение серии м: ${r.seqProgAvg.join(' / ')}`,
+    `серий 4+ передач: ${p(r.seqLong)}  ударов после 3+ передач: ${p(r.shotAfter3)}  переводов фланга: ${p(r.switches)}  перерешений (метание): ${p(r.flips)}`,
   ].join('\n');
 }
 
