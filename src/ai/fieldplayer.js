@@ -53,6 +53,15 @@ export function updateFieldPlayer(p, dt, ball) {
     return;
   }
 
+  // ФИНТ ВЕДЁТ СЕБЯ САМ (правило с 31.07.2026). Пока движение идёт, мозг
+  // решений не принимает — руль и потолок скорости держит сам финт
+  // (Player.updateFeint). Мяч передаём в «ноги»: у aiUpdate своего мяча нет,
+  // а разворот Марадоны тащит мяч за игроком каждый кадр.
+  if (p.feint) {
+    p.aiUpdate(dt, { x: 0, z: 0 }, { ball });
+    return;
+  }
+
   // Лежим после броска — только встаём, никаких решений
   if (p.downT > 0) {
     p.aiUpdate(dt, { x: 0, z: 0 }, {});
@@ -337,6 +346,24 @@ export function updateFieldPlayer(p, dt, ball) {
     }
   }
 
+  // КЛЮНУЛ НА ФИНТ (правило с 31.07.2026). Стоит ОДНИМ слоем поверх всех
+  // ролей, а не внутри pressBall: финт покупают и опекун, и страхующий, и
+  // просто оказавшийся рядом — а роль у них разная. Механика честная: не
+  // «защитник выключается», а ПЕРЕНОС ВЕСА НЕ ТУДА. Цель уезжает в ложную
+  // сторону на read.lunge и возвращается вместе с восстановлением, темп
+  // падает до read.speedCap, подкат запрещён (условие внутри pressBall).
+  // Лицом при этом он к мячу: обыгранный не слепнет, он опаздывает.
+  if (p.ai.feint && !p.isToucher) {
+    const R = CONFIG.player.feint.read;
+    const bite = p.ai.feint;
+    const k = Math.max(0, bite.t) / (bite.dur || R.recover);
+    move = seek(pos.x, pos.z,
+      pos.x + bite.x * R.lunge * k, pos.z + bite.z * R.lunge * k);
+    sprint = false;
+    speedCap = R.speedCap;
+    face = Math.atan2(bp.x - pos.x, bp.z - pos.z);
+  }
+
   // Расталкивание со всеми игроками: у мяча не вырастает куча-мала.
   // Владельцу — вполсилы: в толчее штрафной боковой пинок съедал долю его
   // вектора вперёд и буквально выталкивал его из зоны удара
@@ -344,7 +371,9 @@ export function updateFieldPlayer(p, dt, ball) {
     p.isToucher ? AI.separationPush * 0.4 : AI.separationPush);
   move = { x: move.x + sep.x, z: move.z + sep.z };
 
-  p.aiUpdate(dt, move, { sprint, face, speedCap });
+  // `ball` идёт в «ноги» ради финта: withBall мог начать его прямо в этом
+  // кадре, и без мяча updateFeint погасил бы движение, не успев начаться
+  p.aiUpdate(dt, move, { sprint, face, speedCap, ball });
 
   // Ведение: контроль мяча у ноги в сторону текущего курса
   if (p.isToucher && p.ai.dribDir) {
@@ -367,6 +396,7 @@ function pressBall(p, dt, ball, match) {
   const bp = ball.mesh.position;
   const owner = match.toucher;
   const myBallDist = distToBall(p, ball);
+  p.ai.jockey = false;   // сдерживаю ли я сейчас (см. ниже) — читает sellFeint
 
   // Мяч свободен или у своего (страховка) — обычная погоня.
   // Летящий верхом мяч (навес/вынос) — бежим к точке ПРИЗЕМЛЕНИЯ:
@@ -405,8 +435,12 @@ function pressBall(p, dt, ball, match) {
   // от ноги, и «плохое касание» не наступает практически никогда — замер
   // 24.07 дал 0.1% кадров ведения и НОЛЬ подкатов AI за 20 минут. Поэтому
   // добавлено обычное окно: слайд идёт, когда он ФИЗИЧЕСКИ достаёт мяч сбоку.
+  // ОБЫГРАННЫЙ ФИНТОМ НЕ ПОДКАТЫВАЕТСЯ. Без этого условия защитник в тот же
+  // кадр падал бы в слайд сквозь только что купленный финт, и покупать его
+  // было бы нечем — вся система свелась бы к «финт = бесплатный подкат»
   const TKA = D.tackle;
-  if (p.tackleCd <= 0 && p.kickCooldown <= 0 && p.downT <= 0 && p.diveT <= 0 &&
+  if (p.tackleCd <= 0 && !p.ai.feint &&
+      p.kickCooldown <= 0 && p.downT <= 0 && p.diveT <= 0 &&
       bp.y < P.tackle.ballMaxY &&
       myBallDist > TKA.rangeMin && myBallDist < TKA.range &&
       p.tackleReachable(ball)) {
@@ -460,7 +494,11 @@ function pressBall(p, dt, ball, match) {
   const toBlock = Math.hypot(tx - pos.x, tz - pos.z);
   let speedCap = null;
   if (toBlock < D.jockeyDist * 1.5) {
-    // У блок-точки пятимся в темпе владельца — не выбрасываемся на финт
+    // У блок-точки пятимся в темпе владельца — не выбрасываемся на финт.
+    // Раньше это была фигура речи, теперь буквально: sellFeint читает этот
+    // флаг и продаёт сдерживающему вдвое хуже (read.jockeyK). Сдерживание
+    // наконец получило измеримую награду
+    p.ai.jockey = true;
     const ownerSpeed = Math.hypot(owner.vel.x, owner.vel.z);
     speedCap = Math.max(2.5, ownerSpeed * D.jockeyMirror);
   }
@@ -557,6 +595,12 @@ function withBall(p, ball) {
       p.ai.dribDir = null;
       return { x: 0, z: 0 };
     }
+    // ФИНТ КОМПЬЮТЕРА (правило с 31.07.2026). Стоит ПОСЛЕДНИМ и нарочно: удар
+    // ценнее финта, пас ценнее финта, и обыгрыш остаётся тем, чем он является
+    // в статистике, — последним доводом, когда ни бить, ни отдать некуда.
+    // Решение узкое: защитник перекрыл курс, до своих ворот далеко (потеря
+    // мяча в своей трети стоит гола), и передачи лучше passOver не нашлось.
+    if (aiFeint(p, ball, opp, oppD, pass)) return { x: 0, z: 0 };
   }
 
   // Ведение к воротам, чуть к центру; соперник рядом — скользим в сторону.
@@ -607,6 +651,47 @@ function withBall(p, ball) {
   }
   p.ai.dribFree = ahead;
   return { x: dx, z: dz };
+}
+
+// Финт компьютера. Какой именно — решает та же геометрия, что у человека, но
+// «стик» подставляет мозг: защитник прямо по курсу — ПРОБРОС МИМО; перекрыл
+// наискось — КРОКЕТА в свободную сторону; вцепился сзади-сбоку и деваться
+// некуда — РАЗВОРОТ. Возвращает true, если финт начат.
+function aiFeint(p, ball, opp, oppD, pass) {
+  const F = CONFIG.ai.feint;
+  if (!F || !F.enabled || F.rate <= 0) return false;
+  if (!opp || oppD > F.range) return false;
+  if (pass && pass.score >= F.passOver) return false;
+  const team = p.team;
+  const pos = p.group.position;
+  if (Math.hypot(pos.x - team.ownGoalX, pos.z) < F.ownSafe) return false;
+  if (!p.canFeint(ball)) return false;
+  if (Math.random() >= F.rate) return false;
+
+  // Курс — туда, куда игрок и вёл (dribDir), иначе на ворота
+  const d = p.ai.dribDir || { x: team.side, z: 0 };
+  const dl = Math.hypot(d.x, d.z) || 1;
+  const cx = d.x / dl;
+  const cz = d.z / dl;
+  const op = opp.group.position;
+  const rx = (op.x - pos.x) / (oppD || 1);
+  const rz = (op.z - pos.z) / (oppD || 1);
+  const ahead = rx * cx + rz * cz;          // защитник впереди по курсу?
+  // Вправо от курса — это (−cz, cx): формула выведена в проекте трижды
+  const side = Math.sign(rx * -cz + rz * cx) || 1;
+  let stick = null;
+  let kind = 'past';
+  if (ahead < 0.1) {
+    // Защитник сбоку или сзади: уходим разворотом от него
+    kind = 'roul';
+    stick = { x: -rx, z: -rz };
+  } else if (ahead < 0.62) {
+    // Наискось: крокета в СВОБОДНУЮ сторону — вектор «вправо от курса»
+    // (−cz, cx), взятый с обратным знаком к стороне защитника
+    kind = 'croq';
+    stick = { x: cz * side, z: -cx * side };
+  }
+  return p.tryFeint(ball, stick, { kind });
 }
 
 // AI-навес с фланга (ресёрч 10 + PES): вингер в финальной трети упёрся

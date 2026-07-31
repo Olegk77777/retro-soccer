@@ -15,7 +15,7 @@ import { attachGloves } from './gloves.js';
 import { kitTextureWithNumber } from './kitnum.js';
 import { bakeClothMask, makeClothMaterial, updateCloth } from './cloth.js';
 import { addRim } from './rimlight.js';
-import { predictLanding, pursuitBall, loftPower } from './ai/steering.js';
+import { predictLanding, pursuitBall, loftPower, passPower } from './ai/steering.js';
 import { crowdJeer } from './sfx.js';
 
 // Один .glb на всех: грузится единожды, каждый игрок получает клон со скелетом.
@@ -260,6 +260,8 @@ export class Player {
     this.downT = 0;          // лежим после броска + подъём (getup)
     this._gotUp = false;     // клип подъёма уже запущен
     this.challengeCd = 0;    // откат между навалами корпусом
+    this.feint = null;       // идущий финт (см. tryFeint/updateFeint)
+    this.feintCd = 0;        // откат между финтами
     this.kickCooldown = 0;
     this.ownEpisodeT = 0;    // сек «эпизода владения»: недавно касался мяча (см. update)
     this.bobT = 0;
@@ -1316,6 +1318,13 @@ export class Player {
     this._diveLiftEnd = 0;
     this.cancelOneShot();
     this.challengeCd = 0;
+    // ФИНТ ГАСИМ ВМЕСТЕ С ФАЗОЙ ПАДЕНИЯ И ПО ТОЙ ЖЕ ПРИЧИНЕ: он держит руль
+    // и потолок скорости, а после свистка мяч уже в другом месте — игрок
+    // уехал бы с розыгрыша по курсу прошлого разворота. Обыгранность
+    // защитника (ai.feint) тоже: расстановка стирает эпизод целиком
+    this.feint = null;
+    this.feintCd = 0;
+    if (this.ai) this.ai.feint = null;
     this.tackleT = 0;
     this.tackleDir = null;
     this.tackleHit = false;
@@ -1517,6 +1526,461 @@ export class Player {
     const from = (A.clipFrom || {})[clip] || 0;
     const at = Math.max(from, hit - (A.trickLead || 0.15));
     this.playOneShot(clip, 1.0, at, end != null ? end : null);
+  }
+
+  // ===================== ФИНТЫ (правило с 31.07.2026) =====================
+  //
+  // Пять движений эпохи на одной кнопке (Shift / LT). Какое именно — решает
+  // СЕКТОР СТИКА ОТНОСИТЕЛЬНО КУРСА, а не относительно взгляда: финт это
+  // разрыв ритма бега, и «вбок» означает вбок от того, куда я еду. На
+  // развороте взгляд и курс расходятся, и по взгляду секторы врали бы.
+  //
+  // Три вещи, на которых стоит вся система.
+  //
+  // 1. ЧИТАЕМОСТЬ ДАЁТ ПЕРЕМЕЩЕНИЕ ФИГУРЫ, а не клип. С ТВ-камеры метр газона
+  //    — около 20 пикселей, и замеренные 0.42 м бокового хода носка в клипе
+  //    `penalty` (см. CONFIG.player.feint) — это 8 пикселей. Поэтому у каждого
+  //    финта свой БОКОВОЙ ШАГ: игрок реально переставляет вес. Клип остаётся
+  //    для крупного плана повтора.
+  //
+  // 2. ЛОЖНЫЙ ВЕКТОР — ЭТО ТО, ЧЕГО ЖДЁТ ЗАЩИТНИК, а не «куда махнула нога».
+  //    У степовера он вбок, у разворота — ПРОДОЛЖЕНИЕ КУРСА (защитник ждёт,
+  //    что я побегу дальше), у проброса мимо — сторона, куда ушёл МЯЧ (за ним
+  //    защитник и тянется, а игрок обегает с другой), у ложного удара — створ.
+  //
+  // 3. ФИНТ МОЖЕТ НЕ УДАТЬСЯ, и провал рождается из ситуации: быстрый мяч,
+  //    опека вплотную, техника игрока. Провалившийся финт МЯЧ ТЕРЯЕТ — толчок
+  //    выходит сильнее и мимо, и защитники ничего не покупают.
+  //
+  // Вправо при взгляде в +Z — это −X (right = forward × up), поэтому
+  // right = (−course.z, course.x). Формула выведена и проверена в проекте
+  // трижды (updateLoco, бросок вратаря), берём её один в один.
+
+  // Какой финт заказан. stick — направление ввода (или null), opts.fake —
+  // ложный удар (Shift + кнопка удара). Возвращает имя движения.
+  feintKind(stick, opts = {}) {
+    const F = CONFIG.player.feint;
+    if (opts.fake) return 'fake';
+    const sl = stick ? Math.hypot(stick.x, stick.z) : 0;
+    if (sl <= F.stickDead) return 'step';
+    const c = this._feintCourse();
+    const cosT = Math.max(-1, Math.min(1, (stick.x / sl) * c.x + (stick.z / sl) * c.z));
+    const deg = (Math.acos(cosT) * 180) / Math.PI;
+    if (deg >= F.turnFrom) return 'roul';
+    if (deg >= F.sideFrom) return 'croq';
+    return 'past';
+  }
+
+  // Курс: куда игрок ЕДЕТ. Стоя на месте курсом становится взгляд
+  _feintCourse() {
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+    if (sp > 0.6) return { x: this.vel.x / sp, z: this.vel.z / sp };
+    const f = this.facing;
+    return { x: f.x, z: f.z };
+  }
+
+  // Можно ли сейчас финтить: мяч у ноги, ничего не мешает
+  canFeint(ball) {
+    const F = CONFIG.player.feint;
+    const P = CONFIG.player;
+    if (!F.enabled || this.feint || this.feintCd > 0) return false;
+    if (this.downT > 0 || this.diveT > 0 || this.tackleT > 0) return false;
+    if (this.aerialStrike || this.slideRecover) return false;
+    const m = this.team && this.team.match;
+    // На стандарте финтов не бывает — по той же причине, что и трюков:
+    // мяч стоит, время есть, и промах по нему читался бы поломкой
+    if (m && (m.state === 'restart' || m.state === 'kickoff')) return false;
+    const bp = ball.mesh.position;
+    const pos = this.group.position;
+    if (bp.y > P.kickMaxBallY) return false;
+    if (this.isToucher === false) return false;
+    return Math.hypot(bp.x - pos.x, bp.z - pos.z) < P.controlKeepRadius;
+  }
+
+  // Заказать финт. Возвращает true, если движение началось.
+  tryFeint(ball, stick = null, opts = {}) {
+    if (!this.canFeint(ball)) return false;
+    const F = CONFIG.player.feint;
+    const P = CONFIG.player;
+    const kind = opts.kind || this.feintKind(stick, opts);
+    const cfg = F[kind];
+    if (!cfg) return false;
+
+    const pos = this.group.position;
+    const bp = ball.mesh.position;
+    const c = this._feintCourse();
+    const rx = -c.z;
+    const rz = c.x;                       // единичный вектор ВПРАВО от курса
+    const sl = stick ? Math.hypot(stick.x, stick.z) : 0;
+    const sx = sl > F.stickDead ? stick.x / sl : 0;
+    const sz = sl > F.stickDead ? stick.z / sl : 0;
+
+    // Сторона: +1 вправо от курса, −1 влево.
+    //
+    // СТИК РЕШАЕТ, ТОЛЬКО ЕСЛИ В НЁМ ЕСТЬ БОКОВАЯ СОСТАВЛЯЮЩАЯ. Первая
+    // редакция брала `Math.sign(sx·rx + sz·rz) || 1` при любом стике — а у
+    // чистого «вперёд» эта проекция РОВНО НОЛЬ, и `|| 1` слепо выбирал право.
+    // Трасса поймала последствие: защитник стоял справа, мяч отправляли туда
+    // же, он забирал его на пятом кадре, и проброс мимо не удавался НИ РАЗУ
+    // (0 обыгранных эпизодов из 20). Без бокового намерения сторону выбирает
+    // обстановка, а не знак нуля.
+    const latIn = sl > F.stickDead ? sx * rx + sz * rz : 0;
+    let side = Math.abs(latIn) > 0.25 ? Math.sign(latIn) : 0;
+    const near = this._nearestOpponent();
+    if (!side) {
+      // Финт продают тому, кто рядом, — значит и в его сторону
+      side = near ? (Math.sign((near.p.group.position.x - pos.x) * rx +
+        (near.p.group.position.z - pos.z) * rz) || 1) : 1;
+    }
+
+    // Ложный вектор — то, чего ждёт защитник (см. шапку)
+    let fx = rx * side;
+    let fz = rz * side;
+    let go = { x: c.x, z: c.z };
+    let via = null;
+    let spin = 0;
+    let ballVel = null;                 // скорость мяча после толчка, м/с
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+
+    if (kind === 'croq') {
+      // Уходим В сторону стика, продаём ПРОТИВОПОЛОЖНУЮ
+      go = { x: sx || rx * side, z: sz || rz * side };
+      fx = -rx * side;
+      fz = -rz * side;
+      // МЯЧ ЕДЕТ ВМЕСТЕ С ИГРОКОМ, плюс боковой сдвиг РОВНО СО СКОРОСТЬЮ ЕГО
+      // БОКОВОГО ШАГА. Крокета — это перевод ПОД СОБОЙ: мяч и игрок обязаны
+      // прийти в одну точку, а значит и ехать вбок они обязаны одинаково.
+      // Три редакции промахнулись мимо этого по-разному: 5.4 м/с вбок плюс
+      // доля бега дали разрыв 10.35 м, точка по баллистике паса — 3.34 м и
+      // 40 % потерь, «сдвиг за время движения» (5.6 м/с) — 5.22 м, потому что
+      // сам игрок вбок быстрее `side` не едет и просто не поспевал за мячом.
+      ballVel = {
+        x: this.vel.x * cfg.carry + go.x * cfg.side,
+        z: this.vel.z * cfg.carry + go.z * cfg.side,
+      };
+    } else if (kind === 'roul') {
+      // Разворот: выходим ПО СТИКУ, а защитник ждёт продолжения курса
+      go = { x: sx, z: sz };
+      fx = c.x;
+      fz = c.z;
+      spin = (cfg.spin * Math.PI) / 180;
+    } else if (kind === 'past') {
+      // Мяч мимо защитника с ОДНОЙ стороны, игрок с ДРУГОЙ
+      const def = this._feintBlocker(c, cfg);
+      // Сторону мяча выбирает СТИК, если человек показал её явно; иначе —
+      // геометрия: мяч катится в ту сторону, куда защитник смещён ОТ МОЕЙ
+      // ЛИНИИ, а я иду по своей и обхожу его с другой. Так обоим достаётся
+      // кратчайший путь, и мяч гарантированно проходит мимо него, а не в него
+      let bs = side;
+      if (def && !Math.abs(latIn)) {
+        const dp0 = def.group.position;
+        const q = (dp0.x - pos.x) * rx + (dp0.z - pos.z) * rz;
+        bs = Math.abs(q) > 0.35 ? Math.sign(q) : (this._freeSide(def, c) || side);
+      }
+      const bx = rx * bs;
+      const bz = rz * bs;
+      fx = bx;                            // защитник тянется ЗА МЯЧОМ
+      fz = bz;
+      // ТОЧКА СХОДА считается ЧЕСТНОЙ БАЛЛИСТИКОЙ КАЧЕНИЯ, а не «толчком
+      // посильнее». Первая редакция задавала мячу 7.5 м/с плюс доля бега —
+      // замер поймал это сразу: мяч уезжал на 14–20 м, то есть не «мимо
+      // защитника», а в аут. Скорость берём из той же формулы, что у паса
+      // (v0 = приход + λ·d), и мяч приходит в точку схода на своих ногах
+      let tx;
+      let tz;
+      if (def) {
+        const dp = def.group.position;
+        via = {
+          x: dp.x - bx * cfg.manGap + c.x * 0.6,
+          z: dp.z - bz * cfg.manGap + c.z * 0.6,
+        };
+        tx = dp.x + bx * cfg.ballGap + c.x * cfg.behind;
+        tz = dp.z + bz * cfg.ballGap + c.z * cfg.behind;
+      } else {
+        // Некого обыгрывать — честный «прокинул и побежал» по курсу
+        tx = pos.x + c.x * cfg.behind + bx * 0.8;
+        tz = pos.z + c.z * cfg.behind + bz * 0.8;
+      }
+      const dl = Math.hypot(tx - bp.x, tz - bp.z) || 1;
+      // Приход тем быстрее, чем быстрее бежит игрок: мяч не имеет права
+      // умереть до его прихода, но и убежать от него не должен
+      const arrive = cfg.arrive + sp * cfg.arriveRun;
+      const v0 = Math.min(cfg.ballMax, passPower(dl, arrive));
+      ballVel = { x: ((tx - bp.x) / dl) * v0, z: ((tz - bp.z) / dl) * v0 };
+      go = { x: c.x, z: c.z };
+    } else if (kind === 'fake') {
+      // Ложный удар: защитник ждёт мяч в створе и бросается в блок
+      const aim = this._strikeAimDir(pos.x, pos.z);
+      fx = aim.x;
+      fz = aim.z;
+    }
+
+    // ПРОВАЛ. Считается ДО толчка: провалившийся финт отдаёт мяч сильнее и
+    // мимо, а защитники ничего не покупают — они прочли движение
+    const FA = F.fail;
+    const rel = Math.hypot(ball.vel.x - this.vel.x, ball.vel.z - this.vel.z);
+    const press = near ? Math.max(0, 1 - near.d / FA.pressRange) : 0;
+    const skill = this.look && this.look.touch != null ? this.look.touch : 0.5;
+    let risk = FA.base + FA.relAdd * Math.min(1, rel / FA.relRef) + FA.pressAdd * press;
+    risk *= Math.max(0.25, 1 - FA.skillK * (skill - 0.5) * 2);
+    const failed = Math.random() < Math.min(FA.maxOut, risk);
+
+    if (ballVel) {
+      let vx = ballVel.x;
+      let vz = ballVel.z;
+      if (failed) {
+        const a = ((Math.random() * 2 - 1) * FA.spread * Math.PI) / 180;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        vx = (ballVel.x * ca - ballVel.z * sa) * FA.pushK;
+        vz = (ballVel.x * sa + ballVel.z * ca) * FA.pushK;
+      }
+      ball.vel.x = vx;
+      ball.vel.z = vz;
+      ball.spin = 0;
+      ball.afterTouch = 0;
+    }
+
+    this.feint = {
+      kind, cfg, side, go, via, spin, spinLeft: spin, failed,
+      t: cfg.dur, dur: cfg.dur, fake: { x: fx, z: fz },
+    };
+    this.lastFeint = kind;
+    this.feintCd = F.cooldown * (failed ? FA.cooldownK : 1) + cfg.dur;
+    // Липкое ведение на время финта молчит — иначе оно в тот же кадр вернуло
+    // бы мяч под ногу и никакого проброса не случилось бы
+    this.kickCooldown = Math.max(this.kickCooldown, cfg.dur);
+    // …но мяч остаётся НАШИМ: эпизод владения держит владение в updateToucher,
+    // пока игрок ближайший к своему отпущенному мячу
+    this.ownEpisodeT = P.approach.episodeGrace;
+    this.dribbleDir = null;
+    this.cancelBallApproach();
+    this.pendingStrike = null;
+    this._playFeintClip(kind, cfg, side, ball);
+    if (!failed) this.sellFeint(fx, fz, cfg.sell);
+    if (this.team && this.team.bump) this.team.bump(failed ? 'feintFail' : 'feint');
+    return true;
+  }
+
+  // Клип финта. Степовер и крокета играют ОКНО клипа `penalty`: замер по риггу
+  // (Blender, 31.07.2026) — в 0.10…0.42 правый носок обходит мяч снаружи,
+  // проходя вбок 0.42 м на высоте 7–12 см. Зеркало `penalty_l` даёт то же
+  // левой. Ложный удар играет силовой клип НАСКВОЗЬ через кадр контакта:
+  // нога проходит там, где был бы мяч, но мяча она не касается.
+  _playFeintClip(kind, cfg, side, ball) {
+    if (!this.actions || !cfg.clip) {
+      // Проброс мимо — обычный тычок носком: это НАСТОЯЩЕЕ касание мяча
+      if (kind === 'past') {
+        this.lastKick = { foot: this.kickFoot(ball), contact: 'toe' };
+        this.playStrike('toe');
+      }
+      return;
+    }
+    // Нога, которой машем: у степовера и крокеты — в сторону ФИНТА (обход
+    // мяча снаружи идёт правой в правую сторону), у ложного удара — бьющая
+    const foot = kind === 'fake' ? this.kickFoot(ball) : (side > 0 ? 'R' : 'L');
+    const name = foot === 'L' ? cfg.clipL : cfg.clip;
+    if (!this.actions[name]) return;
+    this.lastKick = { foot, contact: 'feint' };
+    this.playOneShot(name, cfg.rate, cfg.from, cfg.to);
+  }
+
+  // Ближайший соперник: {p, d} или null
+  _nearestOpponent() {
+    if (!this.team || !this.team.opponents) return null;
+    const pos = this.group.position;
+    let best = null;
+    let bd = Infinity;
+    for (const o of this.team.opponents) {
+      if (o.isKeeper || o.downT > 0) continue;
+      const op = o.group.position;
+      const d = Math.hypot(op.x - pos.x, op.z - pos.z);
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best ? { p: best, d: bd } : null;
+  }
+
+  // Защитник, перекрывший курс: ближайший в конусе впереди
+  _feintBlocker(c, cfg) {
+    if (!this.team || !this.team.opponents) return null;
+    const pos = this.group.position;
+    let best = null;
+    let bd = Infinity;
+    for (const o of this.team.opponents) {
+      if (o.isKeeper || o.downT > 0) continue;
+      const op = o.group.position;
+      const rx = op.x - pos.x;
+      const rz = op.z - pos.z;
+      const d = Math.hypot(rx, rz) || 1;
+      if (d > cfg.range) continue;
+      if ((rx * c.x + rz * c.z) / d < cfg.cos) continue;
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best;
+  }
+
+  // С какой стороны от защитника свободнее: туда и катим мяч
+  _freeSide(def, c) {
+    const dp = def.group.position;
+    const rx = -c.z;
+    const rz = c.x;
+    let score = 0;
+    for (const o of this.team.opponents) {
+      if (o === def || o.isKeeper) continue;
+      const op = o.group.position;
+      const d = Math.hypot(op.x - dp.x, op.z - dp.z);
+      if (d > 8) continue;
+      const s = Math.sign((op.x - dp.x) * rx + (op.z - dp.z) * rz);
+      score -= s * (8 - d);              // где соперники — там теснее
+    }
+    return Math.sign(score) || 1;
+  }
+
+  // ===== ПРОДАЖА ФИНТА ЗАЩИТНИКАМ =====
+  // Не «защитник выключается», а СМЕЩЕНИЕ ЦЕЛИ и потеря темпа: он переносит
+  // вес не туда. Клюёт только тот, кто на меня СМОТРИТ и достаточно близко,
+  // и заметно реже — сдерживающий (jockey): «не выбрасывайся на финт» — это
+  // и есть смысл сдерживания, а теперь ещё и его награда.
+  sellFeint(fx, fz, strength = 1) {
+    const R = CONFIG.player.feint.read;
+    if (!this.team || !this.team.opponents) return 0;
+    const pos = this.group.position;
+    let bought = 0;
+    for (const o of this.team.opponents) {
+      if (o.isKeeper || o.downT > 0 || o.tackleT > 0) continue;
+      const op = o.group.position;
+      const dx = pos.x - op.x;
+      const dz = pos.z - op.z;
+      const d = Math.hypot(dx, dz);
+      if (d > R.range || d < 0.01) continue;
+      const ux = dx / d;
+      const uz = dz / d;
+      // ФИНТ ПОКУПАЕТ ТОТ, КТО СО МНОЙ ИГРАЕТ, а не только тот, кто на меня
+      // СМОТРИТ. Проверка по одному `facing` выглядела строгой и правильной, а
+      // на деле вырезала главного клиента: полевой игрок разворачивается ПО
+      // ХОДУ ДВИЖЕНИЯ (aiUpdate), и сдерживающий защитник, пятящийся к своим
+      // воротам, формально смотрит ОТ меня — ровно та же грабля, из-за которой
+      // вратарь стоял спиной к полю (28.07.2026). Замер по трассе одного
+      // эпизода: защитник в 1.86 м, идущий на мяч, финт не покупал ВООБЩЕ.
+      // Занятый мной (первый защитник или мой опекун) видит меня по
+      // построению — ему разворот корпуса не нужен.
+      const engaged = o.team &&
+        (o.team.chaser === o || (o.team.marks && o.team.marks.get(o) === this));
+      if (!engaged && o.facing.x * ux + o.facing.z * uz < R.faceCos) continue;
+      const closing = o.vel.x * ux + o.vel.z * uz;                 // бежит на меня
+      const skill = o.look && o.look.touch != null ? o.look.touch : 0.5;
+      let p = R.base * strength *
+        Math.pow(Math.max(0, 1 - d / R.range), R.falloff) *
+        (1 + R.closingK * Math.max(0, closing)) *
+        Math.max(0.2, 1 - R.skillK * (skill - 0.5) * 2);
+      if (o.ai && o.ai.jockey) p *= R.jockeyK;
+      if (Math.random() >= p) continue;
+      if (!o.ai) o.ai = { decideCd: 0, dribDir: null };
+      o.ai.feint = { x: fx, z: fz, t: R.recover, dur: R.recover };
+      bought++;
+    }
+    return bought;
+  }
+
+  // Кадр финта. Возвращает {x, z, cap} — курс ног и потолок скорости, либо
+  // null, если финта нет. Вызывают ОБЕ ветки движения (человек и AI): финт
+  // одинаково принадлежит всем 22 фигурам.
+  updateFeint(dt, ball) {
+    const f = this.feint;
+    if (!f) return null;
+    const P = CONFIG.player;
+    const cfg = f.cfg;
+    const pos = this.group.position;
+    f.t -= dt;
+    if (f.t <= 0) {
+      this.feint = null;
+      // Финт кончился — ноги обязаны догнать свой мяч. То же обязательство,
+      // что после спринтерского толчка, и ставится оно ВСЕГДА: даже там, где
+      // мяч держали у ноги, он за время движения успевает отойти
+      this.beginBallApproach('dribble', ball);
+      return null;
+    }
+    const age = f.dur - f.t;
+    const runCap = this._runSpeedCap();
+
+    // МЯЧ У НОГИ. Три движения из пяти мяча вообще НЕ ОТПУСКАЮТ: разворот
+    // накрывает его подошвой, степовер и ложный удар обходят его ногой. Липкое
+    // ведение на время финта выключено (kickCooldown), поэтому держать мяч
+    // обязан сам финт — иначе он просто продолжает катиться.
+    //
+    // Замер первой редакции, где этого не было (feint-rig → feintGrid,
+    // 31.07.2026): у степовера мяч уходил от игрока на 7.84 м и доставался
+    // защитнику, у которого его и обыгрывали. То есть обманное движение
+    // ОТДАВАЛО мяч — ровно противоположное тому, зачем его делают.
+    if (cfg.ballHold != null && !f.failed) {
+      const bp = ball.mesh.position;
+      // ТОЧКА УДЕРЖАНИЯ У РАЗВОРОТА НЕ КРУТИТСЯ ВМЕСТЕ СО ВЗГЛЯДОМ. Первая
+      // редакция брала её как `pos + facing·ballHold`, а взгляд в развороте
+      // идёт 655 °/с — точка обегала игрока по окружности радиусом 0.5 м, то
+      // есть мяч раскручивало с тангенциальной скоростью 5.7 м/с и уносило.
+      // Замер поймал ровно это: разрыв «мяч ↔ игрок» 2.92 м в конце движения
+      // при радиусе владения 2.4 — мяч переставал быть чьим-либо вообще.
+      // Подошва тащит мяч ТУДА, КУДА ИГРОК УХОДИТ, а не куда смотрит корпус.
+      const hd = f.spin ? f.go : this.facing;
+      const tx = pos.x + hd.x * cfg.ballHold;
+      const tz = pos.z + hd.z * cfg.ballHold;
+      ball.vel.x = this.vel.x + (tx - bp.x) * cfg.ballK;
+      ball.vel.z = this.vel.z + (tz - bp.z) * cfg.ballK;
+      if (f.kind === 'roul') return { x: f.go.x, z: f.go.z, cap: runCap * cfg.speedK };
+    }
+
+    // ПРОБРОС МИМО. Пока путевая точка не пройдена, ноги идут В ОБХОД
+    // защитника — иначе игрок побежал бы сквозь него по кратчайшей к мячу.
+    // А ПОСЛЕ неё — СРАЗУ ЗА СВОИМ МЯЧОМ, и это не мелочь: первая редакция
+    // держала курс прямо все 0.55 с, мяч уходил вбок по диагонали, и трасса
+    // показала итог — игрок бежал по прямой, защитник восстанавливался ровно
+    // на мяче и выносил его на 17 м/с. Проброс мимо — это ДВА движения: убрал
+    // мяч в сторону и рванул ЗА НИМ.
+    if (f.kind === 'past') {
+      if (f.via) {
+        const dx = f.via.x - pos.x;
+        const dz = f.via.z - pos.z;
+        const d = Math.hypot(dx, dz);
+        // Точку считаем пройденной, когда она уже позади по курсу ухода
+        if (d > 0.6 && dx * f.go.x + dz * f.go.z > -0.2) {
+          return { x: dx / d, z: dz / d, cap: runCap * cfg.speedK };
+        }
+        f.via = null;
+      }
+      const chase = pursuitBall(pos.x, pos.z, ball, runCap * cfg.speedK);
+      return { x: chase.x, z: chase.z, cap: runCap * cfg.speedK };
+    }
+
+    // БОКОВОЙ ШАГ. Первые cfg.hold секунд фигура реально переставляет вес —
+    // это и есть то, что видно с ТВ-камеры. Потолок скорости на это время
+    // задан ОТДЕЛЬНЫМ числом (cfg.side, м/с), а не долей бега: иначе шаг
+    // выходил бы метровым на спринте и полуметровым на шаге
+    if (cfg.hold != null && age < cfg.hold) {
+      const dir = f.kind === 'croq' ? f.go : f.fake;
+      const c = this._feintCourse();
+      // Смесь «в сторону» и «по курсу»: чистый боковой шаг остановил бы бег
+      const mx = dir.x + c.x * 0.5;
+      const mz = dir.z + c.z * 0.5;
+      const ml = Math.hypot(mx, mz) || 1;
+      return { x: mx / ml, z: mz / ml, cap: cfg.side };
+    }
+    return { x: f.go.x, z: f.go.z, cap: runCap * cfg.speedK };
+  }
+
+  // Спин разворота: корпус крутится ровно 360° за длительность движения.
+  // Стоит ПЕРВЫМ в цепочке выбора взгляда — обычная логика «смотрю по ходу»
+  // на это время отключается, иначе разворот сам себя гасил бы.
+  _driveFeintSpin(dt) {
+    const f = this.feint;
+    if (!f || !f.spinLeft) return false;
+    const rate = f.spin / f.dur;            // рад/с — ровно оборот за движение
+    const step = Math.min(f.spinLeft, rate * dt);
+    f.spinLeft -= step;
+    // Вправо от курса — это уменьшение rot (rot = atan2(x, z), +X это ВЛЕВО)
+    this.rot -= step * f.side;
+    while (this.rot > Math.PI) this.rot -= Math.PI * 2;
+    while (this.rot < -Math.PI) this.rot += Math.PI * 2;
+    return true;
   }
 
   // Текущий потолок скорости бега (спринт учтён) — для честного прогноза
@@ -2062,9 +2526,23 @@ export class Player {
     if (this.challengeCd > 0) this.challengeCd -= dt;
     if (this.tackleCd > 0) this.tackleCd -= dt;
     if (this._slideCd > 0) this._slideCd -= dt;
+    if (this.feintCd > 0) this.feintCd -= dt;
+    // Обыгранный финтом защитник восстанавливается по РЕАЛЬНОМУ такту кадра,
+    // а не по такту решений мозга: перенос веса — это физика, а не решение
+    if (this.ai && this.ai.feint) {
+      this.ai.feint.t -= dt;
+      if (this.ai.feint.t <= 0) this.ai.feint = null;
+    }
     // Эпизод владения тает и у AI: updateToucher смотрит его у всех 22,
     // иначе бывший управляемый «зависал» вечным хозяином оттолкнутого мяча
     if (this.ownEpisodeT > 0) this.ownEpisodeT -= dt;
+
+    // ФИНТ идёт и у компьютера — тем же кодом, что у человека. Мяч ему нужен
+    // тот же самый, поэтому его передаёт мозг (opts.ball): у aiUpdate своего
+    // мяча нет, а заводить второй источник правды в проекте нельзя
+    let feintMove = null;
+    if (this.feint && opts.ball) feintMove = this.updateFeint(dt, opts.ball);
+    else if (this.feint) this.feint = null;   // мяча не дали — финт не ведём
 
     // Лежим после броска — не двигаемся; в броске — несёт по курсу ласточки;
     // в подкате — скользим по слайду
@@ -2098,8 +2576,14 @@ export class Player {
       mvx /= il;
       mvz /= il;
     }
+    // Финт забирает руль целиком — и курс, и потолок скорости (см. update)
+    if (feintMove) {
+      mvx = feintMove.x;
+      mvz = feintMove.z;
+      if (feintMove.cap != null) maxSpeed = feintMove.cap;
+    }
 
-    const k = Math.min(1, dt * P.accel);
+    const k = Math.min(1, dt * (feintMove ? P.approach.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -2113,7 +2597,9 @@ export class Player {
 
     // Корпус: бежим — смотрим по ходу; стоим — куда велел мозг (обычно на мяч)
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    if (this._driveFaceLock(dt)) {
+    if (this._driveFeintSpin(dt)) {
+      // Разворот Марадоны: корпус крутит сам финт
+    } else if (this._driveFaceLock(dt)) {
       // Корпус доезжает в только что нанесённый удар — руль на это время его
     } else if (this.aerialStrike && this.aerialStrike.aimRot != null) {
       this._turnIntoStrike(dt); // замах замыкания: корпус приходит в удар к контакту
@@ -2210,8 +2696,28 @@ export class Player {
     if (this.challengeCd > 0) this.challengeCd -= dt;
     if (this.tackleCd > 0) this.tackleCd -= dt;
     if (this._slideCd > 0) this._slideCd -= dt;
+    if (this.feintCd > 0) this.feintCd -= dt;
+    // Обыгранность финтом тает и у управляемого. Рулить она им не рулит (это
+    // отняло бы у человека управление), но обязана СГОРЕТЬ: иначе игрок,
+    // купивший финт и тут же взятый под курсор, вернулся бы в AI с висящей
+    // на нём просроченной меткой
+    if (this.ai && this.ai.feint) {
+      this.ai.feint.t -= dt;
+      if (this.ai.feint.t <= 0) this.ai.feint = null;
+    }
     this.updateTackle(dt, ball); // скольжение подката и его контакты
     const downed = this.downT > 0; // лежим после броска — ввод не работает
+
+    // ФИНТ (Shift / LT). Заказ читается ДО движения и до липкого ведения:
+    // толчок мяча обязан случиться раньше, чем ведение вернёт его под ногу.
+    // Не исполнился (нет мяча, кулдаун) — заказ снимаем, иначе он дождался
+    // бы владения и выстрелил сам по себе через секунду.
+    if (input.consumeFeint && input.consumeFeint()) {
+      const fl = Math.hypot(input.move.x, input.move.z);
+      const stick = fl > 0.01 ? { x: input.move.x / fl, z: input.move.z / fl } : null;
+      this.tryFeint(ball, stick);
+    }
+    const feintMove = this.updateFeint(dt, ball);
 
     // Замах удара, два режима (решение Олега, 17.07.2026):
     // - начал замах НА БЕГУ (быстрее runKeepSpeed) — бег продолжается, будет
@@ -2419,6 +2925,10 @@ export class Player {
     const ballAtFoot = Math.hypot(bpEarly.x - pos.x, bpEarly.z - pos.z) < P.stickyRadius;
     let maxSpeed = P.speed * (this.hasBall && ballAtFoot ? P.dribbleSpeedFactor : 1);
     maxSpeed *= 1 + (P.sprintFactor - 1) * this.sprintBoost;
+    // Ближний контроль стоит темпа — иначе он был бы бесплатным улучшением
+    if (input.feintHeld && this.hasBall && ballAtFoot) {
+      maxSpeed *= CONFIG.player.feint.close.speedK;
+    }
     let mvx = (brake || downed) ? 0 : input.move.x;
     let mvz = (brake || downed) ? 0 : input.move.z;
 
@@ -2513,8 +3023,19 @@ export class Player {
       mvz = aerialMove.z;
     }
 
+    // ФИНТ ЗАБИРАЕТ РУЛЬ ЦЕЛИКОМ — и курс, и потолок скорости. Потолок именно
+    // ЗАМЕНЯЕТСЯ, а не ограничивается: у проброса мимо он ВЫШЕ обычного (это
+    // рывок мимо защитника), а у разворота — заметно ниже, и Math.min забрал
+    // бы у первого весь смысл
+    if (feintMove) {
+      mvx = feintMove.x;
+      mvz = feintMove.z;
+      if (feintMove.cap != null) maxSpeed = feintMove.cap;
+    }
+
     const k = Math.min(1, dt *
-      ((approachMove || strikeMove || receiverMove || aerialMove) ? APP.accel : P.accel));
+      ((approachMove || strikeMove || receiverMove || aerialMove || feintMove)
+        ? APP.accel : P.accel));
     this.vel.x += (mvx * maxSpeed - this.vel.x) * k;
     this.vel.z += (mvz * maxSpeed - this.vel.z) * k;
     pos.x += this.vel.x * dt;
@@ -2543,7 +3064,9 @@ export class Player {
     // (фидбек Олега: иначе игрок доворачивался раньше мяча, и мяч «прилетал
     // сбоку»). Вне ведения — обычный разворот в сторону бега.
     const speed = Math.hypot(this.vel.x, this.vel.z);
-    if (this._driveFaceLock(dt)) {
+    if (this._driveFeintSpin(dt)) {
+      // Разворот Марадоны: корпус крутит сам финт, обычная логика молчит
+    } else if (this._driveFaceLock(dt)) {
       // Корпус доезжает в только что нанесённый удар (см. faceStrike)
     } else if (this.aerialStrike && this.aerialStrike.aimRot != null) {
       // Замах замыкания: корпус доворачивается в удар РОВНО к мигу контакта —
@@ -2673,7 +3196,12 @@ export class Player {
         // издалека/из-за спины мяч не «прилетает сбоку», игрок добегает сам
         const aheadF = (bp.x - pos.x) * this.facing.x + (bp.z - pos.z) * this.facing.z;
         if (dist < P.stickyRadius && aheadF > -0.3) {
-          const target = pos.clone().addScaledVector(this.facing, P.dribbleAhead);
+          // БЛИЖНИЙ КОНТРОЛЬ (Shift/LT удерживается): мяч держится вплотную к
+          // ноге, темп ниже. Тот же смысл, что у L2 в EA FC, и та же цена —
+          // мяч не убежит, но и уйти от прессинга на скорости уже нельзя
+          const CC = CONFIG.player.feint.close;
+          const ahead = input.feintHeld ? CC.ahead : P.dribbleAhead;
+          const target = pos.clone().addScaledVector(this.facing, ahead);
           ball.vel.x = this.vel.x + (target.x - bp.x) * P.dribbleStrength;
           ball.vel.z = this.vel.z + (target.z - bp.z) * P.dribbleStrength;
         }
@@ -2883,7 +3411,15 @@ export class Player {
       } else if (s.type === 'cross') {
         this.doCross(s.v, input, ball);
       } else if (s.type === 'shot') {
-        this.shoot(s.v, input, ball);
+        // ЛОЖНЫЙ УДАР: Shift удерживается в момент удара — полный замах,
+        // мяча нога не касается, защитники бросаются в блок. Модификатор
+        // спрашивается на СОБЫТИИ, а не защёлкивается при нажатии (как у Q):
+        // ложный удар — это короткий тап, Shift к отпусканию ещё зажат
+        const fl = Math.hypot(input.move.x, input.move.z);
+        const fstick = fl > 0.01 ? { x: input.move.x / fl, z: input.move.z / fl } : null;
+        if (!(input.feintHeld && this.tryFeint(ball, fstick, { fake: true }))) {
+          this.shoot(s.v, input, ball);
+        }
       } else if (s.type === 'swipe') {
         this.swipeShot(s.v, input, ball);
       }
@@ -3035,7 +3571,9 @@ export class Player {
       }
       // Стик В МОМЕНТ КАСАНИЯ — это и есть направление первого касания.
       // Резко потянул в сторону под навесом — мяч уйдёт грудью туда
-      if (oursIncoming && !inFinish) this.trapBall(ball, trapC, input.move);
+      if (oursIncoming && !inFinish) {
+        this.trapBall(ball, trapC, input.move, { technical: !!input.feintHeld });
+      }
     }
 
     // --- Aftertouch: пока свежеотбитый мяч летит, направление докручивает его ---
@@ -5080,8 +5618,16 @@ export class Player {
   //
   // aim — куда игрок хочет увести мяч (стик человека / цель AI). Мягкий доворот
   // кладёт мяч под ногу, разворот на 90°+ ПРОБРАСЫВАЕТ его в сторону.
-  trapBall(ball, contact = null, aim = null) {
+  // opts.technical — приём с зажатым Shift/LT (просьба Олега 31.07.2026:
+  // «приём мяча с зажатой кнопкой Shift делает приём более техничным»).
+  // Это не «приём без ошибок»: игрок платит ТЕМПОМ. Мяч кладётся под ногу и
+  // почти останавливается, разброс касания падает вдвое, касание длится
+  // дольше, а проброс на ход при этом невозможен ПО ПОСТРОЕНИЮ — спринт и
+  // техника противоположные намерения, ровно как R2 и L2 в EA FC.
+  trapBall(ball, contact = null, aim = null, opts = {}) {
     const T = CONFIG.player.trap;
+    const TC = CONFIG.player.feint.trap;
+    const tech = !!opts.technical;
     const bp = ball.mesh.position;
     const c = contact || this.bodyContactPoint(bp);
     const part = T.parts[c.part] || T.parts.chest;
@@ -5127,7 +5673,7 @@ export class Player {
     const K = T.knock;
     const runSp = Math.hypot(this.vel.x, this.vel.z);
     let knock = null;
-    if (K && runSp >= K.fromSpeed) {
+    if (K && !tech && runSp >= K.fromSpeed) {
       const rx = this.vel.x / runSp;
       const rz = this.vel.z / runSp;
       // Бег должен совпадать и с ходом мяча, и с намерением игрока: проброс
@@ -5159,8 +5705,12 @@ export class Player {
       vz = knock.rz * sp;
     } else {
       const keep = 1 - k * (1 - A.keepK);
-      vx = (ux * part.keepIn + this.vel.x * T.keepRun) * keep + ax * part.push * k;
-      vz = (uz * part.keepIn + this.vel.z * T.keepRun) * keep + az * part.push * k;
+      // Техничный приём гасит и СХОД мяча с корпуса, и направленный проброс:
+      // мяч кладут под ногу, а не отпускают в сторону
+      const kIn = part.keepIn * (tech ? TC.keepK : 1);
+      const kPush = part.push * (tech ? TC.pushK : 1);
+      vx = (ux * kIn + this.vel.x * T.keepRun) * keep + ax * kPush * k;
+      vz = (uz * kIn + this.vel.z * T.keepRun) * keep + az * kPush * k;
     }
 
     // ОШИБКА ПЕРВОГО КАСАНИЯ — из ситуации, а не из кубика поверх всего.
@@ -5184,6 +5734,7 @@ export class Player {
       E.turnAdd * k +
       E.pressAdd * press) * part.err * (knock ? K.errK : 1);
     err *= Math.max(0.35, 1 - E.skillK * (skill - 0.5) * 2);
+    if (tech) err *= TC.errK;
     err = Math.min(E.maxOut, err);
     // ОШИБКА — ЭТО УВОД ВБОК, А НЕ РАЗВОРОТ НАЗАД. Первая редакция бросала её
     // равномерно по кругу, и замер сразу это поймал: мяч сходит с корпуса на
@@ -5204,7 +5755,7 @@ export class Player {
     const along = vx * bx + vz * bz;
     if (along < 0) { vx -= bx * along; vz -= bz * along; } // назад — не приём, а отскок
 
-    const cap = knock ? K.out : part.out;
+    const cap = knock ? K.out : part.out * (tech ? TC.outK : 1);
     const sp = Math.hypot(vx, vz);
     if (sp > cap) {
       vx = (vx / sp) * cap;
@@ -5218,7 +5769,7 @@ export class Player {
     ball.afterTouch = 0;
     // ПРОБРОС НЕ ВЫКЛЮЧАЕТ ИГРОКА. Обычный приём ставит паузу 0.28 с — мяч
     // опускается, нога ждёт; на забеге эти 17 кадров и есть «сбитый темп»
-    this.kickCooldown = knock ? K.settle : T.settle;
+    this.kickCooldown = knock ? K.settle : T.settle * (tech ? TC.settleK : 1);
     this.trapCushion = T.cushionTime; // корпус «мягкий»: видно, что приняли
     this.trapTilt = knock ? K.tilt : part.tilt; // на пробросе фигура не тормозит
     this.lastTrapPart = c.part;

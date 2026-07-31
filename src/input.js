@@ -6,6 +6,8 @@
 //   D — удар (держать) / в защите: отбор
 //   A — навес          / в защите: подкат
 //   W — пас на ход     / в защите: ВРАТАРЬ НА ВЫХОД (держать)
+//   Shift — ФИНТ (нажать; какой — решает направление стрелок относительно
+//           курса) / удержание: техничный приём и близкий контроль
 //   Пробел — зарезервирован: игра в стеночку (будущее)
 // ВСЕ действия — с замахом: держишь кнопку — сила растёт, отпустил — исполнение.
 
@@ -93,9 +95,33 @@ export class Input {
 
     this.sprint = false; // E / ⚡ на таче / RB на геймпаде — мяч хуже контролируется
 
+    // ФИНТ (Shift на клавиатуре / LT-L2 на геймпаде, правило с 31.07.2026).
+    // У модификатора два смысла, как у Q: ФРОНТ НАЖАТИЯ — заказ финта (какого
+    // именно, решает направление стика относительно курса), УДЕРЖАНИЕ — приём
+    // мяча «техничнее» и близкий контроль в ведении.
+    //
+    // Курок выбран ЛЕВЫЙ ДАЛЬНИЙ, потому что правый дальний уже занят спринтом,
+    // и это не компромисс, а та же раскладка, что в EA FC: R2 — проброс на ход
+    // (у нас он и так живёт на спринте, см. trap.knock), L2 — контролируемое
+    // касание и обводка. Две противоположные ручки на двух разных курках.
+    //
+    // ФИНТ СРАБАТЫВАЕТ НА ОТПУСКАНИИ, И ЭТО НЕ ПРИДИРКА — та же развилка и
+    // то же решение, что у Q (см. комментарий к смене игрока). Shift
+    // одновременно и кнопка финта, и модификатор: Shift + УДАР — ложный удар.
+    // Пока финт висел на нажатии, замер стенда (feint-rig → feintGrid,
+    // 31.07.2026) показал ровно то, что и должен: заказ «ложный удар» выдавал
+    // СТЕПОВЕР — Shift выстреливал раньше, чем игрок успевал нажать D, а
+    // потом из того же нажатия вылетал настоящий удар, и мяч уезжал на 7.3 м.
+    // Теперь Shift, использованный модификатором, финта не даёт вовсе, а
+    // задержка на длительность нажатия (60–120 мс) не ощущается.
+    this.feintHeld = false;
+    this._feintQueued = false;
+    this._feintPrev = false;
+    this._feintUsed = false;
+
     this._padMove = { x: 0, z: 0 };
     this._pad = { pass: false, shot: false, cross: false, through: false, sprint: false };
-    this._touch = { pass: false, shot: false, sprint: false, cross: false, through: false };
+    this._touch = { pass: false, shot: false, sprint: false, cross: false, through: false, feint: false };
     this._swipeEvent = null; // свайп-удар с тача: {dir, power, curl}
 
     // Смена управляемого игрока (Фаза 2): Q / LB — событие-«фронт», не удержание.
@@ -181,6 +207,7 @@ export class Input {
     };
     bindHold('btn-pass', 'pass');
     bindHold('btn-sprint', 'sprint');
+    bindHold('btn-feint', 'feint');   // держать = техничный приём, нажать = финт
 
     // Кнопка ⇄ — смена игрока: событие по касанию (как Q), не удержание
     const switchBtn = document.getElementById('btn-switch');
@@ -357,6 +384,7 @@ export class Input {
     this._padMove.x = 0;
     this._padMove.z = 0;
     this._pad.pass = this._pad.shot = this._pad.cross = this._pad.through = false;
+    this._pad.feint = false;
     this._padSwitchHeld = false;
     if (!p) return;
     const ax = p.axes[0] || 0;
@@ -371,6 +399,7 @@ export class Input {
     this._pad.cross = btn(2);   // X / квадрат — навес (поменян местами с ударом)
     this._pad.through = btn(3); // Y / треугольник — пас на ход
     this._pad.sprint = trig(7); // RT / R2 (дальний правый курок) — спринт, перенесён с бампера RB
+    this._pad.feint = trig(6);  // LT / L2 (дальний ЛЕВЫЙ курок) — финт / техничный приём
     // LB / L1 — смена управляемого игрока (на ОТПУСКАНИИ, как Q на клавиатуре);
     // удержание LB — модификатор комбо: LB+A стеночка, LB+Y заброс на ход
     const sw = btn(4);
@@ -393,6 +422,13 @@ export class Input {
   consumeSwitch() {
     const v = this._switchQueued;
     this._switchQueued = false;
+    return v;
+  }
+
+  // Заказ финта: одноразовое событие (фронт Shift / LT)
+  consumeFeint() {
+    const v = this._feintQueued;
+    this._feintQueued = false;
     return v;
   }
 
@@ -426,6 +462,23 @@ export class Input {
 
     // Спринт — простое удержание
     this.sprint = this.keys.has('KeyE') || this._pad.sprint || this._touch.sprint;
+
+    // ФИНТ. Фронт нажатия ставится в очередь и живёт до тех пор, пока его не
+    // заберут: заказ финта, как и заказ удара, не имеет права сгореть в том же
+    // кадре — иначе на 120-герцовом планшете он терялся бы чаще, чем на 60 Гц.
+    // Забирает его Player.update один раз (consumeFeint).
+    const feintNow = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ||
+      this._pad.feint || this._touch.feint;
+    if (feintNow && !this._feintPrev) this._feintUsed = false;
+    // Боевая кнопка, нажатая при зажатом Shift, — это КОМБО (ложный удар),
+    // и финта на отпускании быть не должно
+    if (feintNow && (this.pass.held || this.through.held || this.shot.held ||
+        this._cross.state === 'charging')) {
+      this._feintUsed = true;
+    }
+    if (!feintNow && this._feintPrev && !this._feintUsed) this._feintQueued = true;
+    this._feintPrev = feintNow;
+    this.feintHeld = feintNow;
 
     // Прицел удара: пока держится замах, запоминаем последнее направление
     // стрелок — сработает, даже если стрелку отпустили чуть раньше кнопки

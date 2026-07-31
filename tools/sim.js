@@ -22,7 +22,10 @@
 const DEFAULT_FRAME = 1 / 60;
 
 // Ключи Match.stats, которые ведёт сам движок (Team.bump)
-const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', 'loose'];
+// Ключи снимаются ПОИМЁННО, поэтому новый счётчик в match.stats обязан
+// появиться и здесь — иначе отчёт падает на `undefined[0]` уже в агрегации
+const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', 'loose',
+  'feint', 'feintFail'];
 
 function zero2() {
   return [0, 0];
@@ -293,6 +296,11 @@ function summarize(perMatch, probe, ms) {
     holds: st('hold'),
     parries: st('parry'),
     loose: st('loose'),
+    // Финты (31.07.2026): без этих двух чисел разговор «не слишком ли дёшево
+    // даётся обыгрыш» снова превратился бы в «мне показалось». Ablation
+    // делается числом в конфиге (CONFIG.ai.feint.rate = 0), без правки кода
+    feints: st('feint'),
+    feintFails: st('feintFail'),
     tackles: pr('tackles'),
     boxTouchPct: pr('boxTouch').map((v) => Math.round((v / live) * 1000) / 10),
     finalThirdPct: pr('thirdFrames').map((v) => Math.round((v / live) * 1000) / 10),
@@ -310,7 +318,7 @@ function format(r) {
     `удары: ${p(r.shots)}  из штрафной: ${p(r.shotsBox)}  из убойной зоны: ${p(r.shotsKill)}  медиана дистанции: ${r.shotMedianDist} м`,
     `пасы: ${p(r.passes)}  точность %: ${r.passAcc.join(' / ')}  навесы: ${p(r.crosses)}`,
     `сейвы: ${p(r.saves)}  намертво: ${p(r.holds)}  отбой: ${p(r.parries)}  в опасную зону: ${p(r.loose)}`,
-    `подкаты: ${p(r.tackles)}`,
+    `подкаты: ${p(r.tackles)}  финты: ${p(r.feints)}  из них провалено: ${p(r.feintFails)}`,
     `владение %: ${r.possessionPct.join(' / ')}  финальная треть %: ${r.finalThirdPct.join(' / ')}  мяч под контролем в чужой штрафной %: ${r.boxTouchPct.join(' / ')}`,
   ].join('\n');
 }
