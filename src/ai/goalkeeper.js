@@ -28,11 +28,16 @@ function gauss() {
 }
 
 // Навыки вратаря из JSON состава (data/teams/*.json → squad[0].gk).
-// Нет данных — «средний кипер эпохи»: правило «данные ≠ код», состав может
-// не содержать характеристик, и ничего не должно ломаться.
-function gkSkill(p, key, def = 0.6) {
+// Нет данных — берём общий уровень эпохи из конфига: правило «данные ≠ код»,
+// состав может не содержать характеристик, и ничего не должно ломаться.
+// Раньше здесь стоял ЗАШИТЫЙ литерал 0.6, а поля `gk` нет ни у одного вратаря
+// ни в одном паке — то есть 0.6 доставалось всем четверым всегда. Теперь это
+// `CONFIG.ai.keeper.skill` и, стало быть, ручка уровня сложности, честно
+// общая для обоих вратарей (у кипера асимметрии человек/AI нет вовсе).
+function gkSkill(p, key, def = null) {
   const v = p.look && p.look.gk ? p.look.gk[key] : undefined;
-  return typeof v === 'number' ? Math.max(0, Math.min(1, v)) : def;
+  if (typeof v === 'number') return Math.max(0, Math.min(1, v));
+  return def != null ? def : CONFIG.ai.keeper.skill;
 }
 
 function gkState(p) {

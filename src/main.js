@@ -14,6 +14,9 @@ import { updateRim } from './rimlight.js';
 import { updateCrowd } from './sfx.js';
 import { setCrowdVolume } from './crowd.js';
 import { forceAudio, denyAudio } from './audioctx.js';
+import {
+  LEVELS, DEFAULT_LEVEL, applyDifficulty, askedLevel, currentLevel,
+} from './difficulty.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); // ступеньки = стиль PS1
@@ -34,6 +37,18 @@ const pyroLevel = (savedPyroRaw !== null && Number.isFinite(savedPyro)
   && savedPyro >= 0 && savedPyro <= 150) ? savedPyro : 100;
 if (scene.userData.flares) scene.userData.flares.setLevel(pyroLevel / 100);
 if (scene.userData.confetti) scene.userData.confetti.setLevel(pyroLevel / 100);
+
+// УРОВЕНЬ СЛОЖНОСТИ читаем тоже ДО создания матча. Технически он мог бы
+// применяться и позже (CONFIG нигде не кэшируется — и AI, и вратарь, и физика
+// берут поля внутри методов на каждом кадре), но расстановка снимается в
+// конструкторе Match, а заставка идёт уже по выбранному уровню. Это бесплатно
+// и снимает целый класс будущих «а это поле, оказывается, читалось раньше».
+// Ключ хранит СТРОКОВЫЙ id, а не индекс: Number(null) === 0, и уровень с
+// индексом 0 был бы неотличим от «ключа нет» (эта грабля в проекте уже дважды
+// стреляла — износ газона и пиротехника).
+const savedLevel = localStorage.getItem('f98.difficulty');
+applyDifficulty(askedLevel() ||
+  (LEVELS.some((l) => l.id === savedLevel) ? savedLevel : DEFAULT_LEVEL));
 
 const goals = scene.userData.goals;
 const ball = new Ball(scene, goals);
@@ -469,37 +484,103 @@ if (soundGate) {
   }, true);
 }
 
-// Помощь в ударах: слайдер 10–30%, живёт в CONFIG.shot.assist.level,
-// запоминается в localStorage — на iPad настройка переживает перезапуск
+// Помощь в ударах и пасах: слайдеры 10–30%, живут в CONFIG.shot.assist.level
+// и CONFIG.ai.humanPass.assist.level.
+//
+// У ЭТИХ ДВУХ ПОЛЕЙ ДВА ПИСАТЕЛЯ — уровень сложности и ползунок, — и без
+// разведения владельца получается ровно та ловушка, что была с ручками
+// грейдинга: человек однажды поставил 30 %, и на «Профессионале» у него
+// молча стоит помощь «Новичка», то есть уровень наполовину не работает.
+// Разводим «поколением», как GRADE_BASE и f98.gameSpeed2, только поколение
+// здесь — ID УРОВНЯ: сохранённые проценты применяются, ТОЛЬКО если человек
+// крутил их на этом же уровне. Смена уровня возвращает помощь к уровневой.
 const assistSlider = document.getElementById('set-assist');
 const assistVal = document.getElementById('set-assist-val');
-const savedAssist = Number(localStorage.getItem('f98.shotAssist'));
-if (savedAssist >= 10 && savedAssist <= 30) {
-  CONFIG.shot.assist.level = savedAssist / 100;
-}
-assistSlider.value = Math.round(CONFIG.shot.assist.level * 100);
-assistVal.textContent = assistSlider.value;
-assistSlider.addEventListener('input', () => {
-  CONFIG.shot.assist.level = Number(assistSlider.value) / 100;
-  assistVal.textContent = assistSlider.value;
-  try { localStorage.setItem('f98.shotAssist', assistSlider.value); } catch (e) { /* приватный режим */ }
-});
-
-// Помощь в пасах: слайдер 10–30%, живёт в CONFIG.ai.humanPass.assist.level,
-// запоминается в localStorage (та же схема, что помощь в ударах)
 const passSlider = document.getElementById('set-pass-assist');
 const passVal = document.getElementById('set-pass-assist-val');
-const savedPass = Number(localStorage.getItem('f98.passAssist'));
-if (savedPass >= 10 && savedPass <= 30) {
-  CONFIG.ai.humanPass.assist.level = savedPass / 100;
+const assistOwner = localStorage.getItem('f98.assistOwner');
+const levelNow = currentLevel();
+const mineAssist = levelNow && assistOwner === levelNow.id;
+
+// Одна функция на все входы (образец — applyCrowdVolume): у настройки с двумя
+// входами они иначе расходятся, и ползунок показывает одно, а игра играет другое
+function applyShotAssist(pct, save = false) {
+  const v = Math.max(10, Math.min(30, Math.round(pct)));
+  CONFIG.shot.assist.level = v / 100;
+  assistSlider.value = v;
+  assistVal.textContent = v;
+  if (save) remember('f98.shotAssist', v);
 }
-passSlider.value = Math.round(CONFIG.ai.humanPass.assist.level * 100);
-passVal.textContent = passSlider.value;
-passSlider.addEventListener('input', () => {
-  CONFIG.ai.humanPass.assist.level = Number(passSlider.value) / 100;
-  passVal.textContent = passSlider.value;
-  try { localStorage.setItem('f98.passAssist', passSlider.value); } catch (e) { /* приватный режим */ }
+
+function applyPassAssist(pct, save = false) {
+  const v = Math.max(10, Math.min(30, Math.round(pct)));
+  CONFIG.ai.humanPass.assist.level = v / 100;
+  passSlider.value = v;
+  passVal.textContent = v;
+  if (save) remember('f98.passAssist', v);
+}
+
+const savedAssist = Number(localStorage.getItem('f98.shotAssist'));
+applyShotAssist(mineAssist && savedAssist >= 10 && savedAssist <= 30
+  ? savedAssist : CONFIG.shot.assist.level * 100);
+const savedPass = Number(localStorage.getItem('f98.passAssist'));
+applyPassAssist(mineAssist && savedPass >= 10 && savedPass <= 30
+  ? savedPass : CONFIG.ai.humanPass.assist.level * 100);
+
+// Тронул ползунок — с этого момента помощь принадлежит человеку, но только
+// на ТЕКУЩЕМ уровне: сменит уровень — вернётся уровневая
+const claimAssist = () => {
+  const l = currentLevel();
+  if (l) remember('f98.assistOwner', l.id);
+};
+assistSlider.addEventListener('input', () => {
+  applyShotAssist(Number(assistSlider.value), true);
+  claimAssist();
 });
+passSlider.addEventListener('input', () => {
+  applyPassAssist(Number(passSlider.value), true);
+  claimAssist();
+});
+
+// --- Уровень сложности ---
+// Сам уровень уже применён выше (до создания матча) — здесь только контрол.
+// Он идёт ПОСЛЕ ползунков помощи нарочно: уровень задаёт помощь в ударах и
+// пасах, а ползунки остаются ручной поправкой поверх. На загрузке порядок
+// такой: уровень → сохранённое значение ползунка (если человек его трогал);
+// при СМЕНЕ уровня ползунки возвращаются к уровневым и это запоминается.
+// Иначе получилась бы ровно та ловушка, что была с ручками грейдинга: два
+// писателя в одно поле и молча удвоенный эффект.
+const diffSelect = document.getElementById('set-difficulty');
+const diffNote = document.getElementById('set-difficulty-note');
+
+// Смена уровня возвращает помощь к уровневой и снимает «владение» человека:
+// иначе на новом уровне остались бы старые проценты (см. комментарий выше)
+function syncAssistUI() {
+  applyShotAssist(CONFIG.shot.assist.level * 100);
+  applyPassAssist(CONFIG.ai.humanPass.assist.level * 100);
+  try { localStorage.removeItem('f98.assistOwner'); } catch (e) { /* приватный режим */ }
+}
+
+if (diffSelect) {
+  for (const level of LEVELS) {
+    const opt = document.createElement('option');
+    opt.value = level.id;
+    opt.textContent = level.name;
+    diffSelect.appendChild(opt);
+  }
+  const showLevel = (level) => {
+    if (!level) return;
+    diffSelect.value = level.id;
+    if (diffNote) diffNote.textContent = level.comment || '';
+  };
+  showLevel(currentLevel());
+  diffSelect.addEventListener('change', () => {
+    const level = applyDifficulty(diffSelect.value);
+    remember('f98.difficulty', diffSelect.value);
+    showLevel(level);
+    syncAssistUI();
+  });
+}
 
 // Пиротехника: множитель бюджета файеров. 0 — выкл (дым — самая дорогая
 // часть кадра на планшете), 100% — как задумано, 150% — вовсю.

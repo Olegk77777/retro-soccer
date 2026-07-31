@@ -135,19 +135,20 @@ export function updateFieldPlayer(p, dt, ball) {
         bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
     : isTrapper
       ? p.bodyContactPoint(bp).reachable
-      : (myBallDist < AP.prepareRadius &&
+      : (myBallDist < AP.ai.prepare &&
         (() => {
           // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
           // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
           // пролетающий мимо мяч и молотил воздух (замер симуляцией матча)
-          const pre = p.predictAerialContact(ball, AP.readHorizon);
+          const pre = p.predictAerialContact(ball, AP.ai.horizon);
           return pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
-            pre.dist <= AP.sync.hitRadius * 1.5;
+            pre.dist <= AP.sync.hitRadius * AP.ai.hitK;
         })());
-  if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' && ball.vel.y < 2 &&
+  if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' &&
+      ball.vel.y < AP.ai.velY &&
       // Полная скорость: крутая перекидка почти без горизонтали, но падает
       // быстро — иначе адресат не принимал её и мяч «отскакивал» мимо ног
-      ball.vel.length() > 4) {
+      ball.vel.length() > AP.ai.minSpeed) {
     aerialPlay(p, ball, diving);
     // Замах создан — ноги в тот же кадр идут к его точке, а не встают. Стоячее
     // замыкание в PES слабее и шумнее по построению (aerial.standNoise), и
@@ -255,6 +256,15 @@ export function updateFieldPlayer(p, dt, ball) {
       sprint = r.sprint;
       face = r.face;
       speedCap = r.speedCap;
+    } else if (team.airGuards.has(p)) {
+      // ВЫХОД НА ЧУЖУЮ ПОДАЧУ: назначен тренером (Team.onCrossDefend) —
+      // бежим В ТОЧКУ ПРИЛЁТА, а не за тенью мяча и не за своим подопечным.
+      // Играть в мяч дальше будет общая ветка второго этажа выше по функции:
+      // она сработает, как только мяч подойдёт на aerial.ai.prepare
+      const t = team.airGuards.get(p);
+      move = arrive(pos.x, pos.z, t.x, t.z, 1.6);
+      sprint = Math.hypot(t.x - pos.x, t.z - pos.z) > 2;
+      if (!sprint) face = Math.atan2(bp.x - pos.x, bp.z - pos.z);
     } else if (team.shortRunner === p && team.shortTarget) {
       // Приход в ноги: показаться накоротке владельцу под прессингом.
       // Спринтом и лицом к мячу — иначе пас придёт в спину и его не примут
@@ -366,9 +376,18 @@ export function updateFieldPlayer(p, dt, ball) {
 
   // Расталкивание со всеми игроками: у мяча не вырастает куча-мала.
   // Владельцу — вполсилы: в толчее штрафной боковой пинок съедал долю его
-  // вектора вперёд и буквально выталкивал его из зоны удара
+  // вектора вперёд и буквально выталкивал его из зоны удара.
+  // ТА ЖЕ БЕДА У БОРЬБЫ НА ВТОРОМ ЭТАЖЕ, и она вылезла ровно тогда, когда у
+  // подачи появился второй претендент: замер crossDuel показал «никто 95 %»
+  // при ближайшем атакующем в 2.3 м и защитнике в 2.0 м — оба честно пришли
+  // в точку прилёта и там ОТТОЛКНУЛИ ДРУГ ДРУГА от мяча. В воздухе так не
+  // бывает: там как раз идут корпус в корпус. Множитель по умолчанию 1 —
+  // «Новичок» не меняется, уровни его снижают
+  const aerialDuel = p.aerialStrike ||
+    (p.team && p.team.airGuards && p.team.airGuards.has(p));
+  const pushK = p.isToucher ? 0.4 : (aerialDuel ? AI.separationAerial : 1);
   const sep = separation(p, match.allPlayers, AI.separationRadius,
-    p.isToucher ? AI.separationPush * 0.4 : AI.separationPush);
+    AI.separationPush * pushK);
   move = { x: move.x + sep.x, z: move.z + sep.z };
 
   // `ball` идёт в «ноги» ради финта: withBall мог начать его прямо в этом
@@ -470,7 +489,11 @@ function pressBall(p, dt, ball, match) {
     };
   }
 
-  const inOurHalf = team.side * bp.x < 0;
+  // Граница агрессивного прессинга. Было зашито «своя половина» (`< 0`),
+  // теперь это число: pressLine метров ВГЛУБЬ своей половины, где первый
+  // защитник ещё идёт в отбор, а не сдерживает (CONFIG.ai.defence.pressLine,
+  // 0 — прежнее поведение)
+  const inOurHalf = team.side * bp.x < -D.pressLine;
   if (!inOurHalf) {
     // Высокий прессинг: на владельца с упреждением по его курсу (soccer.py)
     const ospd = Math.hypot(owner.vel.x, owner.vel.z);
@@ -504,7 +527,7 @@ function pressBall(p, dt, ball, match) {
   }
   return {
     move: arrive(pos.x, pos.z, tx, tz, 1.4),
-    sprint: toBlock > 7,
+    sprint: toBlock > D.jockeySprint,
     face: Math.atan2(op.x - pos.x, op.z - pos.z), // лицом к владельцу
     speedCap,
   };

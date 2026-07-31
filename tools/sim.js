@@ -25,7 +25,7 @@ const DEFAULT_FRAME = 1 / 60;
 // Ключи снимаются ПОИМЁННО, поэтому новый счётчик в match.stats обязан
 // появиться и здесь — иначе отчёт падает на `undefined[0]` уже в агрегации
 const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', 'loose',
-  'feint', 'feintFail'];
+  'feint', 'feintFail', 'run', 'third', 'overlap', 'short'];
 
 function zero2() {
   return [0, 0];
@@ -68,6 +68,20 @@ export async function runSim(opts = {}) {
   const DBG = window.DBG;
   if (!DBG || !DBG.match) throw new Error('Матч ещё не загрузился — подожди секунду и повтори');
   const { match, ball, goals, CONFIG } = DBG;
+
+  // Уровень сложности: runSim({ difficulty: 'pro' }) — чтобы А/Б по уровням
+  // делался одной строкой, а не правкой конфига руками. Прежний уровень
+  // возвращаем в finally, как и всё остальное, что стенд патчит.
+  // ВНИМАНИЕ: множитель темпа (CONFIG.gameSpeed) стенд по-прежнему НЕ
+  // применяет — он меряет игровое время, и эталоны сравнимы при любом темпе
+  let diff = null;
+  let diffBack = null;
+  if (opts.difficulty) {
+    diff = await import('../src/difficulty.js');
+    const was = diff.currentLevel();
+    diffBack = was ? was.id : null;
+    diff.applyDifficulty(opts.difficulty);
+  }
 
   const F = CONFIG.field;
   const boxDepth = 16.5;
@@ -187,6 +201,7 @@ export async function runSim(opts = {}) {
     return report;
   } finally {
     // --- Возвращаем игру человеку ---
+    if (diff && diffBack) diff.applyDifficulty(diffBack);
     window.requestAnimationFrame = origRAF;
     if (pendingFrame) origRAF(pendingFrame); // главный цикл продолжается
     TeamProto.bump = origBump;
@@ -301,6 +316,13 @@ function summarize(perMatch, probe, ms) {
     // делается числом в конфиге (CONFIG.ai.feint.rate = 0), без правки кода
     feints: st('feint'),
     feintFails: st('feintFail'),
+    // Комбинации «тренера»: забеги за спину и стеночки, игра третьего,
+    // подключения фулбека, приходы в ноги. Без этих чисел жалоба «у AI нет
+    // комбинаций» неизмерима — связки взводились, но не считались нигде
+    runs: st('run'),
+    thirds: st('third'),
+    overlaps: st('overlap'),
+    shorts: st('short'),
     tackles: pr('tackles'),
     boxTouchPct: pr('boxTouch').map((v) => Math.round((v / live) * 1000) / 10),
     finalThirdPct: pr('thirdFrames').map((v) => Math.round((v / live) * 1000) / 10),
@@ -319,6 +341,7 @@ function format(r) {
     `пасы: ${p(r.passes)}  точность %: ${r.passAcc.join(' / ')}  навесы: ${p(r.crosses)}`,
     `сейвы: ${p(r.saves)}  намертво: ${p(r.holds)}  отбой: ${p(r.parries)}  в опасную зону: ${p(r.loose)}`,
     `подкаты: ${p(r.tackles)}  финты: ${p(r.feints)}  из них провалено: ${p(r.feintFails)}`,
+    `комбинации — забеги: ${p(r.runs)}  игра третьего: ${p(r.thirds)}  подключения: ${p(r.overlaps)}  приход в ноги: ${p(r.shorts)}`,
     `владение %: ${r.possessionPct.join(' / ')}  финальная треть %: ${r.finalThirdPct.join(' / ')}  мяч под контролем в чужой штрафной %: ${r.boxTouchPct.join(' / ')}`,
   ].join('\n');
 }

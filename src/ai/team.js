@@ -69,6 +69,15 @@ export class Team {
     this.boxRuns = new Map();
     this.crossAir = 0; // сек: наша подача в полёте — рывки живут, врывание на прилёт
 
+    // ВЫХОД НА ЧУЖУЮ ПОДАЧУ (правило с 31.07.2026): защитник → точка прилёта.
+    // Зеркало boxRuns для обороняющейся стороны. Раньше на подачу в нашу
+    // штрафную бежал ровно один chaser, а четвёрка держала опеку goal-side —
+    // то есть ЗА спиной врывающегося (замер crossDuel: 0 выигранных мячей
+    // из 10). Живёт ровно время полёта: назначение с истёкшим сроком хуже,
+    // чем его отсутствие — защитник останется стоять в точке, где ничего нет
+    this.airGuards = new Map();
+    this.airGuardT = 0;
+
     // Support spots Бакленда: сетка точек на половине соперника
     const SP = CONFIG.ai.attack.spot;
     this._spots = [];
@@ -159,6 +168,18 @@ export class Team {
       if (bpA.y < 0.5 && ball.vel.y <= 0) this.crossAir = 0;
     }
 
+    // Выход на ЧУЖУЮ подачу живёт то же окно, что сама подача. Снимаем и по
+    // приземлению мяча: дальше это обычный подбор, и держать защитника на
+    // старой точке прилёта — значит уводить его от эпизода
+    if (this.airGuardT > 0) {
+      this.airGuardT -= dt;
+      const bpG = ball.mesh.position;
+      if (this.airGuardT <= 0 || (bpG.y < 0.5 && ball.vel.y <= 0)) {
+        this.airGuardT = 0;
+        this.airGuards.clear();
+      }
+    }
+
     // Раннер: рывок живёт durationSec или пока не потеряли мяч
     if (this.runner) {
       this.runnerTimer -= dt;
@@ -196,6 +217,7 @@ export class Team {
         this.thirdMan = a.c;
         this.thirdManTarget = a.target;
         this.thirdManTimer = CONFIG.ai.combo.thirdMan.ttl;
+        this.bump('third');
         a.c.runCd = CONFIG.ai.attack.offBall.cooldown;
         this._thirdArm = null;
       }
@@ -416,6 +438,7 @@ export class Team {
     };
     this.shortTimer = S.ttl;
     best.runCd = C.cooldown;
+    this.bump('short');
   }
 
   // ИГРА ТРЕТЬЕГО (third man run). Взводится в момент паса А→В: если пас
@@ -538,6 +561,14 @@ export class Team {
     if (!land) return null; // мгновенный тычок — не фланговый эпизод
     this.crossAir = land.t + 0.4;
 
+    // Соперник обязан узнать о подаче ТУТ ЖЕ, и раньше собственных наших
+    // проверок: даже если замыкать некому, обороне на этот мяч выходить.
+    // Вызовов onCrossStruck четыре (match.js, player.js, fieldplayer.js), и
+    // вешать защитную половину на каждый — верный способ забыть один: новый
+    // вид подачи молча остался бы без сопротивления. Поэтому зеркало здесь
+    const foe = this.match.otherTeam(this);
+    if (foe && foe.onCrossDefend) foe.onCrossDefend(ball, land);
+
     // Кандидаты: врывающиеся + вся атакующая шестёрка (позиции 5..10)
     const pool = [...this.boxRuns.keys(), ...this.players.slice(5)]
       .filter((p, i, arr) => arr.indexOf(p) === i &&
@@ -566,6 +597,54 @@ export class Team {
     this.receiveTarget = { x: land.x, z: land.z };
     this.receiveTimer = Math.max(CONFIG.ai.receiveGiveUp, land.t + 0.8);
     return best;
+  }
+
+  // ВЫХОД ЗАЩИТНИКА НА ПОДАЧУ — зеркало onCrossStruck для обороняющихся.
+  // Кто-то обязан играть В МЯЧ, а не в человека: персональная опека ставит
+  // защитника goal-side, то есть ЗА спиной врывающегося, и на верховой мяч он
+  // не претендует вовсе (замер tools/defence-rig.js → crossDuel до правки:
+  // атака 60 %, оборона 0 %, вратарь 0 %).
+  //
+  // Выбираем по тому же критерию, что атака, — минимальному времени прихода
+  // в точку прилёта. Вратарь сюда не входит: у него своя ветка выхода
+  // (tryClaim), и две логики на один мяч уже ловились в проекте как «двое
+  // бегут, никто не играет». Управляемый человеком тоже не входит — за него
+  // решает Олег, и это заодно делает механику компьютерной по построению.
+  onCrossDefend(ball, land) {
+    const G = CONFIG.ai.defence.aerialGuard;
+    this.airGuards.clear();
+    this.airGuardT = 0;
+    if (!G || G.count <= 0 || !land) return;
+    // Подача не в нашу зону — не наше дело
+    const F = CONFIG.field;
+    const depth = F.length / 2 + this.side * land.x;   // м от НАШИХ ворот
+    if (depth > G.range) return;
+
+    const spd = CONFIG.player.speed * CONFIG.player.sprintFactor * CONFIG.ai.speedFactor;
+    const pool = this.players.filter((p) =>
+      !p.isKeeper && p !== this.match.controlled && p.downT <= 0 && p.tackleT <= 0);
+    const cand = [];
+    for (const p of pool) {
+      const pp = p.group.position;
+      const need = Math.hypot(land.x - pp.x, land.z - pp.z) / spd;
+      // ЕДИНСТВЕННОЕ УСЛОВИЕ — УСПЕТЬ К МЯЧУ, а не «успеть раньше соперника».
+      // Первая редакция требовала выиграть гонку у ближайшего атакующего, и
+      // замер показал, чего это стоит: выбрасывалось 0.1 защитника из двух
+      // заказанных, то есть механика не работала вовсе. Иначе и быть не могло —
+      // подача летит РОВНО туда, где уже стоит врывающийся, и «раньше него» не
+      // успевает никто. Но борьба на втором этаже и есть встреча двоих в одной
+      // точке: защитник не обязан выигрывать гонку, он обязан ПРИЙТИ.
+      // Предохранитель остаётся, только он теперь про безнадёжность: опоздал
+      // больше чем на `late` — не беги, оголишь зону, а мяч всё равно не тронешь
+      if (need > land.t + G.late) continue;
+      cand.push({ p, cost: need });
+    }
+    if (!cand.length) return;
+    cand.sort((a, b) => a.cost - b.cost);
+    for (const c of cand.slice(0, G.count)) {
+      this.airGuards.set(c.p, { x: land.x, z: land.z });
+    }
+    if (this.airGuards.size) this.airGuardT = land.t + G.ttl;
   }
 
   // Оценка support spots (веса Params.ini Бакленда + свободная зона):
@@ -646,6 +725,7 @@ export class Team {
     this.runner = runner;
     this.runnerTarget = { x: tx, z: tz };
     this.runnerTimer = R.durationSec;
+    this.bump('run');
   }
 
   // ОТКРЫВАНИЕ ПОД ПАС, ПОКА КНОПКА ЕЩЁ ЗАЖАТА (правило с 28.07.2026).
@@ -728,6 +808,7 @@ export class Team {
     this.runner = passer;
     this.runnerTarget = { x: tx, z: Math.max(-24, Math.min(24, pp.z * 0.85)) };
     this.runnerTimer = C.ttl;
+    this.bump('run');
   }
 
   // Ручная СТЕНОЧКА (Q/LB + ПАС, фидбек Олега 22.07.2026): игрок сам заказал
@@ -780,6 +861,7 @@ export class Team {
     this.overlapper = fb;
     this.overlapTarget = { x: tx, z: tz };
     this.overlapTimer = C.durationSec;
+    this.bump('overlap');
   }
 
   // Высота линии защиты — считается ОТ МЯЧА (ресёрч 09: формула UvA/RoboCup):

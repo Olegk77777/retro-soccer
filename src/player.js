@@ -4621,8 +4621,12 @@ export class Player {
     // ждать дальше нечего, иначе мяч уйдёт «сквозь» игрока
     const passed = !wasClosing && as.minDist <= A.prepareRadius && as.t > 0.05;
     // У заявки человека потолок ожидания — её собственное окно: он держит
-    // кнопку и ждёт мяч сознательно (см. beginAerialStrike)
-    const timeout = as.t >= (as.claimed ? as.hitAt : A.maxWait) + SY.lateWait;
+    // кнопку и ждёт мяч сознательно (см. beginAerialStrike). У замаха AI своё
+    // окно (`aerial.ai.wait`): человеку оно и так больше, а компьютеру его
+    // поднимают уровни сложности, и общий maxWait обрубал бы такой замах
+    // ровно на 0.35 с — то есть правка конфига молча не работала бы
+    const cap = as.claimed ? as.hitAt : (as.aiVel ? A.ai.wait : A.maxWait);
+    const timeout = as.t >= cap + SY.lateWait;
     // Кадр удара: либо доехал прогноз, либо клип дошёл до измеренного кадра
     // контакта — по определению это один и тот же миг, вторая проверка страхует.
     // Округляем к БЛИЖАЙШЕМУ кадру (полшага вперёд): иначе на быстром клипе
@@ -5803,8 +5807,8 @@ export class Player {
     const SY = A.sync;
     const d = Math.hypot(dir.x, dir.z) || 1;
     const ndir = { x: dir.x / d, z: dir.z / d };
-    const hit = this.predictAerialContact(ball, A.readHorizon);
-    const tHit = Math.max(SY.leadMin, Math.min(A.maxWait, hit.t));
+    const hit = this.predictAerialContact(ball, A.ai.horizon);
+    const tHit = Math.max(SY.leadMin, Math.min(A.ai.wait, hit.t));
     // Стиль общий с человеческой веткой. «Спиной» здесь считается к тому, куда
     // игрок собрался бить: верховое касание AI бывает и выносом от своих ворот,
     // и скидкой в центре поля — чужие ворота там ни при чём.

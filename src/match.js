@@ -130,6 +130,12 @@ export class Match {
       // разговор «не слишком ли дёшево даётся обыгрыш» снова превратился бы
       // в «мне показалось» — а автосимуляция считает именно по ним
       feint: [0, 0], feintFail: [0, 0],
+      // Комбинации «тренера» (31.07.2026). Жалоба заказчика «у AI вообще нет
+      // комбинаций» была неизмерима: связки взводились, но ни одна из них не
+      // инкрементила ничего, и проверить «стало больше» было нечем. Теперь
+      // считаем каждую: стеночка и забег за спину (run), игра третьего
+      // (third), подключение фулбека (overlap), приход в ноги (short)
+      run: [0, 0], third: [0, 0], overlap: [0, 0], short: [0, 0],
     };
     // Сколько сейвов зал уже отреагировал «ахом». Считаем ПО СТАТИСТИКЕ, а не
     // хуками в goalkeeper.js: счётчики и так растут ровно в момент касания
@@ -291,6 +297,8 @@ export class Match {
       team.bestSpot = null;
       team.boxRuns.clear();
       team.crossAir = 0;
+      team.airGuards.clear();   // выход на подачу — такое же назначение
+      team.airGuardT = 0;
       team.defLineX = team.defLineTarget(this._centerBall); // линия сразу на месте
       for (const p of team.players) {
         const home = team.homeTarget(p, this._centerBall);
@@ -1232,6 +1240,8 @@ export class Match {
       t.decoyTarget = null;
       t.crossAir = 0;
       t.boxRuns.clear();
+      t.airGuards.clear();
+      t.airGuardT = 0;
     }
     if (this.controlled) {
       this.controlled.pendingStrike = null;
