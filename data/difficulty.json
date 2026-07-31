@@ -1,6 +1,7 @@
 {
   "_комментарий": "УРОВНИ СЛОЖНОСТИ. Форма как у data/tv-presets.json: уровень описывает только ОТЛИЧИЯ от src/config.js, всё неупомянутое берётся оттуда. «Новичок» — пустой набор отличий, то есть игра ровно такая, какой она была до введения уровней. Пути плоские, с точками; несуществующего пути writePath не создаёт, а ругается в консоль (src/difficulty.js). Числа — данные, менять можно смело; после правки прогнать tools/sim.js (две выборки по 8 матчей на уровень) и tools/defence-rig.js по свежей странице.",
-  "_не_трогать": "Есть поля с записанными эталонами стендов, их уровни НЕ двигают: keeper.handReach / diveSpeed / diveTime (их сумма 2.93 м намеренно меньше полуширины ворот), keeper.rushCoverK, keeper.airDepthFrom / airDepthKeep, keeper.readHorizon, keeper.depthFar, player.aerial.sync.contactRadius, player.aerial.stage.lead, player.aerial.claim.paceLead, player.aerial.prepareRadius (это ЧЕЛОВЕЧЕСКИЙ порог, у AI своё окно aerial.ai), player.turnMax, ai.passModel.qSpace, ai.speedFactor (он поигроцкий, а не покомандный: ускоряет и партнёров человека, и обоих вратарей, и входит в шесть моделей времени).",
+  "_не_трогать": "Есть поля с записанными эталонами стендов, их уровни НЕ двигают: keeper.handReach / diveSpeed / diveTime (их сумма 2.93 м намеренно меньше полуширины ворот), keeper.rushCoverK, keeper.airDepthFrom / airDepthKeep, keeper.readHorizon, keeper.depthFar, player.aerial.sync.contactRadius, player.aerial.stage.lead, player.aerial.claim.paceLead, player.aerial.prepareRadius (это ЧЕЛОВЕЧЕСКИЙ порог, у AI своё окно aerial.ai), player.turnMax, ai.passModel.qSpace.",
+  "_про_speedFactor": "ai.speedFactor ДО 31.07.2026 стоял в списке нетронутых как «поигроцкий, а не покомандный». Разбор показал, что это и есть ГЛАВНЫЙ рычаг уровня, а прежний довод был перевёрнут. Он не покомандный — верно, но он единственное поле в игре, которое отделяет ЧЕЛОВЕКА от всех 21 компьютерных фигур сразу (player.js: скорость = speed × (controlled ? 1 : speedFactor)). Все остальные 120 перекрытий уровня достаются ОБЕИМ командам поровну и потому гасят друг друга — автосимуляция это и печатает: 1.69 / 1.63 / 1.81 гола на трёх уровнях, то есть уровень не меняет ничего, кроме помощи в прицеле. Единственный, кому 0.94 достаётся как ФОРА, — человек за клавишами: 6 % скорости это 1.9 м на тридцатиметровом рывке, то есть он по построению убегает от любого защитника и догоняет любого нападающего. Возражение «поле входит в шесть моделей времени» довод НЕ отменяет: значение 1.0 делает эти модели ТОЧНЕЕ (соперник и правда бежит с этой скоростью), а не грубее. Проверка того, что рычаг именно человеческий: на автосимуляции (AI против AI) он обязан не менять НИЧЕГО.",
   "default": "rookie",
   "levels": [
     {
@@ -16,6 +17,7 @@
       "overrides": {
         "ai.decideInterval": 0.22,
         "ai.coachTick": 0.2,
+        "ai.speedFactor": 0.97,
 
         "ai.phase.enabled": true,
         "ai.phase.hold": 0.9,
@@ -104,9 +106,11 @@
         "ai.defence.aerialGuard.late": 0.2,
         "player.aerial.ai.prepare": 4.5,
         "player.aerial.ai.horizon": 1.9,
-        "player.aerial.ai.wait": 0.5,
+        "player.aerial.ai.lead": 1.3,
+        "player.aerial.ai.hold": 0.7,
+        "player.aerial.ai.waitGap": 1.7,
         "player.aerial.ai.hitK": 1.8,
-        "player.aerial.ai.velY": 4,
+        "player.aerial.ai.velY": 5,
         "player.aerial.ai.minSpeed": 3,
         "player.aerial.contest.edge": 0.08,
         "ai.aerial.headerNoise": 1.8,
@@ -170,6 +174,7 @@
       "overrides": {
         "ai.decideInterval": 0.2,
         "ai.coachTick": 0.16,
+        "ai.speedFactor": 1.0,
 
         "ai.phase.enabled": true,
         "ai.phase.hold": 0.7,
@@ -258,7 +263,9 @@
         "ai.defence.aerialGuard.late": 0.35,
         "player.aerial.ai.prepare": 6.0,
         "player.aerial.ai.horizon": 2.4,
-        "player.aerial.ai.wait": 0.65,
+        "player.aerial.ai.lead": 1.6,
+        "player.aerial.ai.hold": 0.85,
+        "player.aerial.ai.waitGap": 1.9,
         "player.aerial.ai.hitK": 2.1,
         "player.aerial.ai.velY": 6,
         "player.aerial.ai.minSpeed": 2,

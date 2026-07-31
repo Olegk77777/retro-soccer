@@ -372,6 +372,113 @@ function setupCross(match, ball, A, B, CONFIG, flank, deep = 20) {
   return crosser;
 }
 
+// ===== 1б. ТРАССА ОДНОЙ ПОДАЧИ: ПОЧЕМУ НИКТО НЕ СЫГРАЛ =====
+//
+// `crossDuel` отвечает «кто сыграл», но на вопрос «почему НЕ сыграл никто»
+// ответить не может: и 80 % «никто» при ближайшем игроке в 2.3 м, и 80 % при
+// пустой штрафной печатаются одинаково. Гейтов на входе в верховую борьбу
+// пять (`src/ai/fieldplayer.js`), и молчат они молча. Трасса повторяет их один
+// в один и печатает по кадрам, какой именно закрыт.
+//
+//   await D.crossTrace({ deep: 20 })
+export async function crossTrace(opts = {}) {
+  const { match, ball, goals, CONFIG } = window.DBG;
+  const deep = opts.deep != null ? opts.deep : 20;
+  const flank = opts.flank != null ? opts.flank : -1;
+  const settle = opts.settle != null ? opts.settle : 110;
+  const window_ = opts.window != null ? opts.window : 150;
+  const done = begin(match);
+  match.humanTeam = { players: [], fieldPlayers: [], receiver: null, receiveTimer: 0 };
+  match.setControlled = function () { this.controlled = null; };
+  match.updateSwitching = function () { this.input.consumeSwitch(); };
+  match.controlled = null;
+
+  const rows = [];
+  try {
+    const A = match.teams[0];
+    const B = match.teams[1];
+    const crosser = setupCross(match, ball, A, B, CONFIG, flank, deep);
+    const cp = { x: crosser.group.position.x, z: crosser.group.position.z };
+    for (let i = 0; i < settle; i += 1) {
+      crosser.group.position.set(cp.x, 0, cp.z);
+      crosser.vel.set(0, 0, 0);
+      crosser.kickCooldown = 0.5;
+      if (crosser.ai) crosser.ai.decideCd = 1;
+      ball.mesh.position.set(cp.x, CONFIG.ball.radius, cp.z + flank * 0.4);
+      ball.vel.set(0, 0, 0);
+      step(match, ball, goals, null);
+    }
+    crosser.kickCooldown = 0;
+
+    const AC = CONFIG.ai.attack.cross;
+    const F = CONFIG.field;
+    const t = pickTarget(A, crosser, CONFIG);
+    if (!t) { console.warn('адресата нет'); return null; }
+    const dx = t.x - cp.x;
+    const dz = t.z - cp.z;
+    const dist = Math.hypot(dx, dz);
+    const nearByline = A.side * cp.x > F.length / 2 - AC.deepX;
+    const theta = ((nearByline ? AC.lowAngle : AC.angle) * Math.PI) / 180;
+    const power = Math.max(10, Math.min(32,
+      loftPower(dist, theta, CONFIG.player.aerial.contactY, 6, 34)));
+    crosser.aiKick(ball, { x: dx / dist, z: dz / dist }, power, power * Math.tan(theta), 0, 'cross');
+    A.onCrossStruck(ball);
+
+    const AP = CONFIG.player.aerial;
+    const AI = CONFIG.ai;
+    let wasUp = false;
+    for (let i = 0; i < window_; i += 1) {
+      step(match, ball, goals, null);
+      const bp = ball.mesh.position;
+      // Мяч поднимается не в первом кадре: обрывать трассу по «мяч низко»
+      // можно только ПОСЛЕ того, как он реально взлетел
+      if (bp.y > 1.2) wasUp = true;
+      if (wasUp && bp.y < 0.6) break;
+      // Три ближайших к мячу полевых — только они и могут бороться
+      const near = match.allPlayers
+        .filter((p) => !p.isKeeper && p !== crosser)
+        .map((p) => ({
+          p,
+          d: Math.hypot(p.group.position.x - bp.x, p.group.position.z - bp.z),
+        }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 3);
+      for (const { p, d } of near) {
+        if (d > 9) continue;
+        const team = p.team;
+        const pre = p.predictAerialContact(ball, AP.ai.horizon);
+        const toGoal = Math.hypot(team.attackGoalX - p.group.position.x, p.group.position.z);
+        rows.push({
+          кадр: i,
+          'мяч y': Math.round(bp.y * 100) / 100,
+          'мяч vy': Math.round(ball.vel.y * 10) / 10,
+          'мяч v': Math.round(ball.vel.length() * 10) / 10,
+          кто: `${team === A ? 'А' : 'О'}${p.homeIdx}`,
+          'до мяча': Math.round(d * 100) / 100,
+          роль: team.receiver === p ? 'адресат'
+            : (team.airGuards && team.airGuards.has(p) ? 'страж' : '—'),
+          'g:дист': d < AP.ai.prepare,
+          'g:vy': ball.vel.y < AP.ai.velY,
+          'g:vmin': ball.vel.length() > AP.ai.minSpeed,
+          'g:cd': p.kickCooldown <= 0,
+          трэппер: team.receiver === p && toGoal >= AI.aerial.headerRange,
+          'прогноз y': Math.round(pre.y * 100) / 100,
+          'прогноз зазор': Math.round(pre.dist * 100) / 100,
+          'g:прогноз': pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
+            pre.dist <= AP.sync.hitRadius * AP.ai.hitK,
+          замах: !!p.aerialStrike,
+        });
+      }
+    }
+    console.table(rows);
+    window.CROSSTRACE = rows;
+    return rows;
+  } finally {
+    done();
+    match.kickoff(0);
+  }
+}
+
 // ===== 2. ОБВОДКА БЕЗ ФИНТА =====
 
 // Человек ведёт мяч прямо на защитника на спринте и НЕ финтит. Это ровно та
@@ -499,5 +606,6 @@ function setupRun(match, ball, team, foe, carrier, def, CONFIG, gap0 = 8) {
 
 if (typeof window !== 'undefined') {
   window.crossDuel = crossDuel;
+  window.crossTrace = crossTrace;
   window.runPast = runPast;
 }

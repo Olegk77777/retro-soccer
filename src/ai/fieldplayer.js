@@ -138,15 +138,29 @@ export function updateFieldPlayer(p, dt, ball) {
         bp.y >= AP.dive.minY && bp.y <= AP.dive.maxY)
     : isTrapper
       ? p.bodyContactPoint(bp).reachable
-      : (myBallDist < AP.ai.prepare &&
-        (() => {
-          // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
-          // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
-          // пролетающий мимо мяч и молотил воздух (замер симуляцией матча)
-          const pre = p.predictAerialContact(ball, AP.ai.horizon);
-          return pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
-            pre.dist <= AP.sync.hitRadius * AP.ai.hitK;
-        })());
+      : (() => {
+        // Замах только если прогноз нашёл НАСТОЯЩИЙ контакт: мяч действительно
+        // придёт на бутсу/лоб. Без этой проверки AI начинал замах под любой
+        // пролетающий мимо мяч и молотил воздух (замер симуляцией матча).
+        // Прогноз честно симулирует и полёт мяча, и БЕГ игрока к точке, так
+        // что он же и отсекает далёких: с 15 м зазор не сойдётся.
+        const pre = p.predictAerialContact(ball, AP.ai.horizon);
+        if (!(pre.y > CONFIG.player.kickMaxBallY && pre.y <= AP.maxY &&
+          pre.dist <= AP.sync.hitRadius * AP.ai.hitK)) return false;
+        // …А ВОТ КОГДА вступать — вопрос ВРЕМЕНИ, а не дистанции до мяча.
+        // Прежнее «ближе prepare» держало компьютер вне борьбы до последних
+        // 0.2–0.4 с полёта: добежать и замахнуться за это время нельзя.
+        if (myBallDist < AP.ai.prepare) return true;
+        // РАНО ВСТУПАЕТ ТОЛЬКО НАЗНАЧЕННЫЙ — замыкающий подачи у атакующих и
+        // страж точки прилёта у обороняющихся. Первая редакция пускала сюда
+        // всех, у кого сошёлся прогноз, и замер напечатал цену: замахов за
+        // 4 матча 225 → 381 при росте попаданий всего 40 → 58, то есть поле
+        // наполнилось фигурами, молотящими воздух. Кого пускать в борьбу —
+        // решает ТРЕНЕР (Team.onCrossStruck / onCrossDefend), это его слой
+        const assigned = team.receiver === p ||
+          (team.airGuards && team.airGuards.has(p));
+        return assigned && pre.t <= AP.ai.lead;
+      })();
   if (p.kickCooldown <= 0 && aerialOk && match.state !== 'restart' &&
       ball.vel.y < AP.ai.velY &&
       // Полная скорость: крутая перекидка почти без горизонтали, но падает

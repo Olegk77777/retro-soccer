@@ -213,9 +213,20 @@ export async function contactStats(opts = {}) {
         const mine = Math.hypot(this.group.position.x - bp.x, this.group.position.z - bp.z);
         if (dd < mine - 0.15) nearer++;
       }
+      // РАНО ИЛИ ПОЗДНО — вопрос, без которого промах не починить: ожидание
+      // мяча лечит только замах, дошедший до кадра контакта РАНЬШЕ мяча.
+      // Мяч ещё сближается с точкой удара — значит замахнулись рано
+      let closing = null;
+      if (sp) {
+        const rvx = b.vel.x - this.vel.x;
+        const rvz = b.vel.z - this.vel.z;
+        closing = (sp.x - bp.x) * rvx + (sp.z - bp.z) * rvz > 0;
+      }
       hits.push({
         style,
         connected,
+        closing,
+        ai: !!(had && had.aiVel),
         gap: gap != null ? +gap.toFixed(2) : null,
         swing: +t0.toFixed(2),
         reach: d != null ? +d.toFixed(2) : null,
@@ -283,6 +294,11 @@ export async function contactStats(opts = {}) {
           n: hits.filter((h) => !h.connected && h.gap != null && h.gap <= edge).length,
         })),
         missTotal: hits.filter((h) => !h.connected && h.gap != null).length,
+        // Промахи, которые ЛЕЧАТСЯ ОЖИДАНИЕМ: мяч ещё шёл к точке удара и был
+        // недалеко. Всё остальное — опоздание, и ожидание там не поможет
+        missEarly: hits.filter((h) => !h.connected && h.closing && h.gap != null &&
+          h.gap <= 1.5).length,
+        missLate: hits.filter((h) => !h.connected && h.closing === false).length,
         rows: hits,
       };
       window.AER = out;
