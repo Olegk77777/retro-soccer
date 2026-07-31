@@ -10,7 +10,7 @@
     "goalkeeper": "./textures/kits/legends-gold-gk.png"
   },
   "_комментарий": "Публичная версия: цвета и силуэт эпохи без эмблем, спонсоров и знаков производителя. Собрано автоматически из wc98-real — руками не править, правь исходный пак и aliases.json.",
-  "_состав": "Стартовые 11 финала ЧМ-98 (12.07.1998). Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Рост и внешность — по духу эпохи: узнаваемость важнее паспортной точности (принцип PS1 — рост, телосложение, тон кожи, причёска).",
+  "_состав": "Стартовые 11 финала ЧМ-98 (12.07.1998), расставленные по схеме Загалло 4-2-2-2. Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Ривалдо и Леонардо стоят в слотах флангов, но ролевая ширина уводит их в полупространства — вингеров у Бразилии-98 не было вовсе, всю ширину давали Кафу и Роберто Карлос. Рост и внешность — по духу эпохи.",
   "squad": [
     {
       "name": "ТАФАРЕЛО",
@@ -28,7 +28,13 @@
       "build": 1.12,
       "skin": "#6a4a33",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#160f0c",
+      "role": "wingback",
+      "shoot": 1.35,
+      "risk": 0.75,
+      "touch": 0.6,
+      "work": 0.8,
+      "crossBias": 0.8
     },
     {
       "name": "АЛДАИРО",
@@ -37,7 +43,10 @@
       "build": 1.04,
       "skin": "#5e4130",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#160f0c",
+      "role": "cover",
+      "vision": 0.65,
+      "composure": 0.75
     },
     {
       "name": "Ж. БАЛЬЯНО",
@@ -46,7 +55,9 @@
       "build": 1.06,
       "skin": "#57402f",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#160f0c",
+      "role": "stopper",
+      "composure": 0.35
     },
     {
       "name": "КАФО",
@@ -55,25 +66,11 @@
       "build": 1,
       "skin": "#6b4b34",
       "hair": "short",
-      "hairColor": "#160f0c"
-    },
-    {
-      "name": "САМПАЙРО",
-      "number": 5,
-      "height": 178,
-      "build": 1.02,
-      "skin": "#a4784f",
-      "hair": "short",
-      "hairColor": "#241812"
-    },
-    {
-      "name": "ДУНГО",
-      "number": 8,
-      "height": 176,
-      "build": 1,
-      "skin": "#c49b7c",
-      "hair": "short",
-      "hairColor": "#3a2a1c"
+      "hairColor": "#160f0c",
+      "role": "wingback",
+      "crossBias": 1.25,
+      "work": 0.9,
+      "shoot": 0.75
     },
     {
       "name": "РИВАЛЬДИ",
@@ -82,7 +79,40 @@
       "build": 0.94,
       "skin": "#8a6242",
       "hair": "thin",
-      "hairColor": "#1d1410"
+      "hairColor": "#1d1410",
+      "role": "insideFwd",
+      "width": -0.6,
+      "shoot": 1.3,
+      "touch": 0.9,
+      "vision": 0.75,
+      "risk": 0.75
+    },
+    {
+      "name": "ДУНГО",
+      "number": 8,
+      "height": 176,
+      "build": 1,
+      "skin": "#c49b7c",
+      "hair": "short",
+      "hairColor": "#3a2a1c",
+      "role": "destroyer",
+      "vision": 0.8,
+      "risk": 0.2,
+      "composure": 0.85,
+      "work": 0.85
+    },
+    {
+      "name": "САМПАЙРО",
+      "number": 5,
+      "height": 178,
+      "build": 1.02,
+      "skin": "#a4784f",
+      "hair": "short",
+      "hairColor": "#241812",
+      "role": "box2box",
+      "width": -0.75,
+      "runBox": 0.75,
+      "work": 0.9
     },
     {
       "name": "ЛЕОНАРДИ",
@@ -91,7 +121,12 @@
       "build": 0.98,
       "skin": "#c09070",
       "hair": "short",
-      "hairColor": "#2e2118"
+      "hairColor": "#2e2118",
+      "role": "playmaker10",
+      "width": -0.55,
+      "trackBack": 0.8,
+      "vision": 0.8,
+      "touch": 0.8
     },
     {
       "name": "РОЛАНДО",
@@ -100,7 +135,13 @@
       "build": 1.08,
       "skin": "#7d5837",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#160f0c",
+      "role": "false9",
+      "depth": -4,
+      "runBehind": 1,
+      "touch": 0.95,
+      "shoot": 1.2,
+      "risk": 0.7
     },
     {
       "name": "БЕБЕТИ",
@@ -109,7 +150,12 @@
       "build": 0.95,
       "skin": "#9a6f4a",
       "hair": "short",
-      "hairColor": "#1d1410"
+      "hairColor": "#1d1410",
+      "role": "insideFwd",
+      "depth": 2,
+      "runShort": 0.7,
+      "touch": 0.8
     }
-  ]
+  ],
+  "style": "brazil98"
 }

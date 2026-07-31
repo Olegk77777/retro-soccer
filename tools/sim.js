@@ -30,7 +30,7 @@ const STAT_KEYS = ['pass', 'passOk', 'shot', 'cross', 'save', 'hold', 'parry', '
   'feint', 'feintFail', 'run', 'third', 'overlap', 'short',
   // Осмысленность атаки: серии владения и метание (31.07.2026)
   'seq', 'seqPass', 'seqTime', 'seqProg', 'seqLong', 'shotAfter3', 'switchPass', 'flips',
-  'oneTwo', 'passKept'];
+  'oneTwo', 'passKept', 'chain'];
 
 function zero2() {
   return [0, 0];
@@ -370,6 +370,7 @@ function summarize(perMatch, probe, ms) {
     shotAfter3: st('shotAfter3'),
     switches: st('switchPass'),
     flips: st('flips'),
+    chain: st('chain'),
     seconds: Math.round(ms / 100) / 10,
   };
 }
@@ -388,6 +389,7 @@ function format(r) {
     `--- осмысленность ---`,
     `серий владения: ${p(r.seqs)}  передач в серии: ${r.seqPassAvg.join(' / ')}  длительность серии с: ${r.seqTimeAvg.join(' / ')}  продвижение серии м: ${r.seqProgAvg.join(' / ')}`,
     `серий 4+ передач: ${p(r.seqLong)}  ударов после 3+ передач: ${p(r.shotAfter3)}  переводов фланга: ${p(r.switches)}  перерешений (метание): ${p(r.flips)}`,
+    `горизонт (цепочка поменяла адресата): ${p(r.chain)}`,
   ].join('\n');
 }
 

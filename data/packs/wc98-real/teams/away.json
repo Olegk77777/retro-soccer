@@ -10,7 +10,7 @@
     "goalkeeper": "./textures/kits/france-1998-gk.png"
   },
   "_комментарий": "Домашняя форма сборной Франции на ЧМ-98: синяя футболка Vitesse с бело-красной грудной полосой, белые шорты, красные гетры; у вратаря чёрный комплект с белой отделкой.",
-  "_состав": "Стартовые 11 финала ЧМ-98 (12.07.1998). Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Рост и внешность — по духу эпохи: узнаваемость важнее паспортной точности (принцип PS1 — рост, телосложение, тон кожи, причёска).",
+  "_состав": "Сборная Франции ЧМ-98 в схеме Жаке 4-3-2-1 «ёлочка». Порядок жёсткий: 0 — вратарь, 1–4 защита, 5–8 полузащита, 9–10 нападение. Пети, Дешам и Карамбё занимают слоты полузащиты и ролевой шириной сведены в узкий центр; Зидан стоит в слоте нападающего, но его роль опускает его между линиями — это и есть «десятка». В финале Блан отбывал дисквалификацию (его заменял Лебёф), мы оставляем Блана: он и есть узнаваемый защитник, начинавший атаки длинной диагональю.",
   "squad": [
     {
       "name": "БАРТЕЗ",
@@ -28,7 +28,11 @@
       "build": 1.05,
       "skin": "#c09070",
       "hair": "short",
-      "hairColor": "#3b2a1a"
+      "hairColor": "#3b2a1a",
+      "role": "fullback",
+      "depth": 6,
+      "runOverlap": 0.7,
+      "work": 0.85
     },
     {
       "name": "ДЕСАЙИ",
@@ -37,7 +41,10 @@
       "build": 1.1,
       "skin": "#55402e",
       "hair": "short",
-      "hairColor": "#160f0c"
+      "hairColor": "#160f0c",
+      "role": "stopper",
+      "press": 1.0,
+      "composure": 0.6
     },
     {
       "name": "БЛАН",
@@ -46,7 +53,11 @@
       "build": 1.02,
       "skin": "#c8a184",
       "hair": "thin",
-      "hairColor": "#6b5136"
+      "hairColor": "#6b5136",
+      "role": "cover",
+      "vision": 0.9,
+      "composure": 0.85,
+      "runBox": 0.35
     },
     {
       "name": "ТЮРАМ",
@@ -55,25 +66,12 @@
       "build": 1.06,
       "skin": "#5b4130",
       "hair": "short",
-      "hairColor": "#160f0c"
-    },
-    {
-      "name": "КАРАНБЁ",
-      "number": 4,
-      "height": 174,
-      "build": 1.02,
-      "skin": "#6a4a33",
-      "hair": "short",
-      "hairColor": "#160f0c"
-    },
-    {
-      "name": "ДЕШАМ",
-      "number": 7,
-      "height": 174,
-      "build": 0.98,
-      "skin": "#c49b7c",
-      "hair": "short",
-      "hairColor": "#2e2118"
+      "hairColor": "#160f0c",
+      "role": "fullback",
+      "depth": 1,
+      "runOverlap": 0.3,
+      "trackBack": 1.0,
+      "shoot": 0.9
     },
     {
       "name": "ПЕТИ",
@@ -82,7 +80,40 @@
       "build": 1.0,
       "skin": "#c8a184",
       "hair": "long",
-      "hairColor": "#b08a4a"
+      "hairColor": "#b08a4a",
+      "role": "box2box",
+      "width": -0.45,
+      "runBox": 0.7,
+      "shoot": 1.1,
+      "vision": 0.7
+    },
+    {
+      "name": "ДЕШАМ",
+      "number": 7,
+      "height": 174,
+      "build": 0.98,
+      "skin": "#c49b7c",
+      "hair": "short",
+      "hairColor": "#2e2118",
+      "role": "destroyer",
+      "width": -0.2,
+      "vision": 0.55,
+      "risk": 0.15,
+      "composure": 0.9
+    },
+    {
+      "name": "КАРАНБЁ",
+      "number": 4,
+      "height": 174,
+      "build": 1.02,
+      "skin": "#6a4a33",
+      "hair": "short",
+      "hairColor": "#160f0c",
+      "role": "destroyer",
+      "width": -0.35,
+      "press": 1.0,
+      "work": 0.9,
+      "runShort": 0.7
     },
     {
       "name": "ДЖОРКАЕФФ",
@@ -91,7 +122,12 @@
       "build": 1.0,
       "skin": "#bd9070",
       "hair": "short",
-      "hairColor": "#241812"
+      "hairColor": "#241812",
+      "role": "insideFwd",
+      "width": -0.5,
+      "depth": 4,
+      "touch": 0.8,
+      "shoot": 1.15
     },
     {
       "name": "ЗИДАН",
@@ -100,7 +136,14 @@
       "build": 1.02,
       "skin": "#b98a63",
       "hair": "none",
-      "hairColor": "#241812"
+      "hairColor": "#241812",
+      "role": "playmaker10",
+      "depth": -7,
+      "vision": 0.95,
+      "touch": 0.95,
+      "risk": 0.7,
+      "runShort": 0.9,
+      "runBox": 0.55
     },
     {
       "name": "ГИВАРШ",
@@ -109,7 +152,12 @@
       "build": 1.0,
       "skin": "#c49b7c",
       "hair": "short",
-      "hairColor": "#4a3520"
+      "hairColor": "#4a3520",
+      "role": "target",
+      "shoot": 0.7,
+      "runShort": 0.7,
+      "touch": 0.4
     }
-  ]
+  ],
+  "style": "france98"
 }

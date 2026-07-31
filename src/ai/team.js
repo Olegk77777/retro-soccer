@@ -9,6 +9,7 @@ import {
   xThreat, passPower, passTime, ROLL_LAMBDA,
 } from './steering.js';
 import { setPieces, spotToWorld } from '../setpieces.js';
+import { buildMods, buildStyle, NEUTRAL_MODS } from '../roles.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -17,11 +18,18 @@ export class Team {
     this.side = side;
     this.data = data;
     this.players = players;
+    // СТИЛЬ КОМАНДЫ и РОЛИ ИГРОКОВ (ресёрч 21 §8). Считаются ОДИН раз здесь:
+    // в кадре это чтение готовых множителей из p.mods, без единой аллокации.
+    // В глобальный CONFIG не пишет ничего — он один на игру, а роли поигроцкие
+    this.style = buildStyle(data.style);
     players.forEach((p, i) => {
       p.team = this;
       p.homeIdx = i;
       p.role = CONFIG.formation.roles[i].id;
       p.isKeeper = i === 0;
+      // Вратарю роли не назначаем: его поведение целиком в goalkeeper.js и
+      // ролевых рычагов там нет ни одного
+      p.mods = p.isKeeper ? NEUTRAL_MODS : buildMods(p, p.role, this.style);
     });
 
     this.attacking = false;   // владеем ли мячом (по мнению тренера)
@@ -304,6 +312,11 @@ export class Team {
       // и незачем (там нужны короткие адресаты, а не глубина), в завершении —
       // наоборот, чем больше тел врывается, тем лучше
       const cfg = this.phaseCfg();
+      // Стиль команды бюджет рывков НЕ трогает, и это осознанно: потолки здесь
+      // целые и крошечные (2 и 1), любой множитель из реального диапазона
+      // inSpaceBias (0.61…0.86) округляется в то же самое целое — то есть
+      // рычаг был бы мёртвым полем. Ось «в пространство против в ноги» живёт
+      // там, где шкала непрерывна: в оценке кандидатов паса (choosePass)
       const maxInSpace = Math.min(OB.maxInSpace, cfg.maxInSpace);
       // Пора ли кому-то рвануть за спину защите
       if (!this.runner && this._runCheckTimer <= 0 && budget.inSpace < maxInSpace) {
@@ -376,9 +389,12 @@ export class Team {
     // МОМЕНТ ОТБОРА. Соперник впереди мяча ещё не построился — это контратака,
     // и она перебивает любые зоны: бежать надо сейчас, а не когда мяч дойдёт
     // до чужой трети
-    if (won && this.oppBehindBall(ball) < P.counter.maxBehind) {
+    // Острота контратаки — командный рычаг стиля: Италия-98 при своём самом
+    // плотном блоке имела и самый быстрый переход (три фигуры, летящие вперёд
+    // за две передачи), Германия-98 — наоборот
+    if (won && this.oppBehindBall(ball) < P.counter.maxBehind * this.style.counterK) {
       this.setPhase('COUNTER', P.hold);
-      this.counterT = P.counter.window;
+      this.counterT = P.counter.window * this.style.counterK;
       return;
     }
     // Контратака живёт своим окном и КОЛИЧЕСТВОМ ПЕРЕДАЧ: после четвёртой это
@@ -632,12 +648,15 @@ export class Team {
     // Порядок = ценность. Кандидатов почти всегда меньше четырёх, и раньше
     // пустым оставался ИМЕННО трейлер — тот, кто замыкает прострел (6.4 гола
     // на 100 против 2.5 у навеса). Теперь первым занимают его
+    // Сколько тел вообще занимает штрафную — командный рычаг стиля: Германия-98
+    // грузила туда всех, Италия-98 оставляла двоих и страховала контратаку.
+    // По умолчанию 4 — прежнее поведение
     const targets = [
       { x: goalX - this.side * B.trailer.x, z: B.trailer.z },
       { x: goalX - this.side * B.golden.x, z: B.golden.z },
       { x: goalX - this.side * B.nearPost.x, z: s * B.nearPost.z },
       { x: goalX - this.side * B.farPost.x, z: s * B.farPost.z },
-    ];
+    ].slice(0, this.style.boxRunners);
     // Кандидаты: атакующая шестёрка, кроме занятых ролями. Поддерживающего
     // НЕ забираем: если в штрафную уйдут все, владельцу некому отдать, он
     // упрётся в защитника и потеряет мяч — замер показал падение ударов
@@ -668,7 +687,11 @@ export class Team {
         // каждые coachTick, и без гистерезиса игроки меняются точками на бегу
         const was = prev.get(p);
         const same = was && Math.abs(was.x - t.x) < 0.6 && Math.abs(was.z - t.z) < 0.6;
-        const d = Math.hypot(pp.x - t.x, pp.z - t.z) - (same ? B.stickBonus : 0);
+        // Ролевая фора и гистерезис — обе в МЕТРАХ и складываются: рывок под
+        // подачу даёт 7 голов на 100 обслуженных, вдвое больше рывка за спину,
+        // поэтому столб и поачер обязаны выигрывать конкурс за точку у опорного
+        const d = Math.hypot(pp.x - t.x, pp.z - t.z)
+          - p.mods.bBox - (same ? B.stickBonus : 0);
         if (d < bd) {
           bd = d;
           bi = i;
@@ -724,9 +747,13 @@ export class Team {
       if (p.runCd > 0) continue;
       const pp = p.group.position;
       const d = Math.hypot(pp.x - op.x, pp.z - op.z);
-      if (d < S.minGap || d > 22) continue;
-      if (d < bestD) {
-        bestD = d;
+      if (d < S.minGap || d > S.maxGap) continue;
+      // Гейты считаются по СЫРОЙ дистанции, а ролевая фора — только в конкурсе:
+      // приход в ноги это 3.72 рывка за 90 минут у опорного против 0.41 у
+      // центрального защитника, то есть разница в восемь раз
+      const cost = d - p.mods.bShort;
+      if (cost < bestD) {
+        bestD = cost;
         best = p;
       }
     }
@@ -754,7 +781,7 @@ export class Team {
       z: Math.max(-F.width / 2 + 2, Math.min(F.width / 2 - 2, tz)),
     };
     this.shortTimer = S.ttl;
-    best.runCd = C.cooldown;
+    best.runCd = C.cooldown * best.mods.runCdK;
     this.bump('short');
   }
 
@@ -1006,7 +1033,11 @@ export class Team {
     for (const p of this.players.slice(5)) {
       if (p === owner || p === this.receiver || p === this.supporter ||
           p === this.match.controlled) continue;
-      const d = Math.hypot(p.group.position.x - fx, p.group.position.z - op.z);
+      // Ролевая фора: рывок за спину — самое сильное отличие ролей в футболе
+      // вообще (нападающий 5.13 раза за 90 минут против 0.06 у центрального
+      // защитника, разница в 85 раз). При весе 0.5 фора ровно 0 м
+      const d = Math.hypot(p.group.position.x - fx, p.group.position.z - op.z)
+        - p.mods.bBehind;
       if (d < bd) {
         bd = d;
         runner = p;
@@ -1037,13 +1068,17 @@ export class Team {
     for (const d of nearest) {
       density -= R.densityPenalty * Math.sqrt(Math.max(0, 1 - d / R.densityRadius));
     }
-    if (distanceRating * density < R.trigger) return;
+    // Множитель роли стоит на УЖЕ ВЫБРАННОМ раннере, а не на пороге: порог
+    // R.trigger перекрыт уровнем сложности в обоих уровнях, и правка порога
+    // подралась бы с ним. При весе 0.5 множитель ровно 1.0
+    if (distanceRating * density * runner.mods.gBehind < R.trigger) return;
 
     this.runner = runner;
     this.runnerTarget = { x: tx, z: tz };
     this.runnerTimer = R.durationSec;
-    // Кулдаун: без него один и тот же нападающий рвал за спину раз в полсекунды
-    runner.runCd = CONFIG.ai.attack.offBall.cooldown;
+    // Кулдаун: без него один и тот же нападающий рвал за спину раз в полсекунды.
+    // Работоспособность игрока (work) укорачивает или удлиняет паузу
+    runner.runCd = CONFIG.ai.attack.offBall.cooldown * runner.mods.runCdK;
     this.bump('run');
   }
 
@@ -1180,10 +1215,18 @@ export class Team {
     if (!fb || fb === owner || fb === this.match.controlled ||
         fb === this.runner || fb === this.receiver) return;
     const fp = fb.group.position;
-    if (Math.hypot(fp.x - op.x, fp.z - op.z) > C.triggerDist) return;
+    // Ролевой вес забегания И командный fullbackPush — оба сидят в gOverlap.
+    // У Бразилии-98 ширину атаки давали ИМЕННО фулбеки (вингеров в схеме нет),
+    // у Италии-98 они почти не подключались. При нейтрали множитель ровно 1.0
+    const okv = fb.mods.gOverlap;
+    if (Math.hypot(fp.x - op.x, fp.z - op.z) > C.triggerDist * okv) return;
     if (this.side * (fp.x - op.x) > 2) return;  // фулбек уже глубже владельца
-    const tx = Math.max(-F.length / 2 + 6,
-      Math.min(F.length / 2 - 6, op.x + this.side * C.ahead));
+    // ГЛУБИНА забега ослаблена нарочно. Триггеру множитель идёт целиком (у
+    // латераля 3.2 — то есть подключается почти всегда, и это правда про
+    // Кафу), а вот глубина при том же множителе давала 48 м и упиралась в
+    // кламп: забег переставал быть решением и становился телепортом к лицевой
+    const tx = Math.max(-F.length / 2 + 6, Math.min(F.length / 2 - 6,
+      op.x + this.side * C.ahead * (1 + (okv - 1) * C.aheadRoleK)));
     // ОВЕРЛАП ИЛИ АНДЕРЛАП — по занятости коридоров (ресёрч 14 §1.4): занята
     // бровка → забегаем ВНУТРЬ, в полупространство; занято полупространство →
     // идём снаружи. Внешнее подключение кончается подачей, внутреннее — УДАРОМ,
@@ -1198,7 +1241,7 @@ export class Team {
     // Личный кулдаун ставился в приходе в ноги, ложном рывке и игре третьего,
     // а в подключении фулбека и забеге за спину — НЕТ. Один и тот же крайний
     // защитник мог подключаться подряд весь матч
-    fb.runCd = CONFIG.ai.attack.offBall.cooldown;
+    fb.runCd = CONFIG.ai.attack.offBall.cooldown * fb.mods.runCdK;
     this.bump('overlap');
   }
 
@@ -1213,7 +1256,11 @@ export class Team {
     // Продвижение мяча: 0 = у наших ворот, 1 = у чужих
     const ballDepth = this.side * bp.x + F.length / 2;
     const adv = Math.max(0, Math.min(1, ballDepth / F.length));
-    let depth = D.lineMinDepth + D.lineRange * adv * D.mentality;
+    // Высота линии — главный командный рычаг стиля. В data/styles.json она
+    // задана В МЕТРАХ (26 катеначчо … 40 Голландия-98), чтобы таблицу можно
+    // было сверять с ресёрчем напрямую; сюда приходит множителем к mentality.
+    // Уровень сложности при этом остаётся единственным писателем самого поля
+    let depth = D.lineMinDepth + D.lineRange * adv * D.mentality * this.style.lineK;
     // Линия держится глубже мяча (goal-side) минимум на зазор
     depth = Math.min(depth, ballDepth - D.lineBallGap);
     depth = Math.max(D.lineMinDepth, Math.min(F.length / 2 + 8, depth));
@@ -1255,7 +1302,9 @@ export class Team {
     if (this.attacking) { this._markPrev.clear(); return; }
     const bp = ball.mesh.position;
     const ballDepth = this.side * bp.x + F.length / 2;
-    if (ballDepth > D.markThird) return;
+    // Командный press: где вообще начинается персональный разбор. Уровень
+    // сложности перекрывает само поле (35/42/50 м), стиль множит поверх
+    if (ballDepth > D.markThird * this.style.pressK) return;
 
     const gx = this.ownGoalX;
     const threats = this.opponents
@@ -1317,7 +1366,7 @@ export class Team {
       const dx = gx - op.x;
       const dz = -op.z;
       const l = Math.hypot(dx, dz) || 1;
-      if (l > T.range) continue;
+      if (l > T.range * this.style.pressK) continue;
       const closing = (o.vel.x * dx + o.vel.z * dz) / l;
       if (closing < T.speed && o !== opp.runner && o !== opp.overlapper) continue;
       threats.push({ o, l });
@@ -1375,7 +1424,10 @@ export class Team {
       // оставался ближайшим и держал роль, а страхующий пассивно стоял позади:
       // страховки при обыгрыше не было вовсе. Плюс гистерезис — два
       // равноудалённых защитника мигали ролью каждый кадр
-      let cost = d;
+      // Ролевой press: «выбрасываться на мяч» против «держать позицию».
+      // Деление стоит ДО метровых поправок, чтобы штраф и фора остались
+      // метрическими. При press 0.5 множитель ровно 1.0 — прежний выбор
+      let cost = d - p.mods.bPress;
       if (!this.attacking) {
         const pp = p.group.position;
         const goalSide =
@@ -1420,7 +1472,10 @@ export class Team {
     for (const p of this.players.slice(5)) {
       if (p === this.match.controlled || p === this.chaser ||
           p === this.receiver || p === this.runner) continue;
-      const d = Math.hypot(spot.x - p.group.position.x, spot.z - p.group.position.z);
+      // Ролевая фора «поддержка сзади и рывок вперёд»: у челнока она есть,
+      // у столба почти нет — тот ждёт подачу в штрафной, а не открывается
+      const d = Math.hypot(spot.x - p.group.position.x, spot.z - p.group.position.z)
+        - p.mods.bAhead;
       if (d < bestD) {
         bestD = d;
         best = p;
@@ -1432,7 +1487,10 @@ export class Team {
         this.supporter !== this.match.controlled && this.supporter !== this.chaser &&
         this.supporter !== this.receiver && this.supporter !== this.runner) {
       const sp = this.supporter.group.position;
-      const curD = Math.hypot(spot.x - sp.x, spot.z - sp.z);
+      // Сравнивать надо в ОДНОЙ шкале: у кандидата дистанция уже взвешена
+      // ролевой форой, значит и у действующего суппорта её надо учесть —
+      // иначе гистерезис сравнивал бы метры с метрами минус фора
+      const curD = Math.hypot(spot.x - sp.x, spot.z - sp.z) - this.supporter.mods.bAhead;
       if (curD < bestD + CONFIG.ai.attack.spot.switchHysteresis) return this.supporter;
     }
     return best;
@@ -1456,26 +1514,53 @@ export class Team {
       return { x: this.side * base.x * (F.length / 2), z: 0 };
     }
 
+    // РОЛЬ И СТИЛЬ (ресёрч 21 §8). Это самое заметное с телекамеры ролевое
+    // отличие вообще: сдвиг домашней точки на 6–14 м — это 120–280 пикселей,
+    // два роста фигуры. При нейтральной роли сдвиги ровно нулевые, а
+    // множитель ширины ровно 1.0, то есть выражение остаётся прежним
+    const M = p.mods;
+    const S = this.style;
+
     let x;
     let z;
     if (this.attacking) {
-      x = this.side * (base.x + AI.attackShift) * (F.length / 2) + bp.x * AI.ballPullX;
+      x = this.side * (base.x + AI.attackShift) * (F.length / 2) + bp.x * AI.ballPullX
+        + this.side * M.depth;
       // Вингеры держат ширину у бровки и НЕ стягиваются к мячу — растяжка
       // обороны и адресат для перевода на пустой фланг (ресёрч 10 + PES).
       // Плюс они стоят ГЛУБЖЕ остальных: без этого домашняя точка вингера
       // не доходила до зоны подачи, и навешивать он мог, только сам ведя мяч
       if (base.id === 'LM' || base.id === 'RM') {
         x += this.side * CONFIG.ai.attack.wingerPush;
-        z = base.z * (F.width / 2) * CONFIG.ai.attack.wingerWide;
+        z = base.z * (F.width / 2) * CONFIG.ai.attack.wingerWide * S.widthK;
       } else {
-        z = base.z * (F.width / 2) * 0.92 + bp.z * AI.ballPullZ;
+        z = base.z * (F.width / 2) * CONFIG.ai.attack.homeWide * S.widthK
+          + bp.z * AI.ballPullZ;
+      }
+      // Ролевая ширина — СДВИГ В МЕТРАХ к своей бровке или в полупространство.
+      // Именно этим 4-4-2 превращается в 4-2-2-2: «десятки» уходят с бровок в
+      // полупространства, а ширину вместо них дают крайние защитники.
+      // Сдвинуть игрока НА ЧУЖУЮ сторону поля роль не имеет права — иначе
+      // левый инсайд оказался бы правым (проверка ниже)
+      if (M.width) {
+        const s = Math.sign(base.z) || 1;
+        const zw = z + M.width * s;
+        z = zw * s < 0 ? 0 : zw;
       }
     } else {
-      x = this.defLineX + this.side * base.defOff;
-      z = base.z * (F.width / 2) * D.zCompact;
+      // Возврат в оборону. Ролевой defOff ПРИБАВЛЯЕТСЯ, а не множится:
+      // «поачер не возвращается» означает, что он остаётся ВЫШЕ своей точки в
+      // блоке, а множитель при trackBack 0.15 притянул бы его к линии защиты,
+      // то есть дал бы ровно обратный смысл
+      x = this.defLineX + this.side * (base.defOff + M.defOff);
+      // Узость блока — командный рычаг: Франция-98 держала центральный коридор
+      // втроём и осознанно оставляла бровки, Голландия-98 перекрывала всю
+      // ширину. При compact 1.0 выражение прежнее
+      z = base.z * (F.width / 2) * D.zCompact * S.compactK;
       // Четвёрка защитников не разъезжается шире компактного блока
       if (base.defOff === 0) {
-        z = Math.max(-D.defWidth / 2, Math.min(D.defWidth / 2, z));
+        const half = D.defWidth * S.compactK / 2;
+        z = Math.max(-half, Math.min(half, z));
       }
       // Блок СПОЛЗАЕТ к мячу заметнее, чем строится атака (своя константа):
       // при мяче у бровки сдвиг 9.5 м вместо 5.5 — так и открывается перевод
@@ -1510,6 +1595,13 @@ export class Team {
     }
     const underPressure = nearestOpp < AI.passPressure;
     const cfg = this.phaseCfg();   // коэффициенты фазы владения
+    // ЛИЧНОСТЬ ПАСУЮЩЕГО и СТИЛЬ КОМАНДЫ — третий и четвёртый слои поверх
+    // уровня сложности (он пишет CONFIG) и фазы владения (она множит). При
+    // нейтральной роли и нейтральном стиле все четыре величины равны 1.0,
+    // то есть формула остаётся прежней бит в бит
+    const mods = from.mods || NEUTRAL_MODS;
+    const vision = mods.visionK;
+    const style = this.style;
     const xtFrom = xThreat(fp.x, fp.z, this.side);
     // Владелец уже в финальной трети — порог риска мягче (см. finalThirdK)
     const inFinalThird = this.side * fp.x > F.length / 2 - 32;
@@ -1523,7 +1615,20 @@ export class Team {
       if (mate === this.decoy) continue;
       const mp = mate.group.position;
       const straight = Math.hypot(mp.x - fp.x, mp.z - fp.z);
-      if (straight < AI.passMin || straight > AI.passMax) continue;
+      // ВИДЕНИЕ ПОЛЯ — самая заметная из личных правок. До неё список
+      // кандидатов был один на всех, и ДЛИННОГО ПАСА НЕ СУЩЕСТВОВАЛО КАК
+      // ЯВЛЕНИЯ: не потому, что он плохо оценивался, а потому что партнёр
+      // дальше 36 м не попадал в список вовсе. Диагональ через полполя
+      // читается с телекамеры мгновенно
+      // ВИДЕНИЕ ПОЛЯ упирается в ФИЗИКУ, и потолок берётся из неё, а не из
+      // головы: мяч, пущенный с максимальной силой, прокатится ровно
+      // `passSpeedMax / λ` метров, и всё, что дальше, отсеет проверка
+      // достижимости ниже. Без этого потолка комментарий «до 54 м» врал бы:
+      // разница между зрением 0.65 и 0.95 равнялась бы нулю, а рычаг умел бы
+      // только УХУДШАТЬ. Ровно та же грабля, что backMaxLift и missRadius —
+      // порог, в который реальное распределение величины не попадает
+      if (straight < AI.passMin ||
+          straight > Math.min(AI.passMax * vision, AI.passSpeedMax / ROLL_LAMBDA)) continue;
 
       // Два кандидата на каждого партнёра: «в ноги с упреждением» и «на ход».
       // Пас на ход кладётся ПЕРЕД бегущим (+2 м фикс), иначе мяч приходит
@@ -1643,7 +1748,10 @@ export class Team {
         // перевода не в текущем приросте, а в том, что после него блок не
         // успевает перестроиться — это плата за следующий пас, а не за этот
         const vMin = isSwitchZ ? PM.valueMinSwitch : PM.valueMin;
-        const v = Math.max(vMin, Math.min(PM.valueMax, 1 + PM.valueK * dxt));
+        // Прямолинейность команды: во сколько дороже продвижение мяча вперёд.
+        // Клампы не трогаем — они и есть предохранители
+        const v = Math.max(vMin,
+          Math.min(PM.valueMax, 1 + PM.valueK * style.directness * dxt));
 
         // --- F: семейство передачи ---
         let f = PM.fNormal;
@@ -1689,11 +1797,22 @@ export class Team {
         // нормальный инструмент (перевести игру, вытянуть блок), а на
         // контратаке он её убивает
         if (this.side * (tx - fp.x) < -3) f *= cfg.fBackK;
+        // Личная склонность подающего: вингер любит прострел, разыгрывающий —
+        // перевод. Множитель ставится ПОСЛЕ фазы тем же приёмом
+        if (isCutback || isSwitch) f *= mods.crossBias;
+        // ОСЬ «В ПРОСТРАНСТВО ПРОТИВ В НОГИ» — командный inSpaceBias (CIES,
+        // 3 261 матч: 0.61 у Бёрнли … 0.86 у Серкль Брюгге). Одного скаляра
+        // хватает, чтобы воспроизвести всю палитру от позиционной игры до
+        // непрерывных забросов за спину. При 0.72 оба множителя ровно 1.0
+        f *= c.kind === 'feet' ? style.shortK : style.spaceK;
 
         // Степень при P — это и есть «насколько команда сейчас осторожна».
-        // Фаза множит её: при розыгрыше от своих ворот потеря стоит гола,
-        // на контратаке — наоборот, риск и есть смысл момента
-        let score = Math.pow(p, PM.safety * cfg.safetyK) * q * v * f;
+        // Фаза множит её, стиль команды и смелость самого игрока — тоже:
+        // при розыгрыше от своих ворот потеря стоит гола, на контратаке —
+        // наоборот, риск и есть смысл момента. Уровень сложности при этом
+        // остаётся единственным писателем самого PM.safety
+        let score = Math.pow(p, PM.safety * cfg.safetyK * style.patience * mods.riskK)
+          * q * v * f;
         // ИНЕРЦИЯ АДРЕСАТА (31.07.2026). Softmax честно отдаёт лучшему варианту
         // около двух третей случаев — но два-три близких по счёту адресата на
         // пяти тактах подряд дают почти гарантированную чехарду: «смотрю на
@@ -1714,6 +1833,7 @@ export class Team {
           power,
           lift: dist > AI.longPassDist ? AI.longPassLift : 0.4,
           kind: c.kind,
+          flight,           // нужно поиску цепочек: на столько экстраполируем поле
           space: !!c.space, // адресат побежит в ТОЧКУ, а не за мячом
         });
       }
@@ -1726,9 +1846,34 @@ export class Team {
     this._passBest = 0;
     for (const o of options) this._passBest = Math.max(this._passBest, o.score);
 
+    // ПОИСК ЦЕПОЧЕК ДЕЙСТВИЙ (Action Chain, ресёрч 21 §6.1 и §6.7). Главная
+    // находка разбора чужих движков: у agent2d/HELIOS сила не в оценке одного
+    // действия, а в ГОРИЗОНТЕ — он считает, что будет ПОСЛЕ передачи. У нас
+    // формула S правильная и отлаженная, ей не хватало ровно этого.
+    // Глубина 2 и никакой рекурсии: для лучших кандидатов смотрим, насколько
+    // опасным окажется СЛЕДУЮЩЕЕ действие адресата. Побочный эффект — ровно
+    // тот, что нужен: игрок начинает отдавать «пас под пас», а это и есть
+    // комбинация. Считается ПОСЛЕ _passBest нарочно: пороги навеса, финта и
+    // прихода в ноги калиброваны по старой шкале, и сдвигать её нельзя
+    if (PM.chainWeight > 0 && options.length > 1) {
+      options.sort((a, b) => b.score - a.score);
+      const wasTop = options[0];
+      const top = Math.min(options.length, PM.chainTop);
+      for (let i = 0; i < top; i++) {
+        const o = options[i];
+        o.score *= 1 + PM.chainWeight * this.nextValue(o);
+      }
+      // Механику надо мерить ПРЯМО: сколько раз горизонт РЕАЛЬНО поменял
+      // лучшего кандидата. Без этого счётчика «пас под пас» остаётся словами —
+      // косвенные метрики (точность, длина серии) его не различают
+      let nowTop = options[0];
+      for (let i = 1; i < top; i++) if (options[i].score > nowTop.score) nowTop = options[i];
+      if (nowTop !== wasTop) this.bump('chain');
+    }
+
     if (!options.length) return null;
     const minScore = PM.minScore * (underPressure ? PM.pressScoreK : 1) *
-      (inFinalThird ? PM.finalThirdK : 1) * cfg.minScoreK;
+      (inFinalThird ? PM.finalThirdK : 1) * cfg.minScoreK * style.patience * mods.riskK;
     const live = options.filter((o) => o.score >= minScore);
     if (!live.length) return null;
 
@@ -1755,6 +1900,37 @@ export class Team {
     // ТОЛЬКО для AI-веток — у человека адресата выбирает он сам
     if (from.ai) from.ai.intent = { mate: picked.mate, kind: picked.kind, t: AI.intentCommit };
     return picked;
+  }
+
+  // ЦЕННОСТЬ СЛЕДУЮЩЕГО ДЕЙСТВИЯ (второй уровень цепочки). Возвращает 0…1:
+  // насколько опасным окажется положение, когда мяч дойдёт до адресата.
+  // Считается ДЁШЕВО и без рекурсии — только два вида продолжения:
+  //   1) удар с точки приёма (его ценность и есть xT этой точки),
+  //   2) лучшая следующая передача — партнёр, экстраполированный на время
+  //      полёта, взвешенный свободой его зоны.
+  // Поле экстраполируется линейно: за 0.4–1.2 с полёта мяча этого достаточно,
+  // а честная мини-симуляция стоила бы вдвое дороже всей функции выбора паса.
+  nextValue(o) {
+    const AI = CONFIG.ai;
+    const tx = o.target.x;
+    const tz = o.target.z;
+    const t = o.flight || 0;
+    const opponents = this.opponents;
+    // Удар с точки приёма: ценность позиции, если оттуда вообще бьют
+    const dGoal = Math.hypot(this.attackGoalX - tx, tz);
+    let best = dGoal < AI.shootRange ? xThreat(tx, tz, this.side) : 0;
+    // Лучшее продолжение передачей
+    for (const m of this.players) {
+      if (m === o.mate || m.isKeeper) continue;
+      const mp = m.group.position;
+      const px = mp.x + m.vel.x * t;
+      const pz = mp.z + m.vel.z * t;
+      const d = Math.hypot(px - tx, pz - tz);
+      if (d < AI.passMin || d > AI.passMax) continue;
+      const val = xThreat(px, pz, this.side) * freeSpace(px, pz, opponents);
+      if (val > best) best = val;
+    }
+    return Math.max(0, Math.min(1, best));
   }
 
   // Вероятность, что наземный пас дойдёт: произведение (1 − p_перехвата) по

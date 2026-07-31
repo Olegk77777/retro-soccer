@@ -187,7 +187,11 @@ export function updateFieldPlayer(p, dt, ball) {
       myBallDist < CONFIG.player.kickRadius && bp.y < CONFIG.player.kickMaxBallY) {
     const relV = Math.hypot(ball.vel.x - p.vel.x, ball.vel.z - p.vel.z);
     const dg = Math.hypot(team.attackGoalX - pos.x, pos.z);
-    if (relV > FT.minRel && dg < FT.shotRange && Math.abs(pos.z) < AI.shootMaxZ) {
+    // Личная охота бить действует и здесь — это ВТОРАЯ из трёх точек входа в
+    // удар, и пропустить её значит повторить записанную граблю «слой наклона
+    // не вызывался у AI»: половина ударов осталась бы обезличенной
+    if (relV > FT.minRel && dg < FT.shotRange * p.mods.shoot &&
+        Math.abs(pos.z) < AI.shootMaxZ) {
       aiShoot(p, ball, team.attackGoalX, dg);
       p.aiUpdate(dt, { x: 0, z: 0 }, {});
       return;
@@ -482,7 +486,7 @@ function pressBall(p, dt, ball, match) {
     // Ближе к своим воротам решаются злее — там цена потери выше
     const ownDepth = Math.hypot(pos.x - team.ownGoalX, pos.z);
     const rate = (badTouch ? TKA.ratePerSec : TKA.rateNormal) *
-      (ownDepth < TKA.desperateDepth ? TKA.desperateK : 1);
+      (ownDepth < TKA.desperateDepth ? TKA.desperateK : 1) * p.mods.gPress;
     if (!behind && Math.random() < rate * dt) {
       p.startTackle(aim.x, aim.z);
       return { move: { x: 0, z: 0 }, sprint: false, face: null, speedCap: null };
@@ -503,7 +507,11 @@ function pressBall(p, dt, ball, match) {
   // теперь это число: pressLine метров ВГЛУБЬ своей половины, где первый
   // защитник ещё идёт в отбор, а не сдерживает (CONFIG.ai.defence.pressLine,
   // 0 — прежнее поведение)
-  const inOurHalf = team.side * bp.x < -D.pressLine;
+  // Стиль команды добавляет метры АДДИТИВНО, а не множителем: на «Новичке»
+  // D.pressLine ровно 0, и умножать там нечего. Плюс личный press защитника:
+  // стоппер лезет в отбор глубже в своей половине, страхующий отходит раньше
+  const pressLine = D.pressLine + team.style.pressLine + p.mods.bPress;
+  const inOurHalf = team.side * bp.x < -pressLine;
   if (!inOurHalf) {
     // Высокий прессинг: на владельца с упреждением по его курсу (soccer.py)
     const ospd = Math.hypot(owner.vel.x, owner.vel.z);
@@ -589,10 +597,21 @@ function withBall(p, ball) {
     // из них НИ ОДНОГО ближе 11 м: атака гибла на дальнем ударе, а вратарь
     // спокойно забирал (0 голов за 4 матча). Теперь дальний удар — редкость,
     // а команда доводит мяч до убойной зоны, где и живёт прострел.
-    if (distGoal < AI.shootRange && Math.abs(pos.z) < AI.shootMaxZ) {
+    // РОЛЕВАЯ ОХОТА БИТЬ. Множитель растягивает ТОЛЬКО дальность, с которой
+    // игрок вообще думает об ударе: инсайд с 1.3 пробует с 36 м, столб с 0.75
+    // ждёт подачу и с 21 не стреляет. А вот УБОЙНАЯ ЗОНА (shootBest) — общая
+    // для всех и роли не подчиняется, и это условие корректности, а не вкус:
+    // внутри неё стоит правило «удар ОБЯЗАТЕЛЕН» (пол quality = 1), и растяни
+    // её ролью — получишь не личность, а правку баланса. Замер: при масштабе
+    // обеих величин голы за матч ушли с 1.5 до 3.5, ударов у Бразилии стало
+    // вдвое больше базы, а счета 2:4 вылезли из целевого коридора 1:0–3:2
+    const kShoot = p.mods.shoot;
+    const shootRange = AI.shootRange * kShoot;
+    const shootBest = AI.shootBest;
+    if (distGoal < shootRange && Math.abs(pos.z) < AI.shootMaxZ) {
       // Качество момента: 1 в убойной зоне, тает с дистанцией и углом
       let quality = Math.max(0, Math.min(1,
-        (AI.shootRange - distGoal) / Math.max(1, AI.shootRange - AI.shootBest)));
+        (shootRange - distGoal) / Math.max(1, shootRange - shootBest)));
       quality = Math.pow(quality, AI.shootFalloff);
       quality *= 1 - 0.55 * Math.min(1, Math.abs(pos.z) / AI.shootMaxZ);
       // Защитник МЕЖДУ мной и воротами — момент испорчен. Но опекун вплотную
@@ -618,7 +637,7 @@ function withBall(p, ball) {
       // В убойной зоне удар ОБЯЗАТЕЛЕН: вероятностный гейт иногда «прокатывал»
       // момент из штрафной, и атака вырождалась в бесконечное перекатывание
       // мяча (замер 26.07: 0 ударов за матч). Под блоком — с полом, а не с 1
-      if (distGoal < AI.shootBest) {
+      if (distGoal < shootBest) {
         quality = Math.max(quality, blocked ? AI.shootKillFloor : 1);
       }
       if (Math.random() < quality) {
@@ -654,9 +673,13 @@ function withBall(p, ball) {
     // выпала «веду» — держим и не перерешаем. Прессинг обязательство снимает
     // (деваться некуда — отдавай), и это правильно: терпеть под давлением
     // умеют, а вот вести на месте под опекой — нет
-    const carrying = p.ai.carryT > 0 && oppD >= AI.passPressure;
+    // ХЛАДНОКРОВИЕ. Терпеливый игрок подпускает соперника ближе и не
+    // сбрасывает мяч рефлекторно; паникующий расстаётся с ним раньше.
+    // При composure 0.5 множитель ровно 1.0
+    const pressDist = AI.passPressure * p.mods.pressureK;
+    const carrying = p.ai.carryT > 0 && oppD >= pressDist;
     if (pass && !carrying &&
-        (oppD < AI.passPressure || Math.random() < AI.passUrge * cfg.urgeK)) {
+        (oppD < pressDist || Math.random() < AI.passUrge * cfg.urgeK)) {
       markDecision(p, team, 'pass');
       p.aiKick(ball, pass.dir, pass.power, pass.lift, 0, passStrikeKind(pass));
       team.commitPass(pass, p); // короткий пас под прессингом → стеночка
@@ -675,7 +698,7 @@ function withBall(p, ball) {
     // Ни бить, ни отдать, ни финтить — ведём. Это тоже решение, и именно
     // чередование «веду / отдаю / веду» на соседних тактах и есть метание.
     // Взводим обязательство: следующие carryHold секунд монета не бросается
-    if (!carrying) p.ai.carryT = AI.carryHold;
+    if (!carrying) p.ai.carryT = AI.carryHold * p.mods.carryK;
     markDecision(p, team, 'dribble');
   }
 
@@ -744,18 +767,22 @@ function withBall(p, ball) {
 function aiFeint(p, ball, opp, oppD, pass) {
   const F = CONFIG.ai.feint;
   if (!F || !F.enabled || F.rate <= 0) return false;
-  if (!opp || oppD > F.range) return false;
+  // ТЕХНИКА игрока: техничный обыгрывает чаще, из большей зоны и охотнее, чем
+  // отдаёт. Провал финта на этот же атрибут уже завязан (player.js, feint.fail
+  // → look.touch), так что рычаг остаётся одним. При touch 0.5 множитель 1.0
+  const kTouch = p.mods.touchK;
+  if (!opp || oppD > F.range * kTouch) return false;
   // Сравнивать надо с ЛУЧШИМ счётом паса (`_passBest`), а не со счётом того
   // варианта, который вытянул softmax: софтмакс нарочно отдаёт лучшему лишь
   // ~2/3 случаев, и в оставшейся трети сюда приезжал заведомо более слабый
   // вариант — то есть порог «есть передача лучше финта» проверялся против
   // случайного числа. `_passBest` для этого и заведён (team.js, choosePass)
-  if ((p.team._passBest || 0) >= F.passOver) return false;
+  if ((p.team._passBest || 0) >= F.passOver * kTouch) return false;
   const team = p.team;
   const pos = p.group.position;
   if (Math.hypot(pos.x - team.ownGoalX, pos.z) < F.ownSafe) return false;
   if (!p.canFeint(ball)) return false;
-  if (Math.random() >= F.rate) return false;
+  if (Math.random() >= F.rate * kTouch) return false;
 
   // Курс — туда, куда игрок и вёл (dribDir), иначе на ворота
   const d = p.ai.dribDir || { x: team.side, z: 0 };
@@ -795,15 +822,20 @@ function aiCross(p, ball, oppD, pass = null) {
   const team = p.team;
   const pos = p.group.position;
 
-  const inFlank = Math.abs(pos.z) > AC.flankZ;
-  const inFinalThird = team.side * pos.x > F.length / 2 - AC.finalThird;
+  // СКЛОННОСТЬ К ПОДАЧЕ — роль игрока И стиль команды в одном множителе,
+  // потому что рычаг один. Германия-98 с 1.45 грузит в штрафную раз за разом,
+  // вингер-подающий начинает искать подачу шире и раньше, а опорный с 0.75
+  // почти всегда предпочтёт передачу. При нейтрали множитель ровно 1.0
+  const kCross = p.mods.crossBias;
+  const inFlank = Math.abs(pos.z) > AC.flankZ / kCross;
+  const inFinalThird = team.side * pos.x > F.length / 2 - AC.finalThird * kCross;
   if (!inFlank || !inFinalThird || oppD > AC.blockedDist) return false;
   // Передача ценнее подачи — отдаём её. Навес остаётся тем, чем он является в
   // статистике: последним доводом, когда прохода и паса нет.
   // Тот же баг, что был у финта: порог сравнивался со СЛУЧАЙНО вытянутым
   // softmax-вариантом вместо лучшего, и навес то отменялся, то нет при одной
   // и той же обстановке — прямой источник дёрганости в финальной трети
-  if ((team._passBest || 0) >= AC.overPass) return false;
+  if ((team._passBest || 0) >= AC.overPass * kCross) return false;
 
   // Адресат: свой в штрафной соперника с максимально свободной зоной
   const boxX = F.length / 2 - 16.5;
@@ -912,7 +944,11 @@ function aerialPlay(p, ball, diving = false) {
     return;
   }
 
-  if (distGoal < AIR.headerRange && Math.abs(pos.z) < 16) {
+  // ТРЕТЬЯ точка входа в удар — замыкание головой и с лёта. У неё СВОЯ формула
+  // шума и силы, `aiShoot` тут не зовётся вовсе, поэтому личная охота бить
+  // обязана цепляться отдельно. Без этого столб с shoot 0.70 замыкал бы подачу
+  // головой ровно как поачер, а голов головой в этом матче как раз больше всего
+  if (distGoal < AIR.headerRange * p.mods.shoot && Math.abs(pos.z) < 16) {
     // Замыкание в створ: прицел со случайной точкой и шумом (рычаг
     // «голы не дешевеют»), сила — от скорости разбега в момент контакта.
     // Это УДАР — статистика матча обязана его видеть, иначе замер конверсии
