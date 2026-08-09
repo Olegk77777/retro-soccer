@@ -226,7 +226,17 @@ export function updateFieldPlayer(p, dt, ball) {
 
   if (p.isToucher) {
     move = withBall(p, ball);
-    sprint = (p.ai.dribFree || 0) > AI.dribbleSprintFree;
+    // ПЕРЕД УДАРОМ ПОДСТРАИВАЮТСЯ, А НЕ МЧАТСЯ (31.07.2026). Спринт с мячом
+    // толкает его далеко вперёд, и `canKick` (мяч у ноги) становится ложным
+    // на большей части кадров — а такт решений живёт ВНУТРИ `canKick`, то есть
+    // игрока просто не спрашивают, не пора ли бить. Пока выход длинный, это
+    // безобидно (тактов впереди много), но на коротком добегании удара может
+    // не случиться вовсе: замер стенда `oneOnOne` после введения чистого
+    // выхода дал с 22 м «мог бить 26 кадров из 210» и НОЛЬ ударов из 24.
+    // Поэтому у своих ворот спринт с мячом гасится — это и правдивее
+    // (нападающий выкладывает мяч под удар), и возвращает такту решений его
+    // кадры
+    sprint = (p.ai.dribFree || 0) > AI.dribbleSprintFree && !p.ai.nearGoal;
   } else {
     p.ai.dribDir = null;
     // Мяч ушёл — память о виде решения и намерение обнуляются. Иначе игрок,
@@ -626,6 +636,14 @@ function withBall(p, ball) {
   // здесь и есть главный: замер показал медиану удержания мяча 0.00 с, то есть
   // подавляющее большинство решений принимается именно на нём
   const lane = carryLane(p, oppD, opp);
+  // ЧИСТЫЙ ВЫХОД НА ВОРОТА. Коридор `lane.free` меряет расстояние до
+  // ближайшего соперника ПО КУРСУ (вратарь из него исключён) — значит «никого
+  // между мной и воротами» это просто «коридор длиннее, чем до ворот».
+  // Считать отдельным проходом по сопернику не нужно: величина уже есть
+  const CR = AI.carry.clear;
+  const clearRun = !!CR && AI.carry.enabled &&
+    lane.road >= lane.toGoal - CR.slack &&
+    distGoal > CR.clearTo && distGoal < CR.clearFrom;
   const cfg = team.phaseCfg();
   const canKick = p.kickCooldown <= 0 && distToBall(p, ball) < P.kickRadius && bp.y < P.kickMaxBallY;
   if (canKick && p.ai.decideCd <= 0) {
@@ -678,6 +696,12 @@ function withBall(p, ball) {
       if (distGoal < shootBest) {
         quality = Math.max(quality, blocked ? AI.shootKillFloor : 1);
       }
+      // ЧИСТЫЙ ВЫХОД: НЕ БЬЁМ ИЗДАЛЕКА, ИДЁМ НА ВРАТАРЯ. Гасится ПОСЛЕ пола
+      // убойной зоны нарочно — иначе пол вернул бы обязательный удар с 20 м
+      // (`shootBest` на «Профи»), а это ровно тот удар, который вратарь
+      // забирает в 96 % случаев. Ближе `clear.clearTo` состояние снимается
+      // само, и удар снова обязателен — уже с той дистанции, где он забивает
+      if (clearRun) quality *= CR.shootK;
       if (Math.random() < quality) {
         // Удар, ПОДГОТОВЛЕННЫЙ серией: тот же удар после трёх передач подряд
         // и после отбитого наугад мяча — два разных события, а счётчик shot
@@ -696,7 +720,10 @@ function withBall(p, ball) {
     // Навес больше не имеет абсолютного приоритета: раньше он стоял ВЫШЕ паса
     // и не проходил через модель вовсе, хотя даёт 2.5 гола на 100 против 6.4
     // у прострела. Теперь подаём, только если передачи лучше нет
-    if (aiCross(p, ball, oppD, pass)) {
+    // Навес с ЧИСТОГО ВЫХОДА не подаём вовсе: подача — это признание, что
+    // пройти нельзя, а здесь пройти как раз можно. Замер до правки ловил на
+    // 38 м 21 % «паса поперёк» — это она и была
+    if (!clearRun && aiCross(p, ball, oppD, pass)) {
       markDecision(p, team, 'cross');
       p.ai.dribDir = null;
       return { x: 0, z: 0 };
@@ -741,12 +768,18 @@ function withBall(p, ball) {
     // (фаза DIRECT) = 0.96, то есть мяч сбрасывался почти детерминированно, и
     // ровно в тех фазах (контратака, длинная передача), где бежать в свободное
     // поле и надо. Потолок оставляет случайности место всегда
-    const urge = AI.carry.enabled
+    let urge = AI.carry.enabled
       // Потолок сверху, абсолютный пол снизу: скидка за свободную зону не
       // имеет права ни сделать пас обязательным, ни отменить его как явление
       ? Math.max(AI.carry.urgeMin,
         Math.min(AI.carry.urgeMax, AI.passUrge * cfg.urgeK) * damp)
       : AI.passUrge * cfg.urgeK;   // ablation: без потолка, как было
+    // ЧИСТЫЙ ВЫХОД — ЕДИНСТВЕННОЕ МЕСТО, ГДЕ АБСОЛЮТНЫЙ ПОЛ СНИМАЕТСЯ. Пол
+    // нужен, чтобы пас не исчезал как явление (записанная грабля «Новичка»),
+    // но выход один на один — ровно тот случай, когда отдавать НЕ НАДО: это
+    // самый ценный момент в футболе, и пас назад из него выбрасывает его
+    // целиком. Прижали (`boxedIn`) — по-прежнему отдаём, это выше по коду
+    if (clearRun) urge = Math.min(urge, CR.urge);
     if (pass && !carrying && (boxedIn || Math.random() < urge)) {
       markDecision(p, team, 'pass');
       p.aiKick(ball, pass.dir, pass.power, pass.lift, 0, passStrikeKind(pass));
@@ -807,7 +840,29 @@ function carryLane(p, oppD, opp) {
   // это выглядело как «не может решить, куда бежать». Вход в режим — по
   // flankZ, выход — по более узкому flankZExit
   const inFinalThirdW = team.side * pos.x > CONFIG.field.length / 2 - CB.finalThird;
-  const wide = inFinalThirdW &&
+  // ЧИСТЫЙ ПУТЬ К ВОРОТАМ ОТМЕНЯЕТ «ШИРОКОГО» (31.07.2026). Широкий игрок
+  // ведёт мяч к ЛИЦЕВОЙ под прострел, и это верно, когда середина закрыта.
+  // Но на выходе один на один игра сама уводила его туда, где бить почти
+  // нельзя: угловой множитель желания бить равен `1 − 0.55·|z|/shootMaxZ`, то
+  // есть на цели ведения |z| = 16 он режет охоту на 44 %, а за `shootMaxZ`
+  // (20 м) ветки удара нет вовсе. Уходить на бровку, когда прямая дорога к
+  // воротам ПУСТА, — значит выбрасывать выход. Меряем коридор именно НА
+  // ВОРОТА, до выбора курса: это отдельный проход по сопернику, но он один
+  // на кадр у одного игрока — владельца мяча
+  const toGoal = Math.hypot(goalX - pos.x, pos.z) || 1;
+  const CRW = AI.carry.clear;
+  // Дорога меряется ПРЯМО НА ВОРОТА и ШИРОКИМ коридором: спринтеру мешает не
+  // только тот, кто стоит ровно на линии, но и всякий, кто успеет на неё выйти
+  const road = CRW
+    ? laneAlong(team, pos, (goalX - pos.x) / toGoal, -pos.z / toGoal, CRW.roadHalfWidth)
+    : Infinity;
+  const openRoad = !!CRW && AI.carry.enabled &&
+    road >= toGoal - CRW.slack && toGoal < CRW.clearFrom;
+  // «Уже у ворот» — гасит спринт с мячом (см. updateFieldPlayer). Считаем
+  // здесь, потому что дистанция до ворот уже посчитана, а второй раз её
+  // мерить незачем
+  p.ai.nearGoal = !!CRW && toGoal < CRW.steadyFrom;
+  const wide = inFinalThirdW && !openRoad &&
     Math.abs(pos.z) > (p.ai.wide ? CB.flankZExit : CB.flankZ);
   p.ai.wide = wide;
   let dx;
@@ -835,6 +890,14 @@ function carryLane(p, oppD, opp) {
   // никого. Общий гандикап дриблинга (dribbleSpeedFactor) не трогаем — по духу
   // PES дриблинг не должен выигрывать у паса; но и убегать от прессинга после
   // стеночки владелец обязан, иначе весь прогресс мяча упирается в передачу
+  return { dx, dz, free: laneAlong(team, pos, dx, dz), road, toGoal };
+}
+
+// Расстояние до ближайшего ПОЛЕВОГО соперника в коридоре по заданному курсу.
+// Вратарь исключён нарочно: он не помеха на пути, он и есть цель выхода —
+// именно поэтому величина годится и как «свободен ли коридор для спринта»,
+// и как «чист ли путь к воротам» (см. `clearRun` в withBall)
+function laneAlong(team, pos, dx, dz, halfWidth = 3.5) {
   let ahead = Infinity;
   for (const o of team.opponents) {
     if (o.isKeeper) continue;
@@ -844,10 +907,10 @@ function carryLane(p, oppD, opp) {
     const along = rx * dx + rz * dz;
     if (along <= 0) continue;
     const side = Math.abs(rx * dz - rz * dx);
-    if (side > 3.5) continue;
+    if (side > halfWidth) continue;
     ahead = Math.min(ahead, along);
   }
-  return { dx, dz, free: ahead };
+  return ahead;
 }
 
 // НАСКОЛЬКО СЛАБЕЕ ОХОТА ОТДАТЬ МЯЧ, когда впереди свободно. Возвращает

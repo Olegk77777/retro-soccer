@@ -245,3 +245,246 @@ function format(out) {
   }
   return L.join('\n');
 }
+
+// ===== ВЫХОД ОДИН НА ОДИН (31.07.2026) =====
+//
+// ЗАЧЕМ. Фидбек Олега: «очень часто футболист выходит один на один с вратарём
+// и отдаёт пас назад». Воронка выше этого не ловит: она считает, чем кончилась
+// серия ПО ЗОНАМ, а «вышел один на один» — это не зона, а ОБСТАНОВКА (между
+// мной и воротами нет полевых соперников). В матче такие эпизоды редки, и
+// ловить их наблюдением значит гонять часы симуляции ради десятка случаев.
+//
+// Поэтому эпизод СТАВИТСЯ: нападающий с мячом на заданной дистанции до чужих
+// ворот, перед ним только вратарь, защитники позади (отыгранные), партнёры —
+// сзади и сбоку, как на настоящем выходе. Дальше AI решает сам, а стенд
+// записывает, ЧЕМ он распорядился: удар / ведение / пас вперёд / ПАС НАЗАД.
+//
+// Две грабли самого стенда, обе уже стоили ложных ответов в этом проекте:
+//   1) вратарь с мячом в руках — безусловный владелец (`Match.updateToucher`),
+//      и флаг переживает расстановку: не сбросив его, получаешь «владеет
+//      соперник» с первого кадра и пустую таблицу;
+//   2) гонять только по СВЕЖЕЙ странице — прошлый прогон оставляет матч в
+//      состоянии розыгрыша, а на розыгрыше половина веток молчит по построению.
+const FRAME1 = 1 / 60;
+
+function stepOne(match, ball, goals) {
+  match.update(FRAME1);
+  const rep = match.state === 'replay' || match.state === 'celebration';
+  const ev = rep ? null : ball.update(FRAME1);
+  if (!rep) goals.update(FRAME1);
+  return ev;
+}
+
+export async function oneOnOne(opts = {}) {
+  const { match, ball, goals, CONFIG } = window.DBG;
+  const dists = opts.dist || [30, 26, 22, 18, 14];
+  const reps = opts.reps || 12;
+  const limit = opts.limit || 210;           // кадров на попытку (3.5 с)
+  // ДОГОНЯЮЩИЙ ЗАЩИТНИК. Стерильный выход (никого ближе шести метров) в матче
+  // почти не встречается: за прорвавшимся почти всегда кто-то бежит, и именно
+  // он превращает «бей» в «отдай». Число — метры ПОЗАДИ нападающего;
+  // null — чистый выход
+  const chase = opts.chase != null ? opts.chase : null;
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const saved = {
+    startIntro: match.startIntro, startReplay: match.startReplay,
+    onGoal: match.onGoal, humanTeam: match.humanTeam, controlled: match.controlled,
+  };
+  const PP = Object.getPrototypeOf(match.teams[0].players[1]);
+  const origKick = PP.aiKick;
+  const origShoot = PP.aiShootHook;
+  let ev = null;
+
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+  match.onGoal = function () { if (ev) ev.goal = true; };
+  // Человека в стенде нет вовсе: обе команды компьютерные, как в sim.js
+  match.humanTeam = { players: [], fieldPlayers: [], receiver: null, receiveTimer: 0 };
+  match.controlled = null;
+
+  // ЧЕМ РАСПОРЯДИЛСЯ — ловим по САМОМУ касанию, а не по скорости мяча:
+  // удар, пас вперёд и пас назад различаются только направлением и силой,
+  // и угадывать их по мячу — это ровно та ошибка, из-за которой стенд подачи
+  // печатал «подачу», которая на деле уходила пяткой
+  PP.aiKick = function (b, dir, power, lift, curl, kind) {
+    if (ev && this === ev.striker && !ev.done) {
+      const toGoalX = ev.side;                       // куда атакуем по X
+      const along = dir.x * toGoalX;                 // >0 — вперёд к воротам
+      ev.done = along > 0.35 && power > 20 ? 'удар'
+        : (along > 0.15 ? 'пас вперёд' : (along < -0.15 ? 'ПАС НАЗАД' : 'пас поперёк'));
+      ev.power = +power.toFixed(1);
+      ev.at = +ev.dGoal.toFixed(1);
+    }
+    return origKick.apply(this, arguments);
+  };
+
+  const rows = [];
+  try {
+    for (const d of dists) {
+      const tally = { 'удар': 0, 'пас вперёд': 0, 'ПАС НАЗАД': 0, 'пас поперёк': 0, 'довёл сам': 0 };
+      let goals_ = 0;
+      let saved_ = 0;
+      let wide_ = 0;
+      const shotAt = [];
+      const ownF = [];
+      const kickF = [];
+      for (let r = 0; r < reps; r += 1) {
+        // ПОЛНЫЙ СБРОС ПЕРЕД КАЖДОЙ ПОПЫТКОЙ. Первая редакция стенда сбрасывала
+        // только мяч и позиции — и два прогона подряд в одной странице давали
+        // ПРОТИВОРЕЧИВЫЕ числа (92 % ударов против 0 % на той же дистанции).
+        // Переносилось состояние: сетка ворот держала забитый мяч (`goals`),
+        // тренер помнил назначения прошлого эпизода (`receiver`, `runner`,
+        // `boxRuns`), а у игроков жила память такта решений (`p.ai.carryT`,
+        // `decideCd`, `dribFree` из прошлой попытки). Это ровно записанная
+        // грабля проекта «гонять стенды только по свежей странице», и лечится
+        // она не дисциплиной запуска, а честным сбросом здесь
+        match.state = 'play';
+        match.stateTimer = 0;
+        match.restart = null;
+        // ЧАСЫ МАТЧА ТОЖЕ СБРАСЫВАЕМ, и это не мелочь. Матч длится
+        // CONFIG.match.realMinutes (6) игровых минут, а стенд наигрывает по
+        // 3.5 с на попытку плюс до 2.5 с досмотра исхода: уже к третьей строке
+        // таблицы часы доходили до финального свистка, матч замирал, и
+        // ОСТАВШИЕСЯ строки печатали честные, но бессмысленные «0 ударов,
+        // 100 % не решил». Изолированный прогон той же дистанции давал
+        // 94 % ударов — вот так стенд и врёт, когда его гонят длинной серией
+        match.clock = 0;
+        goals.reset();
+        ball.reset();
+        ball.goalScored = false;
+        ball.spin = 0;
+        ball.afterTouch = 0;
+        for (const t of match.teams) {
+          t.receiver = null; t.receiveTarget = null; t.receiveTimer = 0;
+          t.runner = null; t.overlapper = null; t.decoy = null; t.supporter = null;
+          t.chaser = null; t.coverer = null;
+          if (t.boxRuns) t.boxRuns.clear();
+          if (t.marks) t.marks.clear();
+          if (t.airGuards) t.airGuards.clear();
+          t.phaseLock = 0;
+          for (const p of t.players) {
+            if (p.ai) {
+              p.ai.decideCd = 0; p.ai.carryT = 0; p.ai.intent = null;
+              p.ai.lastKind = null; p.ai.kindT = 0; p.ai.dribFree = null;
+              p.ai.dribDir = null; p.ai.wide = false; p.ai.jockey = false;
+              p.ai.feint = 0; p.ai.runCd = 0;
+            }
+          }
+        }
+        const team = match.teams[0];
+        const foe = match.teams[1];
+        const side = team.side;
+        const half = CONFIG.field.length / 2;
+        // Вратарь без мяча в руках — иначе владение с первого кадра чужое
+        for (const t of match.teams) {
+          const k = t.keeper;
+          if (k && k.ai) { k.ai.holding = false; k.ai.holdT = 0; }
+        }
+        const face = Math.atan2(side, 0);
+        // Нападающий: по центру, на заданной дистанции до ворот
+        const striker = team.fieldPlayers[9];
+        const sx = side * (half - d);
+        striker.reset(sx, (r % 3 - 1) * 2.5, face);   // чуть варьируем по ширине
+        // Партнёры — СЗАДИ и сбоку, как на настоящем выходе: пас назад обязан
+        // быть физически доступен, иначе стенд измерит не выбор, а его отсутствие
+        let k = 0;
+        for (const p of team.fieldPlayers) {
+          if (p === striker) continue;
+          k += 1;
+          p.reset(sx - side * (8 + (k % 4) * 5), ((k % 5) - 2) * 8, face);
+        }
+        // Защитники соперника — ПОЗАДИ нападающего (отыграны), вратарь на месте
+        let j = 0;
+        for (const o of foe.fieldPlayers) {
+          j += 1;
+          o.reset(sx - side * (6 + (j % 5) * 4), ((j % 5) - 2) * 7, -face);
+        }
+        // Догоняющий: ставим ПОЗАДИ и чуть сбоку, лицом к своим воротам —
+        // он не перекрывает линию удара, но давит. Берём ближайшего по слоту
+        if (chase != null) {
+          const d1 = foe.fieldPlayers[3];
+          d1.reset(sx - side * chase, striker.group.position.z + 0.8, face);
+        }
+        foe.keeper.reset(side * (half - 4), 0, -face);
+        // Мяч — у ног нападающего
+        ball.mesh.position.set(sx + side * 0.4, CONFIG.ball.radius, striker.group.position.z);
+        ball.vel.set(0, 0, 0);
+        ball.spin = 0;
+        ball.seq = (ball.seq || 0) + 1;
+        match.toucher = striker;
+        match.lastTouch = striker;
+        match.possession = team;
+
+        ev = { striker, side, done: null, goal: false, dGoal: d };
+        // ПОЧЕМУ УДАРА НЕ БЫЛО — вопрос отдельный от «сколько раз бил».
+        // Такт решений вообще не запускается, пока мяч не у ноги (`canKick`),
+        // а спринтующий владелец толкает мяч вперёд — значит «не решил» может
+        // означать не «выбрал вести», а «его ни разу не спросили»
+        let framesCanKick = 0;
+        let framesOwn = 0;
+        for (let i = 0; i < limit && !ev.done; i += 1) {
+          stepOne(match, ball, goals);
+          const sp = striker.group.position;
+          ev.dGoal = Math.hypot(team.attackGoalX - sp.x, sp.z);
+          if (match.toucher === striker) {
+            framesOwn += 1;
+            const db = Math.hypot(ball.mesh.position.x - sp.x, ball.mesh.position.z - sp.z);
+            if (striker.kickCooldown <= 0 && db < CONFIG.player.kickRadius &&
+                ball.mesh.position.y < CONFIG.player.kickMaxBallY) framesCanKick += 1;
+          }
+          if (ball.goalScored) break;
+        }
+        ev.own = framesOwn;
+        ev.canKick = framesCanKick;
+        if (!ev.done) { ownF.push(framesOwn); kickF.push(framesCanKick); }
+        // Исход удара досматриваем ДО конца: гол, сейв вратаря или мимо.
+        // Без этого «удар 100 %» ничего не говорит — бить и забивать разные вещи
+        if (ev.done === 'удар') {
+          const s0 = match.stats.save[0] + match.stats.hold[0] + match.stats.parry[0] +
+            match.stats.save[1] + match.stats.hold[1] + match.stats.parry[1];
+          for (let i = 0; i < 150 && !ball.goalScored; i += 1) stepOne(match, ball, goals);
+          const s1 = match.stats.save[0] + match.stats.hold[0] + match.stats.parry[0] +
+            match.stats.save[1] + match.stats.hold[1] + match.stats.parry[1];
+          if (ball.goalScored) ev.goal = true;
+          else if (s1 > s0) saved_ += 1;
+          else wide_ += 1;
+        }
+        if (ev.goal || ball.goalScored) goals_ += 1;
+        if (!ev.done) tally['довёл сам'] += 1;
+        else { tally[ev.done] += 1; if (ev.done === 'удар') shotAt.push(ev.at); }
+      }
+      const pct = (n) => Math.round(n / reps * 100);
+      rows.push({
+        'до ворот, м': d,
+        'УДАР %': pct(tally['удар']),
+        'ПАС НАЗАД %': pct(tally['ПАС НАЗАД']),
+        'пас вперёд %': pct(tally['пас вперёд']),
+        'пас поперёк %': pct(tally['пас поперёк']),
+        'не решил %': pct(tally['довёл сам']),
+        'ГОЛ %': pct(goals_),
+        'взял вратарь %': pct(saved_),
+        'мимо %': pct(wide_),
+        'бил с, м': shotAt.length
+          ? +(shotAt.reduce((a, b) => a + b, 0) / shotAt.length).toFixed(1) : null,
+        // У НЕРЕШИВШИХ: сколько кадров мяч был его и сколько из них он мог бить
+        'владел кадров': ownF.length
+          ? Math.round(ownF.reduce((a, b) => a + b, 0) / ownF.length) : null,
+        'мог бить кадров': kickF.length
+          ? Math.round(kickF.reduce((a, b) => a + b, 0) / kickF.length) : null,
+      });
+    }
+  } finally {
+    PP.aiKick = origKick;
+    Object.assign(match, saved);
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  window.ONE = rows;
+  return rows;
+}
