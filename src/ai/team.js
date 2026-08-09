@@ -10,6 +10,7 @@ import {
 } from './steering.js';
 import { setPieces, spotToWorld } from '../setpieces.js';
 import { buildMods, buildStyle, NEUTRAL_MODS } from '../roles.js';
+import { buildFoeDefence, currentLevel } from '../difficulty.js';
 
 export class Team {
   // side: +1 — атакуем ворота на +X, −1 — на −X. players[0] — вратарь.
@@ -18,6 +19,13 @@ export class Team {
     this.side = side;
     this.data = data;
     this.players = players;
+    // НАДБАВКА СОПЕРНИКУ ЧЕЛОВЕКА (31.07.2026, см. шапку src/difficulty.js).
+    // Считается один раз здесь, как стиль и роли; ВЫБИРАЕТСЯ на лету геттером
+    // `defence` ниже — потому что кто именно играет против человека, известно
+    // только матчу и может смениться уже после конструктора (так делает
+    // автосимуляция, подменяя humanTeam пустышкой)
+    const lvl = currentLevel();
+    this._defFoe = buildFoeDefence(lvl && lvl.id);
     // СТИЛЬ КОМАНДЫ и РОЛИ ИГРОКОВ (ресёрч 21 §8). Считаются ОДИН раз здесь:
     // в кадре это чтение готовых множителей из p.mods, без единой аллокации.
     // В глобальный CONFIG не пишет ничего — он один на игру, а роли поигроцкие
@@ -149,6 +157,22 @@ export class Team {
     return -this.side * (CONFIG.field.length / 2);
   }
 
+  // ОБОРОННЫЕ ЧИСЛА ЭТОЙ КОМАНДЫ. Обычно это общий CONFIG.ai.defence; команда,
+  // против которой играет ЧЕЛОВЕК, получает надбавку уровня (см. шапку
+  // src/difficulty.js). Геттер, а не поле, ровно из-за автосимуляции: она
+  // подменяет `match.humanTeam` пустышкой уже после конструктора, и решение,
+  // принятое один раз при создании команды, молча выдало бы надбавку одной из
+  // двух AI-команд — а значит поехали бы все записанные эталоны AI против AI.
+  // Условие «команда человека — одна из ДВУХ играющих» у пустышки ложно,
+  // поэтому в симуляции надбавку не получает никто. Стоит это одно сравнение
+  // ссылок на такт решений, то есть нисколько
+  get defence() {
+    if (!this._defFoe) return CONFIG.ai.defence;
+    const human = this.match.humanTeam;
+    if (human === this || !human) return CONFIG.ai.defence;
+    return this.match.teams.includes(human) ? this._defFoe : CONFIG.ai.defence;
+  }
+
   update(dt, ball) {
     const AI = CONFIG.ai;
 
@@ -183,7 +207,7 @@ export class Team {
     // Линия защиты «дышит»: плавно едет к расчётной высоте (не телепорт) —
     // push up за мячом, drop off к своим воротам (ресёрч 09, lineSpeed)
     const lt = this.defLineTarget(ball);
-    const step = CONFIG.ai.defence.lineSpeed * dt;
+    const step = this.defence.lineSpeed * dt;
     const dl = lt - this.defLineX;
     this.defLineX += Math.abs(dl) < step ? dl : Math.sign(dl) * step;
 
@@ -955,7 +979,7 @@ export class Team {
   // бегут, никто не играет». Управляемый человеком тоже не входит — за него
   // решает Олег, и это заодно делает механику компьютерной по построению.
   onCrossDefend(ball, land) {
-    const G = CONFIG.ai.defence.aerialGuard;
+    const G = this.defence.aerialGuard;
     this.airGuards.clear();
     this.airGuardT = 0;
     if (!G || G.count <= 0 || !land) return;
@@ -1250,7 +1274,7 @@ export class Team {
   // но никогда не прижимается к ленточке (lineMinDepth). Лечит фидбек Олега
   // «защитники жмутся к линии ворот».
   defLineTarget(ball) {
-    const D = CONFIG.ai.defence;
+    const D = this.defence;
     const F = CONFIG.field;
     const bp = ball.mesh.position;
     // Продвижение мяча: 0 = у наших ворот, 1 = у чужих
@@ -1270,7 +1294,7 @@ export class Team {
   // Страхующий (cover): второй по близости к мячу полевой — встаёт за спиной
   // прессингующего под углом к центру, ловит обыгрыш и прострел
   pickCoverer(ball) {
-    const D = CONFIG.ai.defence;
+    const D = this.defence;
     let best = null;
     let bestD = Infinity;
     for (const p of this.fieldPlayers) {
@@ -1292,7 +1316,7 @@ export class Team {
   // свободные защитники разбирают ближних к нашим воротам соперников.
   // Дальше своей трети — чистая зона (линия), как Mark Zone в PES.
   updateMarks(ball) {
-    const D = CONFIG.ai.defence;
+    const D = this.defence;
     const F = CONFIG.field;
     // Прежний разбор снимаем ДО очистки: при досрочном выходе (мы в атаке, мяч
     // ещё далеко) карта обязана обнулиться вместе с самой опекой, иначе через
@@ -1351,7 +1375,7 @@ export class Team {
   // Ровно поэтому поднятая линия обороны без этого прохода = тир.
   // Пишем в ту же карту marks — исполнение в fieldplayer.js не меняется.
   trackRunners() {
-    const T = CONFIG.ai.defence.track;
+    const T = this.defence.track;
     if (this.attacking) return;
     const gx = this.ownGoalX;
     const opp = this.match.otherTeam(this);
@@ -1411,7 +1435,7 @@ export class Team {
   // ближнего). Вратарь гонится только по своей логике (goalkeeper.js).
   pickChaser(ball) {
     if (this.match.state === 'restart') return null; // мёртвый мяч не догоняют
-    const D = CONFIG.ai.defence;
+    const D = this.defence;
     const bp = ball.mesh.position;
     const gx = this.ownGoalX;
     let best = null;
@@ -1504,7 +1528,7 @@ export class Team {
   homeTarget(p, ball) {
     const F = CONFIG.field;
     const AI = CONFIG.ai;
-    const D = AI.defence;
+    const D = this.defence;
     const base = CONFIG.formation.roles[p.homeIdx];
     const bp = ball.mesh.position;
 

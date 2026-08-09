@@ -394,3 +394,144 @@ export async function traceOne(opts = {}) {
   window.VTRACE = trace;
   return trace;
 }
+
+// РАЗБРОС ПРИЦЕЛА ПО ВРЕМЕНИ УДЕРЖАНИЯ (31.07.2026, фидбек Олега: «легко
+// выигрываю второй этаж, если долго зажимаю кнопку удара; надо, чтобы при
+// передержке мяч летел не так точно, как при идеальном тайминге»).
+//
+// ЧЕМ ОТЛИЧАЕТСЯ ОТ pressGrid. Та сетка делает ОДИН повтор на ячейку и
+// отвечает на вопрос «состоялся ли удар». Точность одним повтором не мерится
+// вовсе: прицел шумит случайно, и один бросок кубика не говорит ничего.
+// Здесь на каждое время удержания идёт N повторов, и печатается РАСПРЕДЕЛЕНИЕ
+// точки пересечения плоскости ворот: медиана |z|, разброс, доля в створе.
+//
+// Мерить надо ТОЧКУ НА ЛИНИИ ВОРОТ, а не угол вылета: створ — это метры, и
+// «шум 3 градуса» с 12 м и с 30 м это два разных промаха. Вратарь из замера
+// убран (он уносится на фланг вместе со всеми), иначе меряется не прицел, а
+// сейв — ровно та грабля, из-за которой в проекте уже путали причины.
+export async function aimSpread(opts = {}) {
+  const holds = opts.hold || [0.05, 0.20, 0.40, 0.70, 1.00];
+  const reps = opts.reps || 24;
+  const press = opts.press != null ? opts.press : 1.2;
+  const key = opts.key || 'KeyD';
+  const { match, ball, goals, input, CONFIG } = window.DBG;
+
+  const origRAF = window.requestAnimationFrame.bind(window);
+  let pending = null;
+  window.requestAnimationFrame = (cb) => { pending = cb; return 0; };
+  const saved = {
+    startIntro: match.startIntro,
+    startReplay: match.startReplay,
+    onGoal: match.onGoal,
+    humanTeam: match.humanTeam,
+    controlled: match.controlled,
+  };
+  const PP = Object.getPrototypeOf(match.teams[0].players[1]);
+  const origShoot = PP.shoot;
+  let ev = null;
+
+  match.startIntro = function () { this.state = 'play'; };
+  match.startReplay = function () { return false; };
+  match.onGoal = function () {};
+  PP.shoot = function (...args) {
+    const r = origShoot.apply(this, args);
+    if (ev && this === ev.striker && ev.shots === 0) {
+      ev.shots += 1;
+      ev.charge = args[0];
+    }
+    return r;
+  };
+
+  const rows = [];
+  try {
+    for (const hold of holds) {
+      const zs = [];
+      const speeds = [];
+      const charges = [];
+      let shots = 0;
+      let onT = 0;
+      for (let r = 0; r < reps; r += 1) {
+        match.state = 'play';
+        ball.reset();
+        ball.goalScored = false;
+        input.keys.clear();
+        const S = setup(match, ball, CONFIG, 'striker');
+        // Вратаря соперника уводим совсем: меряем ПРИЦЕЛ, а не сейв
+        const gk = match.teams[1].players[0];
+        gk.reset(-S.goalSign * 45, 30, 0);
+        for (let i = 0; i < 12; i += 1) stepFrame(match, ball, goals, input);
+
+        serve(ball, CONFIG, S.from, S.target, 1.3);
+        ev = { striker: S.striker, shots: 0, charge: null };
+        const flight = timeToReach(ball, S.striker, CONFIG) || 1.6;
+
+        let t = 0;
+        let held = false;
+        let heldLeft = 0;
+        let out = null;
+        let at = null;
+        for (let i = 0; i < 200; i += 1) {
+          if (!held && ev.shots === 0 && flight - t <= press) {
+            input.keys.add(key);
+            held = true;
+            heldLeft = hold;
+          } else if (held && heldLeft > 0) {
+            heldLeft -= FRAME;
+            if (heldLeft <= 0) input.keys.delete(key);
+          }
+          const was = ev.shots;
+          stepFrame(match, ball, goals, input);
+          t += FRAME;
+          if (was === 0 && ev.shots > 0) {
+            out = { x: ball.vel.x, y: ball.vel.y, z: ball.vel.z };
+            at = { x: ball.mesh.position.x, y: ball.mesh.position.y, z: ball.mesh.position.z };
+          }
+          if (ball.goalScored || t > flight + 1.6) break;
+        }
+        input.keys.delete(key);
+        if (!out) continue;
+        shots += 1;
+        charges.push(ev.charge);
+        speeds.push(Math.hypot(out.x, out.y, out.z));
+        // Куда мяч пересечёт плоскость ворот. Баллистика без drag: до линии
+        // 10–14 м, и поправка там меньше сантиметра — а вот ЗНАК и величина
+        // отклонения по z нужны точные
+        const goalX = S.goalSign * CONFIG.field.length / 2;
+        const dxg = goalX - at.x;
+        if (Math.abs(out.x) < 0.1 || Math.sign(dxg) !== Math.sign(out.x)) continue;
+        const k = dxg / out.x;
+        const zAt = at.z + out.z * k;
+        const yAt = at.y + out.y * k + 0.5 * CONFIG.ball.gravity * k * k;
+        zs.push(zAt);
+        if (Math.abs(zAt) < CONFIG.goal.width / 2 && yAt > 0 && yAt < CONFIG.goal.height) onT += 1;
+      }
+      const abs = zs.map(Math.abs).sort((a, b) => a - b);
+      const mean = zs.length ? zs.reduce((a, b) => a + b, 0) / zs.length : null;
+      const sd = zs.length > 1
+        ? Math.sqrt(zs.reduce((a, b) => a + (b - mean) ** 2, 0) / (zs.length - 1)) : null;
+      rows.push({
+        'держал, с': hold,
+        'ударов': shots + '/' + reps,
+        'заряд': charges.length
+          ? +(charges.reduce((a, b) => a + b, 0) / charges.length).toFixed(2) : null,
+        'скорость': speeds.length
+          ? +(speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1) : null,
+        '|z| медиана, м': abs.length ? +abs[Math.floor(abs.length / 2)].toFixed(2) : null,
+        '|z| макс, м': abs.length ? +abs[abs.length - 1].toFixed(2) : null,
+        'разброс σ, м': sd != null ? +sd.toFixed(2) : null,
+        'в створ, %': zs.length ? Math.round(onT / zs.length * 100) : null,
+      });
+    }
+  } finally {
+    PP.shoot = origShoot;
+    Object.assign(match, saved);
+    input.keys.clear();
+    window.requestAnimationFrame = origRAF;
+    if (pending) origRAF(pending);
+    ball.reset();
+    match.kickoff(0);
+  }
+  console.table(rows);
+  window.VSPREAD = rows;
+  return rows;
+}
